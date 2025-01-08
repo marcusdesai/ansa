@@ -201,7 +201,7 @@ where
         fence(Ordering::Acquire);
         // Begin reading a batch of events from the buffer.
         let batch_end = consumer_seq + size;
-        for seq in consumer_seq..=batch_end {
+        for seq in consumer_seq + 1..=batch_end {
             // SAFETY:
             // 1) The mutable pointer to the event is immediately converted to an immutable ref,
             //    ensuring multiple mutable refs do not exist.
