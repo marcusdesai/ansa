@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -106,7 +105,7 @@ pub struct WaitPhased<W> {
     spin_duration: Duration,
     yield_duration: Duration,
     fallback: W,
-    timer: RefCell<Option<Instant>>,
+    timer: Mutex<Option<Instant>>,
     fallback_called: AtomicBool,
 }
 
@@ -119,7 +118,7 @@ where
             spin_duration,
             yield_duration: spin_duration + yield_duration,
             fallback,
-            timer: RefCell::new(None),
+            timer: Mutex::new(None),
             fallback_called: AtomicBool::new(false),
         }
     }
@@ -131,7 +130,8 @@ where
 {
     #[inline]
     fn wait(&self) {
-        let mut opt_timer = self.timer.borrow_mut();
+        // unwrap fine as the lock won't ever be called twice by the same thread
+        let mut opt_timer = self.timer.lock().unwrap();
         let timer = opt_timer.get_or_insert_with(Instant::now);
         match timer.elapsed() {
             dur if dur < self.spin_duration => (),
@@ -149,6 +149,7 @@ where
         if fallback_was_called {
             self.fallback.finalise();
         }
-        self.timer.replace(None);
+        // unwrap fine as the lock won't ever be called twice by the same thread
+        self.timer.lock().unwrap().take();
     }
 }

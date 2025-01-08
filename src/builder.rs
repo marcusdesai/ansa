@@ -4,7 +4,6 @@ use crate::wait::{WaitBlocking, WaitStrategy};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
-use std::ops::Deref;
 use std::sync::Arc;
 
 pub struct DisruptorBuilder<E, WF, W> {
@@ -75,7 +74,7 @@ where
         }
     }
 
-    pub fn build_single_producer(self) -> (SingleProducer<E, W>, Vec<IdentifiedConsumer<E, W>>) {
+    pub fn build_single_producer(self) -> (SingleProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
         let producer_cursor = Arc::new(Cursor::new());
         let (consumers, cursor_map) = self.construct_consumers(&producer_cursor);
         let barrier = self.construct_producer_barrier(cursor_map);
@@ -91,7 +90,7 @@ where
         (producer, consumers)
     }
 
-    pub fn build_multi_producer(self) -> (MultiProducer<E, W>, Vec<IdentifiedConsumer<E, W>>) {
+    pub fn build_multi_producer(self) -> (MultiProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
         let producer_cursor = Arc::new(Cursor::new());
         let (consumers, cursor_map) = self.construct_consumers(&producer_cursor);
         let barrier = self.construct_producer_barrier(cursor_map);
@@ -127,7 +126,7 @@ where
     fn construct_consumers(
         &self,
         producer_cursor: &Arc<Cursor>,
-    ) -> (Vec<IdentifiedConsumer<E, W>>, UsizeMap<Arc<Cursor>>) {
+    ) -> (HashMap<usize, Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
         if self.follows.is_empty() {
             panic!("No consumers registered")
         }
@@ -136,7 +135,7 @@ where
             panic!("Cycle found for consumer id: {}", cyclic_id);
         }
 
-        let mut consumers = Vec::new();
+        let mut consumers = HashMap::default();
         let mut cursor_map: UsizeMap<Arc<Cursor>> = UsizeMap::default();
 
         fn get_cursor(id: usize, map: &mut UsizeMap<Arc<Cursor>>) -> Arc<Cursor> {
@@ -182,9 +181,7 @@ where
                 wait_strategy: (self.wait_factory)(),
             };
 
-            let id_consumer = IdentifiedConsumer { id, consumer };
-
-            consumers.push(id_consumer)
+            consumers.insert(id, consumer);
         }
 
         (consumers, cursor_map)
@@ -236,33 +233,6 @@ pub enum Follows {
     Producer,
     Consumer(usize),
     Consumers(Vec<usize>),
-}
-
-#[derive(Debug)]
-pub struct IdentifiedConsumer<E, W> {
-    id: usize,
-    consumer: Consumer<E, W>,
-}
-
-impl<E, W> IdentifiedConsumer<E, W> {
-    /// Returns the `id` of this consumer.
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Returns the underlying [`Consumer`], consuming this struct.
-    pub fn into_inner(self) -> Consumer<E, W> {
-        self.consumer
-    }
-}
-
-impl<E, W> Deref for IdentifiedConsumer<E, W> {
-    type Target = Consumer<E, W>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.consumer
-    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
