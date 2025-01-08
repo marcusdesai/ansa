@@ -307,7 +307,6 @@ fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wait::WaitBusy;
     use rand::{thread_rng, Rng};
 
     #[test]
@@ -325,72 +324,5 @@ mod tests {
 
         let prod_seq = rng.gen_range(100..i64::MAX / 2);
         assert_eq!(producer_barrier_delta(16, prod_seq, prod_seq - 16), 0);
-    }
-
-    #[test]
-    fn test_multi_producer_no_deadlock() {
-        let size = 512;
-        let rb = Arc::new(RingBuffer::new(size, || 0i64));
-        let producer_cursor = Arc::new(Cursor::new());
-        let consumer_cursor = Arc::new(Cursor::new());
-
-        let consumer = Consumer {
-            cursor: Arc::clone(&consumer_cursor),
-            barrier: Barrier::One(Arc::clone(&producer_cursor)),
-            buffer: Arc::clone(&rb),
-            wait_strategy: WaitBusy,
-        };
-
-        let multi_1 = MultiProducer {
-            cursor: Arc::clone(&producer_cursor),
-            barrier: Barrier::One(Arc::clone(&consumer_cursor)),
-            buffer: Arc::clone(&rb),
-            claim: Arc::new(Cursor::new()),
-            barrier_seq: 0,
-            wait_strategy: WaitBusy,
-        };
-        let multi_2 = multi_1.clone();
-        let multi_3 = multi_1.clone();
-
-        let sync_barrier = Arc::new(std::sync::Barrier::new(4));
-        let done = Arc::new(AtomicI64::new(0));
-        let mut result = vec![0i64; size];
-        let publish_amount = 100;
-
-        std::thread::scope(|s| {
-            for mut producer in [multi_1, multi_2, multi_3] {
-                let sb = Arc::clone(&sync_barrier);
-                let dc = Arc::clone(&done);
-                s.spawn(move || {
-                    sb.wait();
-                    let mut counter = 0;
-                    while counter < 2 {
-                        counter += 1;
-                        producer.batch_write(publish_amount / 2, |i, seq, _| *i = seq);
-                    }
-                    dc.fetch_add(1, Ordering::Relaxed);
-                });
-            }
-
-            let out = &mut result;
-            s.spawn(move || {
-                sync_barrier.wait();
-                let mut counter = 0;
-                while counter != publish_amount * 3 {
-                    consumer.read(|i, seq, _| {
-                        counter += 1;
-                        out[seq as usize] = *i;
-                    })
-                }
-            });
-        });
-
-        assert_eq!(done.load(Ordering::Relaxed), 3);
-
-        let mut expected = vec![0i64; size];
-        for i in 0..=publish_amount * 3 {
-            expected[i as usize] = i as i64
-        }
-        assert_eq!(result, expected);
     }
 }

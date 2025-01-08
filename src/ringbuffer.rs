@@ -88,12 +88,14 @@ mod tests {
     use rand::{thread_rng, Rng};
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     #[should_panic(expected = "RingBuffer size must be a non-zero power of 2; given size: 0")]
     fn test_ring_buffer_zero_size_panic() {
         RingBuffer::new(0, || 0);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     #[should_panic(expected = "RingBuffer size must be a non-zero power of 2; given size: 12")]
     fn test_ring_buffer_non_po2_size_panic() {
         RingBuffer::new(12, || 0);

@@ -9,11 +9,10 @@ pub use wait::*;
 
 #[cfg(test)]
 mod tests {
-    use crate::{DisruptorBuilder, Follows, WaitBusyHint, WaitPhased, WaitYield};
+    use crate::{DisruptorBuilder, Follows, WaitBusy, WaitBusyHint, WaitPhased, WaitYield};
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-
     // Integration tests
 
     #[test]
@@ -56,7 +55,62 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_dag() {
+    fn test_multi_producer() {
+        let size = 512;
+        let (multi_1, mut consumers) = DisruptorBuilder::new(size, || 0i64)
+            .add_consumer(0, Follows::Producer)
+            .wait_strategy(|| WaitBusy)
+            .build_multi_producer();
+
+        let multi_2 = multi_1.clone();
+        let multi_3 = multi_1.clone();
+
+        let consumer = consumers.remove(&0).unwrap();
+
+        let sync_barrier = Arc::new(std::sync::Barrier::new(4));
+        let done = Arc::new(AtomicI64::new(0));
+        let mut result = vec![0i64; size];
+        let publish_amount = 100;
+
+        std::thread::scope(|s| {
+            for mut producer in [multi_1, multi_2, multi_3] {
+                let sb = Arc::clone(&sync_barrier);
+                let dc = Arc::clone(&done);
+                s.spawn(move || {
+                    sb.wait();
+                    let mut counter = 0;
+                    while counter < 2 {
+                        counter += 1;
+                        producer.batch_write(publish_amount / 2, |i, seq, _| *i = seq);
+                    }
+                    dc.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            let out = &mut result;
+            s.spawn(move || {
+                sync_barrier.wait();
+                let mut counter = 0;
+                while counter != publish_amount * 3 {
+                    consumer.read(|i, seq, _| {
+                        counter += 1;
+                        out[seq as usize] = *i;
+                    })
+                }
+            });
+        });
+
+        assert_eq!(done.load(Ordering::Relaxed), 3);
+
+        let mut expected = vec![0i64; size];
+        for i in 0..=publish_amount * 3 {
+            expected[i as usize] = i as i64
+        }
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_complex_consumer_dag() {
         #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
         struct Event {
             consumer_break: bool,
@@ -77,7 +131,7 @@ mod tests {
         let consumer_1_seq_increment_counter = Arc::new(AtomicI64::new(0));
         // counter for how many times consumer 2's read func is called, should == seq
         let consumer_2_call_counter = Arc::new(AtomicI64::new(0));
-        // remains true while consumer 3 reads that the above 2 counters are >= seq that it sees
+        // remains true while consumer 3 reads that the above 2 counters are >= seq value it sees
         let mut consumer_3_check_flag = true;
 
         let num_of_events = 300;

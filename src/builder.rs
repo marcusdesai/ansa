@@ -123,6 +123,7 @@ where
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn construct_consumers(
         &self,
         producer_cursor: &Arc<Cursor>,
