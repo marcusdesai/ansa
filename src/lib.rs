@@ -9,7 +9,7 @@ pub use wait::*;
 
 #[cfg(test)]
 mod tests {
-    use crate::{DisruptorBuilder, Follows, WaitBusy, WaitBusyHint, WaitPhased, WaitYield};
+    use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -20,7 +20,7 @@ mod tests {
         let (mut producer, consumers) = DisruptorBuilder::new(64, || 0i64)
             .add_consumer(0, Follows::Producer)
             .wait_strategy(|| {
-                WaitPhased::new(Duration::new(1, 0), Duration::new(1, 0), WaitBusyHint)
+                WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
             })
             .build_single_producer();
 
@@ -157,9 +157,7 @@ mod tests {
                 while should_continue {
                     consumer_0.read(|event, _, _| {
                         out.push(*event);
-                        if event.consumer_break {
-                            should_continue = false;
-                        }
+                        should_continue = !event.consumer_break;
                     });
                 }
             });
@@ -173,9 +171,7 @@ mod tests {
                         if event.seq == seq {
                             c1_counter.fetch_add(1, Ordering::Relaxed);
                         }
-                        if event.consumer_break {
-                            should_continue = false;
-                        }
+                        should_continue = !event.consumer_break;
                     })
                 }
             });
@@ -187,9 +183,7 @@ mod tests {
                 while should_continue {
                     consumer_2.read(|event, _, _| {
                         c2_counter.fetch_add(1, Ordering::Relaxed);
-                        if event.consumer_break {
-                            should_continue = false;
-                        }
+                        should_continue = !event.consumer_break;
                     })
                 }
             });
@@ -230,5 +224,60 @@ mod tests {
             num_of_events
         );
         assert!(consumer_3_check_flag)
+    }
+
+    #[test]
+    fn test_wait_blocking() {
+        let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
+            .add_consumer(0, Follows::Producer)
+            .add_consumer(1, Follows::Consumer(0))
+            .wait_strategy(|| WaitBlocking::new(Duration::from_micros(20)))
+            .build_single_producer();
+
+        let consumer_0 = consumers.remove(&0).unwrap();
+        let consumer_1 = consumers.remove(&1).unwrap();
+
+        let num_of_events = 100;
+        let c0_counter = Arc::new(AtomicI64::new(0));
+        let c1_counter = Arc::new(AtomicI64::new(0));
+
+        std::thread::spawn(move || {
+            let mut counter = 0;
+            while counter < num_of_events {
+                producer.batch_write(10, |i, seq, _| {
+                    counter += 1;
+                    *i = seq;
+                });
+                // add some time just to make sure the consumers end up waiting
+                std::thread::sleep(Duration::from_micros(10));
+            }
+        });
+
+        let c0_out = Arc::clone(&c0_counter);
+        std::thread::spawn(move || {
+            let mut should_continue = true;
+            while should_continue {
+                consumer_0.read(|_, seq, _| {
+                    c0_out.fetch_add(1, Ordering::Relaxed);
+                    should_continue = seq < num_of_events;
+                });
+            }
+        });
+
+        let c1_out = Arc::clone(&c1_counter);
+        let join_c1 = std::thread::spawn(move || {
+            let mut should_continue = true;
+            while should_continue {
+                consumer_1.batch_read(5, |_, seq, _| {
+                    c1_out.fetch_add(1, Ordering::Relaxed);
+                    should_continue = seq < num_of_events;
+                });
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(join_c1.is_finished()); // fail if timeout, usually indicates deadlock
+        assert_eq!(c0_counter.load(Ordering::Relaxed), num_of_events);
+        assert_eq!(c1_counter.load(Ordering::Relaxed), num_of_events);
     }
 }

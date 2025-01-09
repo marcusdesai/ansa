@@ -1,6 +1,7 @@
 use crate::handles::{Barrier, Consumer, Cursor, MultiProducer, SingleProducer};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::{WaitBlocking, WaitStrategy};
+use crate::wait::WaitStrategy;
+use crate::WaitBusy;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 pub struct DisruptorBuilder<E, WF, W> {
     buffer: Arc<RingBuffer<E>>,
-    // factory function for building instances of the wait strategy, defaults to WaitBlocking
+    // factory function for building instances of the wait strategy, defaults to WaitBusy
     wait_factory: WF,
     // Maps ids of consumers in a "followed by" relationship. For example, the pair  (3, [5, 7])
     // indicates that the consumer with id 3 is followed by the consumers with ids 5 and 7.
@@ -19,7 +20,7 @@ pub struct DisruptorBuilder<E, WF, W> {
 }
 
 // Separate impl block for `new` so that a default type for wait factory can be provided
-impl<E> DisruptorBuilder<E, fn() -> WaitBlocking, WaitBlocking> {
+impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
     pub fn new<F>(size: usize, element_factory: F) -> Self
     where
         E: Sync,
@@ -27,7 +28,7 @@ impl<E> DisruptorBuilder<E, fn() -> WaitBlocking, WaitBlocking> {
     {
         DisruptorBuilder {
             buffer: Arc::new(RingBuffer::new(size, element_factory)),
-            wait_factory: WaitBlocking::new,
+            wait_factory: || WaitBusy,
             followed_by: UsizeMap::default(),
             follows: UsizeMap::default(),
             wait_type: PhantomData,

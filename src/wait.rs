@@ -68,18 +68,23 @@ impl WaitStrategy for WaitSleep {
 
 #[derive(Clone)]
 pub struct WaitBlocking {
-    condvar: Arc<Condvar>,
+    pair: Arc<(Condvar, Mutex<Empty>)>,
+    duration: Duration,
 }
 
+struct Empty;
+
 // All producers and consumers share the same condvar
-static BLOCK_VAR: LazyLock<Arc<Condvar>> = LazyLock::new(|| Arc::new(Condvar::new()));
+static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
+    LazyLock::new(|| Arc::new((Condvar::new(), Mutex::new(Empty))));
 
 impl WaitBlocking {
     #[allow(clippy::new_without_default)]
     #[inline]
-    pub fn new() -> Self {
+    pub fn new(duration: Duration) -> Self {
         WaitBlocking {
-            condvar: Arc::clone(&BLOCK_VAR),
+            pair: Arc::clone(&BLOCK_VAR),
+            duration,
         }
     }
 }
@@ -87,17 +92,18 @@ impl WaitBlocking {
 impl WaitStrategy for WaitBlocking {
     #[inline]
     fn wait(&self) {
+        let (condvar, mutex) = &*self.pair;
         // We don't need the mutex to do any work, so just make a new one on every call. This also
         // makes the unwrap okay, because no thread will attempt to lock twice, so we'll never get
         // an error from the call to `lock`.
-        let mutex = Mutex::new(());
-        let _unused = self.condvar.wait(mutex.lock().unwrap());
+        let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.duration);
     }
 
     #[inline]
     fn finalise(&self) {
+        let (condvar, _) = &*self.pair;
         // waking everything allows the implementation to remain unaware of producers and consumers
-        self.condvar.notify_all()
+        condvar.notify_all()
     }
 }
 
