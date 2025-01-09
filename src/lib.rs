@@ -231,7 +231,7 @@ mod tests {
         let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
             .add_consumer(0, Follows::Producer)
             .add_consumer(1, Follows::Consumer(0))
-            .wait_strategy(|| WaitBlocking::new(Duration::from_micros(20)))
+            .wait_strategy(WaitBlocking::new)
             .build_single_producer();
 
         let consumer_0 = consumers.remove(&0).unwrap();

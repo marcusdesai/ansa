@@ -81,10 +81,18 @@ static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
 impl WaitBlocking {
     #[allow(clippy::new_without_default)]
     #[inline]
-    pub fn new(duration: Duration) -> Self {
+    pub fn new() -> Self {
         WaitBlocking {
             pair: Arc::clone(&BLOCK_VAR),
-            duration,
+            duration: Duration::from_micros(10),
+        }
+    }
+
+    #[inline]
+    pub fn with_timeout(duration: Duration) -> Self {
+        WaitBlocking {
+            pair: Arc::clone(&BLOCK_VAR),
+            duration
         }
     }
 }
