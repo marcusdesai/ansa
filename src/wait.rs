@@ -159,3 +159,21 @@ where
         self.timer.lock().unwrap().take();
     }
 }
+
+pub struct WaitPark {
+    duration: Duration,
+}
+
+impl WaitPark {
+    #[inline]
+    pub fn new(duration: Duration) -> Self {
+        WaitPark { duration }
+    }
+}
+
+impl WaitStrategy for WaitPark {
+    #[inline]
+    fn wait(&self) {
+        std::thread::park_timeout(self.duration)
+    }
+}
