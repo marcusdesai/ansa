@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn test_producer_barrier_delta() {
         let mut rng = thread_rng();
-        // ring size - (producer sequence - barrier sequence)
+        // calculation should match buffer size - (producer sequence - barrier sequence)
         let prod_seq = rng.gen_range(100..i64::MAX / 2);
         assert_eq!(producer_barrier_delta(16, prod_seq, prod_seq - 20), -4);
 

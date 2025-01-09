@@ -13,7 +13,7 @@ pub trait WaitStrategy {
 
 /// A Pure busy-spin strategy which offers the lowest wait latency at the cost of increased
 /// processor use.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct WaitBusy;
 
 impl WaitStrategy for WaitBusy {
@@ -25,7 +25,7 @@ impl WaitStrategy for WaitBusy {
 
 /// A busy-spin strategy which optimises processor use (see [`spin_loop`](std::hint::spin_loop) docs
 /// for details) at the cost of latency.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct WaitBusyHint;
 
 impl WaitStrategy for WaitBusyHint {
@@ -35,7 +35,7 @@ impl WaitStrategy for WaitBusyHint {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct WaitYield;
 
 impl WaitStrategy for WaitYield {
@@ -45,7 +45,7 @@ impl WaitStrategy for WaitYield {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct WaitSleep {
     duration: Duration,
 }
@@ -66,12 +66,13 @@ impl WaitStrategy for WaitSleep {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WaitBlocking {
     pair: Arc<(Condvar, Mutex<Empty>)>,
     duration: Duration,
 }
 
+#[derive(Copy, Clone, Debug)]
 struct Empty;
 
 // All producers and consumers share the same condvar
@@ -84,7 +85,7 @@ impl WaitBlocking {
     pub fn new() -> Self {
         WaitBlocking {
             pair: Arc::clone(&BLOCK_VAR),
-            duration: Duration::from_micros(10),
+            duration: Duration::from_micros(20),
         }
     }
 
@@ -92,7 +93,7 @@ impl WaitBlocking {
     pub fn with_timeout(duration: Duration) -> Self {
         WaitBlocking {
             pair: Arc::clone(&BLOCK_VAR),
-            duration
+            duration,
         }
     }
 }
@@ -168,6 +169,7 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct WaitPark {
     duration: Duration,
 }

@@ -227,6 +227,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // miri spuriously fails this test
     fn test_wait_blocking() {
         let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
             .add_consumer(0, Follows::Producer)
