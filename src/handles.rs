@@ -4,7 +4,7 @@ use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct MultiProducer<E, W> {
+pub struct MultiProducer<E, W, const LEAD: bool = true> {
     pub(crate) cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
     pub(crate) barrier: Barrier,    // This must be made up of the last consumer cursors.
     pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
@@ -13,7 +13,7 @@ pub struct MultiProducer<E, W> {
     pub(crate) wait_strategy: W,
 }
 
-impl<E, W> MultiProducer<E, W>
+impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
@@ -38,11 +38,14 @@ where
             current_claim = new_current;
             claim_end = new_current + size;
         }
+        // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
+        // which we can do by passing 0 as the buffer length.
+        let buf_len = if LEAD { self.buffer.len() } else { 0 };
         // Wait for the last consumer barrier to move past the end of the claim. This calculation
         // utilises the constraint that `claim_end` >= `self.barrier_seq`. Note that, because
         // `claim_end` does not represent the position of the producer cursor, it is allowed to
         // hold a value greater than the position of the last consumer cursor on the ring buffer.
-        while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
+        while producer_barrier_delta(buf_len, claim_end, self.barrier_seq) < 0 {
             self.wait_strategy.wait();
             self.barrier_seq = self.barrier.sequence();
         }
@@ -76,7 +79,7 @@ where
     }
 }
 
-impl<E, W> Clone for MultiProducer<E, W>
+impl<E, W, const LEAD: bool> Clone for MultiProducer<E, W, LEAD>
 where
     W: Clone,
 {
@@ -92,7 +95,7 @@ where
     }
 }
 
-impl<E, W> Drop for MultiProducer<E, W> {
+impl<E, W, const LEAD: bool> Drop for MultiProducer<E, W, LEAD> {
     fn drop(&mut self) {
         // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s this
         // producer holds to guarantee this.
@@ -101,7 +104,7 @@ impl<E, W> Drop for MultiProducer<E, W> {
 }
 
 #[derive(Debug)]
-pub struct SingleProducer<E, W> {
+pub struct SingleProducer<E, W, const LEAD: bool = true> {
     pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
     pub(crate) barrier: Barrier,    // This must be the last consumer cursors.
     pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
@@ -109,7 +112,7 @@ pub struct SingleProducer<E, W> {
     pub(crate) wait_strategy: W,
 }
 
-impl<E, W> SingleProducer<E, W>
+impl<E, W, const LEAD: bool> SingleProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
@@ -132,7 +135,10 @@ where
                 "Producer cursor sequence must never be behind of its barrier sequence.\nFound \
                 producer seq: {producer_seq}, and barrier seq: {barrier_seq}"
             );
-            self.free_slots = producer_barrier_delta(self.buffer.len(), producer_seq, barrier_seq);
+            // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
+            // which we can do by passing 0 as the buffer length.
+            let buf_len = if LEAD { self.buffer.len() } else { 0 };
+            self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
         }
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
         // accept `AcqRel`, so use a fence to make the pair.
@@ -155,7 +161,7 @@ where
     }
 }
 
-impl<E, W> Drop for SingleProducer<E, W> {
+impl<E, W, const LEAD: bool> Drop for SingleProducer<E, W, LEAD> {
     fn drop(&mut self) {
         // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s this
         // producer holds to guarantee this.
@@ -292,14 +298,20 @@ impl Barrier {
 /// buffer. Negative values represent the producer sequence being ahead of the barrier by the
 /// returned amount.
 ///
-/// This calculation utilises the constraint that 0 <= barrier sequence <= producer sequence.
-/// Callers must ensure that this constraint always holds.
+/// This calculation utilises the constraint that `0 <= barrier_seq <= producer_seq`. Callers must
+/// ensure that this constraint always holds.
+///
+/// This function can also be used to calculate `barrier_seq - producer_seq` by simply passing `0`
+/// as the `buffer_size`. To use the function in this way, it must be the case that
+/// `barrier_seq >= producer_seq`.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
     assert!(
-        0 <= barrier_seq && barrier_seq <= producer_seq,
-        "Requires that 0 <= barrier sequence <= producer sequence.\n\
-        Found producer seq: {producer_seq}, and barrier seq: {barrier_seq}",
+        0 <= barrier_seq && barrier_seq <= producer_seq
+            || buffer_size == 0 && barrier_seq >= producer_seq,
+        "Requires either that 0 <= barrier_seq <= producer_seq.\n\
+        Or buffer_size == 0 and barrier_seq >= producer_seq \n\
+        Found buffer_size: {buffer_size} producer_seq: {producer_seq}, barrier_seq: {barrier_seq}",
     );
     buffer_size as i64 - (producer_seq - barrier_seq)
 }
@@ -308,6 +320,17 @@ fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i6
 mod tests {
     use super::*;
     use rand::{thread_rng, Rng};
+
+    #[test]
+    fn test_producer_barrier_delta_zero_buffer_size() {
+        let mut rng = thread_rng();
+        for _ in 0..100 {
+            let p_seq = rng.gen_range(100..i64::MAX / 2);
+            let b_seq = rng.gen_range(p_seq..i64::MAX / 2);
+
+            assert_eq!(b_seq - p_seq, producer_barrier_delta(0, p_seq, b_seq))
+        }
+    }
 
     #[test]
     fn test_producer_barrier_delta() {

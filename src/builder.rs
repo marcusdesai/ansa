@@ -209,8 +209,8 @@ fn find_cycle(graph: &UsizeMap<Vec<usize>>) -> Option<usize> {
         }
         visiting.insert(node);
         // unwrap okay as we'll only use `find_cycle` when `node` is guaranteed to be in `graph`
-        for neighbour in graph.get(&node).unwrap().iter() {
-            if let cycle @ Some(_) = visit(*neighbour, visiting, visited, graph) {
+        for child in graph.get(&node).unwrap().iter() {
+            if let cycle @ Some(_) = visit(*child, visiting, visited, graph) {
                 return cycle;
             }
         }
