@@ -1,7 +1,6 @@
 use crate::handles::{Barrier, Consumer, Cursor, MultiProducer, SingleProducer};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::WaitStrategy;
-use crate::WaitBusy;
+use crate::wait::{WaitBusy, WaitStrategy};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;

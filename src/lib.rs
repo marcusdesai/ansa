@@ -1,18 +1,18 @@
 mod builder;
 mod handles;
 mod ringbuffer;
-mod wait;
+pub mod wait;
 
 pub use builder::*;
 pub use handles::*;
-pub use wait::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wait::*;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     // Integration tests
 
     #[test]
@@ -109,6 +109,7 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    // requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
     #[test]
     fn test_complex_consumer_dag() {
         #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -227,7 +228,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // miri spuriously fails this test
     fn test_wait_blocking() {
         let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
             .add_consumer(0, Follows::Producer)
@@ -242,7 +242,7 @@ mod tests {
         let c0_counter = Arc::new(AtomicI64::new(0));
         let c1_counter = Arc::new(AtomicI64::new(0));
 
-        std::thread::spawn(move || {
+        let join_p = std::thread::spawn(move || {
             let mut counter = 0;
             while counter < num_of_events {
                 producer.batch_write(10, |i, seq, _| {
@@ -255,11 +255,12 @@ mod tests {
         });
 
         let c0_out = Arc::clone(&c0_counter);
-        std::thread::spawn(move || {
+        let join_c0 = std::thread::spawn(move || {
             let mut should_continue = true;
             while should_continue {
                 consumer_0.read(|_, seq, _| {
-                    c0_out.fetch_add(1, Ordering::Relaxed);
+                    let prev = c0_out.fetch_add(1, Ordering::Relaxed);
+                    println!("c0 {}; out {}", seq, prev + 1);
                     should_continue = seq < num_of_events;
                 });
             }
@@ -270,14 +271,35 @@ mod tests {
             let mut should_continue = true;
             while should_continue {
                 consumer_1.batch_read(5, |_, seq, _| {
-                    c1_out.fetch_add(1, Ordering::Relaxed);
+                    let prev = c1_out.fetch_add(1, Ordering::Relaxed);
+                    println!("c1 {}; out {}", seq, prev + 1);
                     should_continue = seq < num_of_events;
                 });
             }
         });
 
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(join_c1.is_finished()); // fail if timeout, usually indicates deadlock
+        #[cfg(not(miri))]
+        let loop_timeout = Duration::from_millis(100);
+        // miri interprets the code and thus takes much longer to run than even debug builds. So we
+        // make the timeout longer to account for this.
+        #[cfg(miri)]
+        let loop_timeout = Duration::from_secs(10);
+
+        let timer = Instant::now();
+        while !join_c1.is_finished() {
+            if timer.elapsed() > loop_timeout {
+                break;
+            }
+        }
+
+        // fail if while loop was timed out, as this will usually indicate deadlock
+        assert!(join_c1.is_finished(), "took too long");
+
+        // join to ensure the threads finish all their work before we read the counters.
+        join_p.join().expect("done p");
+        join_c0.join().expect("done c0");
+        join_c1.join().expect("done c1");
+
         assert_eq!(c0_counter.load(Ordering::Relaxed), num_of_events);
         assert_eq!(c1_counter.load(Ordering::Relaxed), num_of_events);
     }
