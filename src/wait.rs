@@ -116,6 +116,7 @@ impl WaitStrategy for WaitBlocking {
     }
 }
 
+#[derive(Debug)]
 pub struct WaitPhased<W> {
     spin_duration: Duration,
     yield_duration: Duration,
@@ -169,21 +170,14 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct WaitPark {
-    duration: Duration,
-}
-
-impl WaitPark {
-    #[inline]
-    pub fn new(duration: Duration) -> Self {
-        WaitPark { duration }
-    }
-}
-
-impl WaitStrategy for WaitPark {
-    #[inline]
-    fn wait(&self) {
-        std::thread::park_timeout(self.duration)
+impl<W: Clone> Clone for WaitPhased<W> {
+    fn clone(&self) -> Self {
+        WaitPhased {
+            spin_duration: self.spin_duration,
+            yield_duration: self.yield_duration,
+            fallback: self.fallback.clone(),
+            timer: Mutex::new(None),
+            fallback_called: AtomicBool::new(false),
+        }
     }
 }

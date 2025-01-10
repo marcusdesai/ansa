@@ -109,7 +109,6 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    // requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
     #[test]
     fn test_complex_consumer_dag() {
         #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
@@ -227,6 +226,7 @@ mod tests {
         assert!(consumer_3_check_flag)
     }
 
+    // requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
     #[test]
     fn test_wait_blocking() {
         let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
@@ -281,7 +281,7 @@ mod tests {
         #[cfg(not(miri))]
         let loop_timeout = Duration::from_millis(100);
         // miri interprets the code and thus takes much longer to run than even debug builds. So we
-        // make the timeout longer to account for this.
+        // make the timeout significantly longer to account for this.
         #[cfg(miri)]
         let loop_timeout = Duration::from_secs(10);
 
