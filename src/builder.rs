@@ -124,6 +124,7 @@ where
     }
 
     // use numbering of unordered layers to reason about trailing producers in the dag
+    // consumers must be totally ordered with respect to producers
     #[allow(clippy::type_complexity)]
     fn construct_consumers(
         &self,
@@ -133,7 +134,7 @@ where
             panic!("No consumers registered")
         }
         // Ensure no cycles in the consumer dag
-        if let Some(cyclic_id) = find_cycle(&self.followed_by) {
+        if let Err(cyclic_id) = find_graph_layers(&self.followed_by) {
             panic!("Cycle found for consumer id: {}", cyclic_id);
         }
 
@@ -190,43 +191,70 @@ where
     }
 }
 
-// Uses topological sort, see: https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
-fn find_cycle(graph: &UsizeMap<Vec<usize>>) -> Option<usize> {
+/// return Ok(layers) or Err(cycle index)
+///
+/// Uses topological sort, see: https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
+///
+/// finding the layers allows us to check two things. Whether any consumer shares a layer with a
+/// trailing producer, and whether all consumers are totally ordered with respect to all producers.
+///
+/// Unfortunately, the current implementation results in potentially visiting each node multiple
+/// times, but this is necessary to ensure we calculate the layers correctly.
+fn find_graph_layers(graph: &UsizeMap<Vec<usize>>) -> Result<Vec<Vec<usize>>, usize> {
     let mut visiting = UsizeSet::default();
-    let mut visited = UsizeSet::default();
+    let mut layers = UsizeMap::default(); // maps nodes -> which layer they inhabit
 
     fn visit(
         node: usize,
+        layer: usize,
         visiting: &mut UsizeSet,
-        visited: &mut UsizeSet,
+        layers: &mut UsizeMap<usize>,
         graph: &UsizeMap<Vec<usize>>,
     ) -> Option<usize> {
-        if visited.contains(&node) {
-            return None;
-        }
+        layers
+            .entry(node)
+            .and_modify(|l| *l = (*l).max(layer))
+            .or_insert(layer);
+
         if visiting.contains(&node) {
             // cycle found
             return Some(node);
         }
+
         visiting.insert(node);
         // unwrap okay as we'll only use `find_cycle` when `node` is guaranteed to be in `graph`
         for child in graph.get(&node).unwrap().iter() {
-            if let cycle @ Some(_) = visit(*child, visiting, visited, graph) {
+            if let cycle @ Some(_) = visit(*child, layer + 1, visiting, layers, graph) {
                 return cycle;
             }
         }
         visiting.remove(&node);
-        visited.insert(node);
         None
     }
 
     for node in graph.keys() {
-        if let cycle @ Some(_) = visit(*node, &mut visiting, &mut visited, graph) {
-            return cycle;
+        if let Some(cycle) = visit(*node, 0, &mut visiting, &mut layers, graph) {
+            return Err(cycle);
         }
     }
-    None
+
+    // invert the index
+    let mut layers_inverted: UsizeMap<Vec<usize>> = UsizeMap::default();
+    for (node_id, layer) in layers {
+        layers_inverted
+            .entry(layer)
+            .and_modify(|l| l.push(node_id))
+            .or_insert_with(|| vec![node_id]);
+    }
+
+    let layers_vec = (0..layers_inverted.len())
+        .map(|layer| layers_inverted.remove(&layer).unwrap())
+        .collect();
+
+    Ok(layers_vec)
 }
+
+// fn ensure_producer_total_order() {}
 
 /// Describes the ordering relationship for a single consumer.
 ///
@@ -263,7 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_cycle() {
+    fn test_find_cycle2() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -271,17 +299,17 @@ mod tests {
             (3, vec![0]),
             (4, vec![]),
         ]);
-        assert_eq!(find_cycle(&graph), Some(0));
+        assert_eq!(find_graph_layers(&graph), Err(0));
     }
 
     #[test]
-    fn test_find_cycle_self_follow() {
+    fn test_find_cycle_self_follow2() {
         let graph = UsizeMap::from_iter([(0, vec![1]), (1, vec![1])]);
-        assert_eq!(find_cycle(&graph), Some(1));
+        assert_eq!(find_graph_layers(&graph), Err(1));
     }
 
     #[test]
-    fn test_find_no_cycle() {
+    fn test_find_no_cycle2() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -289,6 +317,26 @@ mod tests {
             (3, vec![4]),
             (4, vec![]),
         ]);
-        assert_eq!(find_cycle(&graph), None);
+        let layers = vec![vec![0], vec![1, 2], vec![3], vec![4]];
+        assert_eq!(find_graph_layers(&graph), Ok(layers));
+    }
+
+    // 0─►1─►2─►3─►7
+    // ▼        ▲
+    // 4─►5─►6──┘
+    #[test]
+    fn test_find_layers_fan_out_in_uneven() {
+        let graph = UsizeMap::from_iter([
+            (0, vec![1, 4]),
+            (1, vec![2]),
+            (2, vec![3]),
+            (4, vec![5]),
+            (5, vec![6]),
+            (6, vec![3]),
+            (3, vec![7]),
+            (7, vec![]),
+        ]);
+        let layers = vec![vec![0], vec![1, 4], vec![2, 5], vec![6], vec![3], vec![7]];
+        assert_eq!(find_graph_layers(&graph), Ok(layers));
     }
 }

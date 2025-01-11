@@ -205,7 +205,6 @@ mod tests {
             });
         });
 
-        // checks
         let mut consumer_0_out_expected: Vec<_> = (1..=num_of_events)
             .map(|i| Event {
                 consumer_break: false,
@@ -226,7 +225,7 @@ mod tests {
         assert!(consumer_3_check_flag)
     }
 
-    // requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
+    // if running miri, requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
     #[test]
     fn test_wait_blocking() {
         let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
