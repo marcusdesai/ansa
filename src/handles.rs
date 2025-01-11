@@ -4,13 +4,44 @@ use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct MultiProducer<E, W, const LEAD: bool = true> {
-    pub(crate) cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
-    pub(crate) barrier: Barrier,    // This must be made up of the last consumer cursors.
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
-    pub(crate) claim: Arc<Cursor>,  // shared between all multi producers
-    pub(crate) barrier_seq: i64,
+pub struct ProducerBuilder<E, W, const LEAD: bool = true> {
+    pub(crate) cursor: Arc<Cursor>,
+    pub(crate) barrier: Barrier,
+    pub(crate) buffer: Arc<RingBuffer<E>>,
     pub(crate) wait_strategy: W,
+}
+
+impl<E, W, const LEAD: bool> ProducerBuilder<E, W, LEAD> {
+    pub fn multi(self) -> MultiProducer<E, W, LEAD> {
+        MultiProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            claim: Arc::new(Cursor::new()),
+            barrier_seq: 0,
+            wait_strategy: self.wait_strategy,
+        }
+    }
+
+    pub fn single(self) -> SingleProducer<E, W, LEAD> {
+        SingleProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            free_slots: 0,
+            wait_strategy: self.wait_strategy,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MultiProducer<E, W, const LEAD: bool = true> {
+    cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
+    barrier: Barrier,    // This must be made up of the last consumer cursors.
+    buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
+    claim: Arc<Cursor>,  // shared between all multi producers
+    barrier_seq: i64,
+    wait_strategy: W,
 }
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
@@ -107,11 +138,11 @@ impl<E, W, const LEAD: bool> Drop for MultiProducer<E, W, LEAD> {
 
 #[derive(Debug)]
 pub struct SingleProducer<E, W, const LEAD: bool = true> {
-    pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
-    pub(crate) barrier: Barrier,    // This must be the last consumer cursors.
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
-    pub(crate) free_slots: i64,
-    pub(crate) wait_strategy: W,
+    cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
+    barrier: Barrier,    // This must be the last consumer cursors.
+    buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
+    free_slots: i64,
+    wait_strategy: W,
 }
 
 impl<E, W, const LEAD: bool> SingleProducer<E, W, LEAD>

@@ -1,4 +1,4 @@
-use crate::handles::{Barrier, Consumer, Cursor, MultiProducer, SingleProducer};
+use crate::handles::{Barrier, Consumer, Cursor, ProducerBuilder};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBusy, WaitStrategy};
 use std::collections::{HashMap, HashSet};
@@ -81,40 +81,22 @@ where
         }
     }
 
-    pub fn build_single_producer(self) -> (SingleProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
-        let producer_cursor = Arc::new(Cursor::new());
-        let (consumers, cursor_map) = self.construct_consumers(&producer_cursor);
-        let barrier = self.construct_producer_barrier(cursor_map);
+    pub fn build(self) -> (ProducerBuilder<E, W>, HashMap<usize, Consumer<E, W>>) {
+        let lead_cursor = Arc::new(Cursor::new());
+        let (consumers, cursor_map) = self.construct_handles(&lead_cursor);
+        let barrier = self.construct_lead_barrier(cursor_map);
 
-        let producer = SingleProducer {
-            cursor: producer_cursor,
+        let lead_producer = ProducerBuilder {
+            cursor: lead_cursor,
             barrier,
             buffer: Arc::clone(&self.buffer),
-            free_slots: 0,
             wait_strategy: (self.wait_factory)(),
         };
 
-        (producer, consumers)
+        (lead_producer, consumers)
     }
 
-    pub fn build_multi_producer(self) -> (MultiProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
-        let producer_cursor = Arc::new(Cursor::new());
-        let (consumers, cursor_map) = self.construct_consumers(&producer_cursor);
-        let barrier = self.construct_producer_barrier(cursor_map);
-
-        let producer = MultiProducer {
-            cursor: producer_cursor,
-            barrier,
-            buffer: Arc::clone(&self.buffer),
-            claim: Arc::new(Cursor::new()),
-            barrier_seq: 0,
-            wait_strategy: (self.wait_factory)(),
-        };
-
-        (producer, consumers)
-    }
-
-    fn construct_producer_barrier(&self, cursor_map: UsizeMap<Arc<Cursor>>) -> Barrier {
+    fn construct_lead_barrier(&self, cursor_map: UsizeMap<Arc<Cursor>>) -> Barrier {
         let mut cursors: Vec<_> = self
             .followed_by
             .iter()
@@ -133,9 +115,9 @@ where
     // use numbering of unordered layers to reason about trailing producers in the dag
     // consumers must be totally ordered with respect to producers
     #[allow(clippy::type_complexity)]
-    fn construct_consumers(
+    fn construct_handles(
         &self,
-        producer_cursor: &Arc<Cursor>,
+        lead_cursor: &Arc<Cursor>,
     ) -> (HashMap<usize, Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
         if self.follows.is_empty() {
             panic!("No ids registered")
@@ -143,10 +125,10 @@ where
         if self.follows_lead.is_empty() {
             panic!("No ids follow the lead producer")
         }
-        // Ensure no cycles in the consumer dag
-        if let Err(cyclic_id) = find_graph_layers(&self.followed_by, &self.follows_lead) {
-            panic!("Cycle found for id: {}", cyclic_id);
-        }
+        let _ = match find_graph_layers(&self.followed_by, &self.follows_lead) {
+            Ok(layers) => layers,
+            Err(cyclic_id) => panic!("Cycle found for id: {}", cyclic_id),
+        };
 
         let mut consumers = HashMap::default();
         let mut cursor_map = UsizeMap::default();
@@ -161,7 +143,7 @@ where
             let mut following_unregistered = None;
 
             let barrier = match follows {
-                Follows::LeadProducer => Barrier::One(Arc::clone(producer_cursor)),
+                Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
                 Follows::Consumer(follow_id) => {
                     if !self.follows.contains_key(follow_id) {
                         following_unregistered = Some(follow_id)
