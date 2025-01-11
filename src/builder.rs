@@ -123,6 +123,7 @@ where
         }
     }
 
+    // use numbering of unordered layers to reason about trailing producers in the dag
     #[allow(clippy::type_complexity)]
     fn construct_consumers(
         &self,
@@ -137,7 +138,7 @@ where
         }
 
         let mut consumers = HashMap::default();
-        let mut cursor_map: UsizeMap<Arc<Cursor>> = UsizeMap::default();
+        let mut cursor_map = UsizeMap::default();
 
         fn get_cursor(id: usize, map: &mut UsizeMap<Arc<Cursor>>) -> Arc<Cursor> {
             let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new()));
@@ -227,9 +228,10 @@ fn find_cycle(graph: &UsizeMap<Vec<usize>>) -> Option<usize> {
     None
 }
 
-/// Describes the ordering relationship for a single consumer. `Follows::Consumers(vec![0, 1])`
-/// denotes that a consumer reads elements on the ring buffer only after both `consumer 0` and
-/// `consumer 1` have finished their reads.
+/// Describes the ordering relationship for a single consumer.
+///
+/// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
+/// after both `consumer 0` and `consumer 1` have finished their reads.
 pub enum Follows {
     Producer,
     Consumer(usize),

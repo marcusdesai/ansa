@@ -97,9 +97,11 @@ where
 
 impl<E, W, const LEAD: bool> Drop for MultiProducer<E, W, LEAD> {
     fn drop(&mut self) {
-        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s this
+        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s the lead
         // producer holds to guarantee this.
-        self.barrier = Barrier::Many(Box::new([]))
+        if LEAD {
+            self.barrier = Barrier::Many(Box::new([]))
+        }
     }
 }
 
@@ -126,6 +128,9 @@ where
         );
         let size = size as i64;
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
+        // which we can do by passing 0 as the buffer length.
+        let buf_len = if LEAD { self.buffer.len() } else { 0 };
         // Wait until there are free slots to write events to.
         while self.free_slots < size {
             self.wait_strategy.wait();
@@ -135,9 +140,6 @@ where
                 "Producer cursor sequence must never be behind of its barrier sequence.\nFound \
                 producer seq: {producer_seq}, and barrier seq: {barrier_seq}"
             );
-            // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
-            // which we can do by passing 0 as the buffer length.
-            let buf_len = if LEAD { self.buffer.len() } else { 0 };
             self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
         }
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
@@ -163,9 +165,11 @@ where
 
 impl<E, W, const LEAD: bool> Drop for SingleProducer<E, W, LEAD> {
     fn drop(&mut self) {
-        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s this
+        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s the lead
         // producer holds to guarantee this.
-        self.barrier = Barrier::Many(Box::new([]))
+        if LEAD {
+            self.barrier = Barrier::Many(Box::new([]))
+        }
     }
 }
 
@@ -283,6 +287,7 @@ pub(crate) enum Barrier {
 }
 
 impl Barrier {
+    #[inline]
     fn sequence(&self) -> i64 {
         match self {
             Barrier::One(cursor) => cursor.sequence.load(Ordering::Relaxed),
