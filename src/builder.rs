@@ -15,6 +15,8 @@ pub struct DisruptorBuilder<E, WF, W> {
     followed_by: UsizeMap<Vec<usize>>,
     // The inverse of followed_by, useful for conveniently constructing barriers for consumers
     follows: UsizeMap<Follows>,
+    // All the ids which follow the lead producer
+    follows_lead: UsizeSet,
     wait_type: PhantomData<W>,
 }
 
@@ -30,6 +32,7 @@ impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
             wait_factory: || WaitBusy,
             followed_by: UsizeMap::default(),
             follows: UsizeMap::default(),
+            follows_lead: UsizeSet::default(),
             wait_type: PhantomData,
         }
     }
@@ -42,11 +45,14 @@ where
 {
     pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
-            panic!("Consumer ID: {id} already registered")
+            panic!("id: {id} already registered")
         }
         self.followed_by.entry(id).or_default();
         let follow_ids: &[usize] = match &follows {
-            Follows::Producer => &[],
+            Follows::LeadProducer => {
+                self.follows_lead.insert(id);
+                &[]
+            }
             Follows::Consumer(c) => &[*c],
             Follows::Consumers(cs) => cs,
         };
@@ -70,6 +76,7 @@ where
             wait_factory,
             followed_by: self.followed_by,
             follows: self.follows,
+            follows_lead: self.follows_lead,
             wait_type: PhantomData,
         }
     }
@@ -116,8 +123,8 @@ where
             .map(|(id, _)| Arc::clone(cursor_map.get(id).unwrap()))
             .collect();
 
+        assert!(cursors.len() >= 1);
         match cursors.len() {
-            0 => panic!("No consumers follow the producer"),
             1 => Barrier::One(cursors.pop().unwrap()),
             _ => Barrier::Many(cursors.into_boxed_slice()),
         }
@@ -131,11 +138,14 @@ where
         producer_cursor: &Arc<Cursor>,
     ) -> (HashMap<usize, Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
         if self.follows.is_empty() {
-            panic!("No consumers registered")
+            panic!("No ids registered")
+        }
+        if self.follows_lead.is_empty() {
+            panic!("No ids follow the lead producer")
         }
         // Ensure no cycles in the consumer dag
-        if let Err(cyclic_id) = find_graph_layers(&self.followed_by) {
-            panic!("Cycle found for consumer id: {}", cyclic_id);
+        if let Err(cyclic_id) = find_graph_layers(&self.followed_by, &self.follows_lead) {
+            panic!("Cycle found for id: {}", cyclic_id);
         }
 
         let mut consumers = HashMap::default();
@@ -151,7 +161,7 @@ where
             let mut following_unregistered = None;
 
             let barrier = match follows {
-                Follows::Producer => Barrier::One(Arc::clone(producer_cursor)),
+                Follows::LeadProducer => Barrier::One(Arc::clone(producer_cursor)),
                 Follows::Consumer(follow_id) => {
                     if !self.follows.contains_key(follow_id) {
                         following_unregistered = Some(follow_id)
@@ -200,7 +210,10 @@ where
 ///
 /// Unfortunately, the current implementation results in potentially visiting each node multiple
 /// times, but this is necessary to ensure we calculate the layers correctly.
-fn find_graph_layers(graph: &UsizeMap<Vec<usize>>) -> Result<Vec<Vec<usize>>, usize> {
+fn find_graph_layers(
+    graph: &UsizeMap<Vec<usize>>,
+    roots: &UsizeSet,
+) -> Result<Vec<Vec<usize>>, usize> {
     let mut visiting = UsizeSet::default();
     let mut layers = UsizeMap::default(); // maps nodes -> which layer they inhabit
 
@@ -232,7 +245,7 @@ fn find_graph_layers(graph: &UsizeMap<Vec<usize>>) -> Result<Vec<Vec<usize>>, us
         None
     }
 
-    for node in graph.keys() {
+    for node in roots {
         if let Some(cycle) = visit(*node, 0, &mut visiting, &mut layers, graph) {
             return Err(cycle);
         }
@@ -248,6 +261,7 @@ fn find_graph_layers(graph: &UsizeMap<Vec<usize>>) -> Result<Vec<Vec<usize>>, us
     }
 
     let layers_vec = (0..layers_inverted.len())
+        // unwrap okay due to above construction of layers_inverted
         .map(|layer| layers_inverted.remove(&layer).unwrap())
         .collect();
 
@@ -261,7 +275,7 @@ fn find_graph_layers(graph: &UsizeMap<Vec<usize>>) -> Result<Vec<Vec<usize>>, us
 /// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
 /// after both `consumer 0` and `consumer 1` have finished their reads.
 pub enum Follows {
-    Producer,
+    LeadProducer,
     Consumer(usize),
     Consumers(Vec<usize>),
 }
@@ -291,7 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_cycle2() {
+    fn test_find_cycle() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -299,17 +313,19 @@ mod tests {
             (3, vec![0]),
             (4, vec![]),
         ]);
-        assert_eq!(find_graph_layers(&graph), Err(0));
+        let roots = UsizeSet::from_iter([0]);
+        assert_eq!(find_graph_layers(&graph, &roots), Err(0));
     }
 
     #[test]
-    fn test_find_cycle_self_follow2() {
+    fn test_find_cycle_self_follow() {
         let graph = UsizeMap::from_iter([(0, vec![1]), (1, vec![1])]);
-        assert_eq!(find_graph_layers(&graph), Err(1));
+        let roots = UsizeSet::from_iter([0]);
+        assert_eq!(find_graph_layers(&graph, &roots), Err(1));
     }
 
     #[test]
-    fn test_find_no_cycle2() {
+    fn test_find_no_cycle() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -317,13 +333,31 @@ mod tests {
             (3, vec![4]),
             (4, vec![]),
         ]);
+        let roots = UsizeSet::from_iter([0]);
         let layers = vec![vec![0], vec![1, 2], vec![3], vec![4]];
-        assert_eq!(find_graph_layers(&graph), Ok(layers));
+        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
     }
 
-    // 0─►1─►2─►3─►7
-    // ▼        ▲
-    // 4─►5─►6──┘
+    #[test]
+    fn test_multiple_roots() {
+        let graph = UsizeMap::from_iter([
+            (0, vec![3]),
+            (1, vec![4]),
+            (2, vec![5]),
+            (3, vec![6]),
+            (4, vec![6]),
+            (5, vec![6]),
+            (6, vec![]),
+        ]);
+        let roots = UsizeSet::from_iter([0, 1, 2]);
+        let layers = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6]];
+        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
+    }
+
+    // 0 ─► 1 ─► 2 ─► 3 ─► 7
+    // |              ▲
+    // ▼              |
+    // 4 ─► 5 ─► 6 ─-─┘
     #[test]
     fn test_find_layers_fan_out_in_uneven() {
         let graph = UsizeMap::from_iter([
@@ -336,7 +370,8 @@ mod tests {
             (3, vec![7]),
             (7, vec![]),
         ]);
+        let roots = UsizeSet::from_iter([0]);
         let layers = vec![vec![0], vec![1, 4], vec![2, 5], vec![6], vec![3], vec![7]];
-        assert_eq!(find_graph_layers(&graph), Ok(layers));
+        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
     }
 }
