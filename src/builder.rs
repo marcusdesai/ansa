@@ -44,15 +44,16 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
-        self.add_handle(id, Handle::Consumer, follows)
+    pub fn add_consumer(self, id: usize, follows: Follows) -> Self {
+        self.add_handle(Handle::Consumer(id), follows)
     }
 
-    pub fn add_producer(mut self, id: usize, follows: Follows) -> Self {
-        self.add_handle(id, Handle::Producer, follows)
+    pub fn add_producer(self, id: usize, follows: Follows) -> Self {
+        self.add_handle(Handle::Producer(id), follows)
     }
 
-    pub fn add_handle(mut self, id: usize, handle: Handle, follows: Follows) -> Self {
+    fn add_handle(mut self, handle: Handle, follows: Follows) -> Self {
+        let id = handle.id();
         if self.follows.contains_key(&id) {
             panic!("id: {id} already registered")
         }
@@ -90,9 +91,9 @@ where
         }
     }
 
-    pub fn build(self) -> HandleStore<E, W> {
+    pub fn build(self) -> DisruptorHandles<E, W> {
         let lead_cursor = Arc::new(Cursor::new(0));
-        let (consumers, cursor_map) = self.construct_handles(&lead_cursor);
+        let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor);
         let barrier = self.construct_lead_barrier(cursor_map);
 
         let lead_producer = SingleProducer {
@@ -103,9 +104,9 @@ where
             wait_strategy: (self.wait_factory)(),
         };
 
-        HandleStore {
+        DisruptorHandles {
             lead: Some(lead_producer),
-            producers: UsizeMap::default(),
+            producers,
             consumers,
         }
     }
@@ -132,7 +133,11 @@ where
     fn construct_handles(
         &self,
         lead_cursor: &Arc<Cursor>,
-    ) -> (UsizeMap<Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
+    ) -> (
+        UsizeMap<SingleProducer<E, W, false>>,
+        UsizeMap<Consumer<E, W>>,
+        UsizeMap<Arc<Cursor>>,
+    ) {
         if self.follows.is_empty() {
             panic!("No ids registered")
         }
@@ -144,6 +149,7 @@ where
             Err(cyclic_id) => panic!("Cycle found for id: {}", cyclic_id),
         };
 
+        let producers = UsizeMap::default();
         let mut consumers = UsizeMap::default();
         let mut cursor_map = UsizeMap::default();
 
@@ -193,7 +199,7 @@ where
             consumers.insert(id, consumer);
         }
 
-        (consumers, cursor_map)
+        (producers, consumers, cursor_map)
     }
 }
 
@@ -270,6 +276,7 @@ fn find_graph_layers(
 ///
 /// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
 /// after both `consumer 0` and `consumer 1` have finished their reads.
+#[derive(Debug)]
 pub enum Follows {
     LeadProducer,
     Producer(usize),
@@ -277,9 +284,19 @@ pub enum Follows {
     Consumers(Vec<usize>),
 }
 
+#[derive(Copy, Clone, Debug)]
 enum Handle {
-    Producer,
-    Consumer,
+    Producer(usize),
+    Consumer(usize),
+}
+
+impl Handle {
+    fn id(&self) -> usize {
+        match self {
+            Handle::Producer(id) => *id,
+            Handle::Consumer(id) => *id,
+        }
+    }
 }
 
 /// Stores the producers and consumers for a single disruptor.
@@ -290,13 +307,13 @@ enum Handle {
 ///
 /// If this is dropped, then all remaining producers and consumers it holds are dropped.
 #[derive(Debug)]
-pub struct HandleStore<E, W> {
+pub struct DisruptorHandles<E, W> {
     lead: Option<SingleProducer<E, W, true>>,
     producers: UsizeMap<SingleProducer<E, W, false>>,
     consumers: UsizeMap<Consumer<E, W>>,
 }
 
-impl<E, W> HandleStore<E, W> {
+impl<E, W> DisruptorHandles<E, W> {
     /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
     #[must_use = "Disruptor will stall if not used."]
     pub fn take_lead(&mut self) -> Option<SingleProducer<E, W, true>> {
@@ -317,7 +334,7 @@ impl<E, W> HandleStore<E, W> {
 }
 
 #[cfg(debug_assertions)]
-impl<E, W> Drop for HandleStore<E, W> {
+impl<E, W> Drop for DisruptorHandles<E, W> {
     fn drop(&mut self) {
         let store_is_empty =
             self.take_lead().is_none() && self.consumers.is_empty() && self.producers.is_empty();
