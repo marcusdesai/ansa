@@ -1,6 +1,7 @@
-use crate::handles::{Barrier, Consumer, Cursor, ProducerBuilder};
+use crate::handles::{Barrier, Consumer, Cursor};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBusy, WaitStrategy};
+use crate::SingleProducer;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
@@ -49,7 +50,7 @@ where
         }
         self.followed_by.entry(id).or_default();
         let follow_ids: &[usize] = match &follows {
-            Follows::LeadProducer => {
+            Follows::Producer => {
                 self.follows_lead.insert(id);
                 &[]
             }
@@ -81,15 +82,16 @@ where
         }
     }
 
-    pub fn build(self) -> (ProducerBuilder<E, W>, HashMap<usize, Consumer<E, W>>) {
-        let lead_cursor = Arc::new(Cursor::new());
+    pub fn build(self) -> (SingleProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
+        let lead_cursor = Arc::new(Cursor::new(0));
         let (consumers, cursor_map) = self.construct_handles(&lead_cursor);
         let barrier = self.construct_lead_barrier(cursor_map);
 
-        let lead_producer = ProducerBuilder {
+        let lead_producer = SingleProducer {
             cursor: lead_cursor,
             barrier,
             buffer: Arc::clone(&self.buffer),
+            free_slots: 0,
             wait_strategy: (self.wait_factory)(),
         };
 
@@ -105,7 +107,7 @@ where
             .map(|(id, _)| Arc::clone(cursor_map.get(id).unwrap()))
             .collect();
 
-        assert!(cursors.len() >= 1);
+        assert!(!cursors.is_empty());
         match cursors.len() {
             1 => Barrier::One(cursors.pop().unwrap()),
             _ => Barrier::Many(cursors.into_boxed_slice()),
@@ -134,7 +136,7 @@ where
         let mut cursor_map = UsizeMap::default();
 
         fn get_cursor(id: usize, map: &mut UsizeMap<Arc<Cursor>>) -> Arc<Cursor> {
-            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new()));
+            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new(0)));
             Arc::clone(cursor)
         }
 
@@ -143,7 +145,7 @@ where
             let mut following_unregistered = None;
 
             let barrier = match follows {
-                Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
+                Follows::Producer => Barrier::One(Arc::clone(lead_cursor)),
                 Follows::Consumer(follow_id) => {
                     if !self.follows.contains_key(follow_id) {
                         following_unregistered = Some(follow_id)
@@ -257,9 +259,15 @@ fn find_graph_layers(
 /// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
 /// after both `consumer 0` and `consumer 1` have finished their reads.
 pub enum Follows {
-    LeadProducer,
+    Producer, // extend to accept usize, make 0 default id of lead producer
     Consumer(usize),
     Consumers(Vec<usize>),
+}
+
+/// Describes which type of handle is being added to the graph.
+pub enum Handle {
+    Producer(usize),
+    Consumer(usize),
 }
 
 #[derive(Copy, Clone, Debug, Default)]

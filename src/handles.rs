@@ -4,37 +4,6 @@ use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct ProducerBuilder<E, W, const LEAD: bool = true> {
-    pub(crate) cursor: Arc<Cursor>,
-    pub(crate) barrier: Barrier,
-    pub(crate) buffer: Arc<RingBuffer<E>>,
-    pub(crate) wait_strategy: W,
-}
-
-impl<E, W, const LEAD: bool> ProducerBuilder<E, W, LEAD> {
-    pub fn multi(self) -> MultiProducer<E, W, LEAD> {
-        MultiProducer {
-            cursor: self.cursor,
-            barrier: self.barrier,
-            buffer: self.buffer,
-            claim: Arc::new(Cursor::new()),
-            barrier_seq: 0,
-            wait_strategy: self.wait_strategy,
-        }
-    }
-
-    pub fn single(self) -> SingleProducer<E, W, LEAD> {
-        SingleProducer {
-            cursor: self.cursor,
-            barrier: self.barrier,
-            buffer: self.buffer,
-            free_slots: 0,
-            wait_strategy: self.wait_strategy,
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool = true> {
     cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
     barrier: Barrier,    // This must be made up of the last consumer cursors.
@@ -108,6 +77,23 @@ where
         self.cursor.sequence.store(claim_end, Ordering::Release);
         self.wait_strategy.finalise()
     }
+
+    /// Return a [`SingleProducer`] if there exists only one [`MultiProducer`] associated with
+    /// this producer cursor.
+    ///
+    /// Otherwise, return `None` and drop this [`MultiProducer`].
+    ///
+    /// If this function is called when only one [`MultiProducer`] exists, then it is guaranteed to
+    /// return a [`SingleProducer`].
+    pub fn into_single(self) -> Option<SingleProducer<E, W, LEAD>> {
+        Arc::into_inner(self.claim).map(|_| SingleProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            free_slots: 0,
+            wait_strategy: self.wait_strategy,
+        })
+    }
 }
 
 impl<E, W, const LEAD: bool> Clone for MultiProducer<E, W, LEAD>
@@ -126,23 +112,13 @@ where
     }
 }
 
-impl<E, W, const LEAD: bool> Drop for MultiProducer<E, W, LEAD> {
-    fn drop(&mut self) {
-        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s the lead
-        // producer holds to guarantee this.
-        if LEAD {
-            self.barrier = Barrier::Many(Box::new([]))
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct SingleProducer<E, W, const LEAD: bool = true> {
-    cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
-    barrier: Barrier,    // This must be the last consumer cursors.
-    buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
-    free_slots: i64,
-    wait_strategy: W,
+    pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
+    pub(crate) barrier: Barrier,    // This must be the last consumer cursors.
+    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
+    pub(crate) free_slots: i64,
+    pub(crate) wait_strategy: W,
 }
 
 impl<E, W, const LEAD: bool> SingleProducer<E, W, LEAD>
@@ -192,14 +168,17 @@ where
         self.cursor.sequence.store(batch_end, Ordering::Release);
         self.wait_strategy.finalise()
     }
-}
 
-impl<E, W, const LEAD: bool> Drop for SingleProducer<E, W, LEAD> {
-    fn drop(&mut self) {
-        // We need to break the Arc cycle of barriers. Simply get rid of all the `Arc`s the lead
-        // producer holds to guarantee this.
-        if LEAD {
-            self.barrier = Barrier::Many(Box::new([]))
+    pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let barrier_seq = (producer_seq - self.buffer.len() as i64).max(0);
+        MultiProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            claim: Arc::new(Cursor::new(producer_seq)),
+            barrier_seq,
+            wait_strategy: self.wait_strategy,
         }
     }
 }
@@ -301,12 +280,12 @@ pub(crate) struct Cursor {
 }
 
 impl Cursor {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(seq: i64) -> Self {
         Cursor {
             #[cfg(not(feature = "cache-padded"))]
-            sequence: AtomicI64::new(0),
+            sequence: AtomicI64::new(seq),
             #[cfg(feature = "cache-padded")]
-            sequence: crossbeam_utils::CachePadded::new(AtomicI64::new(0)),
+            sequence: crossbeam_utils::CachePadded::new(AtomicI64::new(seq)),
         }
     }
 }
@@ -329,6 +308,16 @@ impl Barrier {
     }
 }
 
+impl Drop for Barrier {
+    // We need to break the Arc cycle of barriers. Just get rid of all the `Arc`s to guarantee this.
+    fn drop(&mut self) {
+        match self {
+            Barrier::One(one) => *one = Arc::new(Cursor::new(0)),
+            Barrier::Many(many) => *many = Box::new([]),
+        }
+    }
+}
+
 /// Calculate the distance on the ring buffer from a producer provided sequence to the barrier of
 /// the last consumers. Positive return values represent free slots available for writes on the
 /// buffer. Negative values represent the producer sequence being ahead of the barrier by the
@@ -342,20 +331,51 @@ impl Barrier {
 /// `barrier_seq >= producer_seq`.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
-    assert!(
-        0 <= barrier_seq && barrier_seq <= producer_seq
-            || buffer_size == 0 && barrier_seq >= producer_seq,
-        "Requires either that 0 <= barrier_seq <= producer_seq.\n\
-        Or buffer_size == 0 and barrier_seq >= producer_seq \n\
-        Found buffer_size: {buffer_size} producer_seq: {producer_seq}, barrier_seq: {barrier_seq}",
-    );
+    #[cfg(debug_assertions)]
+    if buffer_size == 0 {
+        assert!(
+            barrier_seq >= producer_seq,
+            "If buffer_size == 0 then barrier_seq >= producer_seq is required.\nFound \
+            buffer_size: {buffer_size} producer_seq: {producer_seq}, barrier_seq: {barrier_seq}",
+        );
+    } else {
+        assert!(
+            0 <= barrier_seq && barrier_seq <= producer_seq && buffer_size > 0,
+            "Requires that 0 <= barrier_seq <= producer_seq.\nFound buffer_size: {buffer_size} \
+            producer_seq: {producer_seq}, barrier_seq: {barrier_seq}"
+        );
+    }
     buffer_size as i64 - (producer_seq - barrier_seq)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::prelude::IteratorRandom;
     use rand::{thread_rng, Rng};
+
+    // This is just a check of a very simple math equality, but if this implementation is somehow
+    // wrong, everything breaks, so better to be sure. Also, IME, math is often where bugs hide.
+    //
+    // Check that the calculation:
+    //     barrier_seq = producer_seq - buffer_size
+    //
+    // always results in a barrier_seq which returns 0 when all three values are supplied to
+    // `producer_barrier_delta`. This should work regardless of whether buffer size == 0.
+    #[test]
+    fn test_producer_barrier_delta_always_zero() {
+        let mut rng = thread_rng();
+
+        for _ in 0..100 {
+            // random power of two
+            let buffer_size = (0..=32).map(|i| 2_i64.pow(i)).choose(&mut rng).unwrap();
+            let producer_seq = rng.gen_range(100..i64::MAX / 2);
+            let barrier_seq = producer_seq - buffer_size;
+
+            let result = producer_barrier_delta(buffer_size as usize, producer_seq, barrier_seq);
+            assert_eq!(result, 0, "{buffer_size}, {producer_seq}, {barrier_seq}");
+        }
+    }
 
     #[test]
     fn test_producer_barrier_delta_zero_buffer_size() {
