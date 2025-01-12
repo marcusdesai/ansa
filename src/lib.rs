@@ -5,7 +5,6 @@ pub mod wait;
 
 pub use builder::*;
 pub use handles::*;
-pub use Handle::{Consumer, Producer};
 
 #[cfg(test)]
 mod tests {
@@ -18,8 +17,8 @@ mod tests {
 
     #[test]
     fn test_single_producer() {
-        let (mut producer, consumers) = DisruptorBuilder::new(64, || 0i64)
-            .add_handle(Consumer(0), Follows::LeadProducer)
+        let mut handles = DisruptorBuilder::new(64, || 0i64)
+            .add_consumer(0, Follows::LeadProducer)
             .wait_strategy(|| {
                 WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
             })
@@ -29,6 +28,7 @@ mod tests {
         let mut result = vec![0i64; num_of_events + 1];
 
         std::thread::scope(|s| {
+            let mut producer = handles.take_lead().unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
@@ -39,7 +39,7 @@ mod tests {
                 }
             });
             let out = &mut result;
-            let consumer = consumers.get(&0).unwrap();
+            let consumer = handles.take_consumer(0).unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
@@ -58,16 +58,16 @@ mod tests {
     #[test]
     fn test_multi_producer() {
         let size = 512;
-        let (producer, mut consumers) = DisruptorBuilder::new(size, || 0i64)
-            .add_handle(Consumer(0), Follows::LeadProducer)
+        let mut handles = DisruptorBuilder::new(size, || 0i64)
+            .add_consumer(0, Follows::LeadProducer)
             .wait_strategy(|| WaitBusy)
             .build();
 
-        let multi_1 = producer.into_multi();
+        let multi_1 = handles.take_lead().unwrap().into_multi();
         let multi_2 = multi_1.clone();
         let multi_3 = multi_1.clone();
 
-        let consumer = consumers.remove(&0).unwrap();
+        let consumer = handles.take_consumer(0).unwrap();
 
         let sync_barrier = Arc::new(std::sync::Barrier::new(4));
         let done = Arc::new(AtomicI64::new(0));
@@ -119,11 +119,11 @@ mod tests {
             seq: i64,
         }
 
-        let (mut producer, consumers) = DisruptorBuilder::new(128, Event::default)
-            .add_handle(Consumer(0), Follows::LeadProducer)
-            .add_handle(Consumer(1), Follows::LeadProducer)
-            .add_handle(Consumer(2), Follows::Consumer(0))
-            .add_handle(Consumer(3), Follows::Consumers(vec![1, 2]))
+        let mut handles = DisruptorBuilder::new(128, Event::default)
+            .add_consumer(0, Follows::LeadProducer)
+            .add_consumer(1, Follows::LeadProducer)
+            .add_consumer(2, Follows::Consumer(0))
+            .add_consumer(3, Follows::Consumers(vec![1, 2]))
             .wait_strategy(|| WaitYield)
             .build();
 
@@ -139,6 +139,7 @@ mod tests {
         let num_of_events = 300;
 
         std::thread::scope(|s| {
+            let mut producer = handles.take_lead().unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
@@ -152,7 +153,7 @@ mod tests {
                 }
             });
 
-            let consumer_0 = consumers.get(&0).unwrap();
+            let consumer_0 = handles.take_consumer(0).unwrap();
             let out = &mut consumer_0_out;
             s.spawn(move || {
                 let mut should_continue = true;
@@ -164,7 +165,7 @@ mod tests {
                 }
             });
 
-            let consumer_1 = consumers.get(&1).unwrap();
+            let consumer_1 = handles.take_consumer(1).unwrap();
             let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
             s.spawn(move || {
                 let mut should_continue = true;
@@ -178,7 +179,7 @@ mod tests {
                 }
             });
 
-            let consumer_2 = consumers.get(&2).unwrap();
+            let consumer_2 = handles.take_consumer(2).unwrap();
             let c2_counter = Arc::clone(&consumer_2_call_counter);
             s.spawn(move || {
                 let mut should_continue = true;
@@ -190,7 +191,7 @@ mod tests {
                 }
             });
 
-            let consumer_3 = consumers.get(&3).unwrap();
+            let consumer_3 = handles.take_consumer(3).unwrap();
             let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
             let c2_counter = Arc::clone(&consumer_2_call_counter);
             let c3_flag = &mut consumer_3_check_flag;
@@ -230,14 +231,15 @@ mod tests {
     // if running miri, requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
     #[test]
     fn test_wait_blocking() {
-        let (mut producer, mut consumers) = DisruptorBuilder::new(32, || 0i64)
-            .add_handle(Consumer(0), Follows::LeadProducer)
-            .add_handle(Consumer(1), Follows::Consumer(0))
+        let mut handles = DisruptorBuilder::new(32, || 0i64)
+            .add_consumer(0, Follows::LeadProducer)
+            .add_consumer(1, Follows::Consumer(0))
             .wait_strategy(WaitBlocking::new)
             .build();
 
-        let consumer_0 = consumers.remove(&0).unwrap();
-        let consumer_1 = consumers.remove(&1).unwrap();
+        let mut producer = handles.take_lead().unwrap();
+        let consumer_0 = handles.take_consumer(0).unwrap();
+        let consumer_1 = handles.take_consumer(1).unwrap();
 
         let num_of_events = 100;
         let c0_counter = Arc::new(AtomicI64::new(0));

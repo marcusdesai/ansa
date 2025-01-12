@@ -44,8 +44,15 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_handle(mut self, handle: Handle, follows: Follows) -> Self {
-        let id = handle.id();
+    pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
+        self.add_handle(id, Handle::Consumer, follows)
+    }
+
+    pub fn add_producer(mut self, id: usize, follows: Follows) -> Self {
+        self.add_handle(id, Handle::Producer, follows)
+    }
+
+    pub fn add_handle(mut self, id: usize, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             panic!("id: {id} already registered")
         }
@@ -55,8 +62,7 @@ where
                 self.follows_lead.insert(id);
                 &[]
             }
-            Follows::Producer(_) => todo!(),
-            Follows::Consumer(c) => &[*c],
+            Follows::Consumer(c) | Follows::Producer(c) => &[*c],
             Follows::Consumers(cs) => cs,
         };
         follow_ids.iter().for_each(|c| {
@@ -84,7 +90,7 @@ where
         }
     }
 
-    pub fn build(self) -> (SingleProducer<E, W>, HashMap<usize, Consumer<E, W>>) {
+    pub fn build(self) -> HandleStore<E, W> {
         let lead_cursor = Arc::new(Cursor::new(0));
         let (consumers, cursor_map) = self.construct_handles(&lead_cursor);
         let barrier = self.construct_lead_barrier(cursor_map);
@@ -97,7 +103,11 @@ where
             wait_strategy: (self.wait_factory)(),
         };
 
-        (lead_producer, consumers)
+        HandleStore {
+            lead: Some(lead_producer),
+            producers: UsizeMap::default(),
+            consumers,
+        }
     }
 
     fn construct_lead_barrier(&self, cursor_map: UsizeMap<Arc<Cursor>>) -> Barrier {
@@ -122,7 +132,7 @@ where
     fn construct_handles(
         &self,
         lead_cursor: &Arc<Cursor>,
-    ) -> (HashMap<usize, Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
+    ) -> (UsizeMap<Consumer<E, W>>, UsizeMap<Arc<Cursor>>) {
         if self.follows.is_empty() {
             panic!("No ids registered")
         }
@@ -134,7 +144,7 @@ where
             Err(cyclic_id) => panic!("Cycle found for id: {}", cyclic_id),
         };
 
-        let mut consumers = HashMap::default();
+        let mut consumers = UsizeMap::default();
         let mut cursor_map = UsizeMap::default();
 
         fn get_cursor(id: usize, map: &mut UsizeMap<Arc<Cursor>>) -> Arc<Cursor> {
@@ -148,8 +158,7 @@ where
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
-                Follows::Producer(_) => todo!(),
-                Follows::Consumer(follow_id) => {
+                Follows::Consumer(follow_id) | Follows::Producer(follow_id) => {
                     if !self.follows.contains_key(follow_id) {
                         following_unregistered = Some(follow_id)
                     }
@@ -169,7 +178,7 @@ where
                 }
             };
 
-            // Ensure all ids which this consumer follows are registered
+            // Ensure all ids which this handle follows are registered
             if let Some(follow_id) = following_unregistered {
                 panic!("Consumer id: {} follows unregistered id: {}", id, follow_id)
             }
@@ -268,39 +277,54 @@ pub enum Follows {
     Consumers(Vec<usize>),
 }
 
-/// Describes which type of handle is being added to the graph.
-pub enum Handle {
-    Producer(usize),
-    Consumer(usize),
+enum Handle {
+    Producer,
+    Consumer,
 }
 
-impl Handle {
-    fn id(&self) -> usize {
-        match self {
-            Handle::Producer(id) => *id,
-            Handle::Consumer(id) => *id,
-        }
-    }
-}
-
+/// Stores the producers and consumers for a single disruptor.
+///
+/// **Important**: It is likely a programming error to not use all the producers and consumers held
+/// by this store. If any single producer or consumer fails to move on the ring buffer, then the
+/// disruptor as a whole will eventually permanently stall.
+///
+/// If this is dropped, then all remaining producers and consumers it holds are dropped.
 #[derive(Debug)]
-pub struct HandleMap<E, W> {
+pub struct HandleStore<E, W> {
     lead: Option<SingleProducer<E, W, true>>,
     producers: UsizeMap<SingleProducer<E, W, false>>,
     consumers: UsizeMap<Consumer<E, W>>,
 }
 
-impl<E, W> HandleMap<E, W> {
+impl<E, W> HandleStore<E, W> {
+    /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
+    #[must_use = "Disruptor will stall if not used."]
     pub fn take_lead(&mut self) -> Option<SingleProducer<E, W, true>> {
         self.lead.take()
     }
 
+    /// Returns the producer with this `id`. Returns `None` if this `id` has already been taken.
+    #[must_use = "Disruptor will stall if not used."]
     pub fn take_producer(&mut self, id: usize) -> Option<SingleProducer<E, W, false>> {
         self.producers.remove(&id)
     }
 
+    /// Returns the consumer with this `id`. Returns `None` if this `id` has already been taken.
+    #[must_use = "Disruptor will stall if not used."]
     pub fn take_consumer(&mut self, id: usize) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<E, W> Drop for HandleStore<E, W> {
+    fn drop(&mut self) {
+        let store_is_empty =
+            self.take_lead().is_none() && self.consumers.is_empty() && self.producers.is_empty();
+        assert!(
+            store_is_empty,
+            "HandleStore should be empty when dropped. Unused handles will cause stalls."
+        )
     }
 }
 
@@ -339,6 +363,16 @@ mod tests {
         ]);
         let roots = UsizeSet::from_iter([0]);
         assert_eq!(find_graph_layers(&graph, &roots), Err(0));
+
+        let graph = UsizeMap::from_iter([
+            (0, vec![1, 2]),
+            (1, vec![3]),
+            (2, vec![4]),
+            (3, vec![4]),
+            (4, vec![2]),
+        ]);
+        let roots = UsizeSet::from_iter([0]);
+        assert_eq!(find_graph_layers(&graph, &roots), Err(4));
     }
 
     #[test]

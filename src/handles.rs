@@ -3,7 +3,6 @@ use crate::wait::WaitStrategy;
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
-#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool = true> {
     cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
@@ -24,7 +23,8 @@ where
     {
         assert!(
             (size as usize) <= self.buffer.len(),
-            "Batch size cannot be greater than buffer size"
+            "batch size ({size}) > buffer len ({})",
+            self.buffer.len()
         );
         let size = size as i64;
         // Claim a sequence. The 'claim' is used to coordinate producers.
@@ -113,7 +113,6 @@ where
     }
 }
 
-#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct SingleProducer<E, W, const LEAD: bool = true> {
     pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
@@ -133,7 +132,8 @@ where
     {
         assert!(
             (size as usize) <= self.buffer.len(),
-            "Batch size cannot be greater than buffer size"
+            "batch size ({size}) > buffer len ({})",
+            self.buffer.len()
         );
         let size = size as i64;
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -144,11 +144,6 @@ where
         while self.free_slots < size {
             self.wait_strategy.wait();
             let barrier_seq = self.barrier.sequence();
-            assert!(
-                barrier_seq <= producer_seq,
-                "Producer cursor sequence must never be behind of its barrier sequence.\nFound \
-                producer seq: {producer_seq}, and barrier seq: {barrier_seq}"
-            );
             self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
         }
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
@@ -185,7 +180,6 @@ where
     }
 }
 
-#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>, // shared between this consumer and as a barrier for consumers or producers
@@ -204,7 +198,8 @@ where
     {
         assert!(
             (size as usize) <= self.buffer.len(),
-            "Batch size cannot be greater than buffer size"
+            "batch size ({size}) > buffer len ({})",
+            self.buffer.len()
         );
         let size = size as i64;
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -213,8 +208,7 @@ where
         while barrier_seq - consumer_seq < size {
             assert!(
                 consumer_seq <= barrier_seq,
-                "Consumer cursor sequence must never be ahead of its barrier sequence.\nFound \
-                consumer seq: {consumer_seq}, and barrier seq: {barrier_seq}"
+                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
             );
             self.wait_strategy.wait();
             barrier_seq = self.barrier.sequence();
@@ -250,8 +244,7 @@ where
         while barrier_seq - consumer_seq == 0 {
             assert!(
                 consumer_seq <= barrier_seq,
-                "Consumer cursor sequence must never be ahead of its barrier sequence.\nFound \
-                consumer seq: {consumer_seq}, and barrier seq: {barrier_seq}"
+                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
             );
             self.wait_strategy.wait();
             barrier_seq = self.barrier.sequence();
@@ -321,32 +314,28 @@ impl Drop for Barrier {
     }
 }
 
-/// Calculate the distance on the ring buffer from a producer provided sequence to the barrier of
-/// the last consumers. Positive return values represent free slots available for writes on the
-/// buffer. Negative values represent the producer sequence being ahead of the barrier by the
-/// returned amount.
+/// Calculate the distance on the ring buffer from a producer provided sequence to its barrier.
+/// Positive return values represent available distance to this producer's barrier. Zero or
+/// negative values represent no available write distance.
 ///
-/// This calculation utilises the constraint that `0 <= barrier_seq <= producer_seq`. Callers must
-/// ensure that this constraint always holds.
+/// When `buffer_size > 0`, this calculation utilises the constraint that:
+/// `0 <= barrier_seq <= producer_seq`. Callers must ensure that this constraint holds.
 ///
-/// This function can also be used to calculate `barrier_seq - producer_seq` by simply passing `0`
-/// as the `buffer_size`. To use the function in this way, it must be the case that
+/// This function can also be used to calculate `barrier_seq - producer_seq` by passing `0` as the
+/// `buffer_size`. To use the function in this way, it must be the case that:
 /// `barrier_seq >= producer_seq`.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
     #[cfg(debug_assertions)]
-    if buffer_size == 0 {
-        assert!(
+    match buffer_size {
+        0 => assert!(
             barrier_seq >= producer_seq,
-            "If buffer_size == 0 then barrier_seq >= producer_seq is required.\nFound \
-            buffer_size: {buffer_size} producer_seq: {producer_seq}, barrier_seq: {barrier_seq}",
-        );
-    } else {
-        assert!(
-            0 <= barrier_seq && barrier_seq <= producer_seq && buffer_size > 0,
-            "Requires that 0 <= barrier_seq <= producer_seq.\nFound buffer_size: {buffer_size} \
-            producer_seq: {producer_seq}, barrier_seq: {barrier_seq}"
-        );
+            "buffer_size == 0, but barrier_seq ({barrier_seq}) < producer_seq ({producer_seq})"
+        ),
+        _ => assert!(
+            0 <= barrier_seq && barrier_seq <= producer_seq,
+            "Order error: 0 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
+        ),
     }
     buffer_size as i64 - (producer_seq - barrier_seq)
 }
