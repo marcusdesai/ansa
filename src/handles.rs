@@ -3,6 +3,7 @@ use crate::wait::WaitStrategy;
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
+#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool = true> {
     cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
@@ -112,6 +113,7 @@ where
     }
 }
 
+#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct SingleProducer<E, W, const LEAD: bool = true> {
     pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
@@ -183,6 +185,7 @@ where
     }
 }
 
+#[must_use = "Disruptor will stall if not used."]
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>, // shared between this consumer and as a barrier for consumers or producers

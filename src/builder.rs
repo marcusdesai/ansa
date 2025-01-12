@@ -44,16 +44,18 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
+    pub fn add_handle(mut self, handle: Handle, follows: Follows) -> Self {
+        let id = handle.id();
         if self.follows.contains_key(&id) {
             panic!("id: {id} already registered")
         }
         self.followed_by.entry(id).or_default();
         let follow_ids: &[usize] = match &follows {
-            Follows::Producer => {
+            Follows::LeadProducer => {
                 self.follows_lead.insert(id);
                 &[]
             }
+            Follows::Producer(_) => todo!(),
             Follows::Consumer(c) => &[*c],
             Follows::Consumers(cs) => cs,
         };
@@ -145,7 +147,8 @@ where
             let mut following_unregistered = None;
 
             let barrier = match follows {
-                Follows::Producer => Barrier::One(Arc::clone(lead_cursor)),
+                Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
+                Follows::Producer(_) => todo!(),
                 Follows::Consumer(follow_id) => {
                     if !self.follows.contains_key(follow_id) {
                         following_unregistered = Some(follow_id)
@@ -259,7 +262,8 @@ fn find_graph_layers(
 /// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
 /// after both `consumer 0` and `consumer 1` have finished their reads.
 pub enum Follows {
-    Producer, // extend to accept usize, make 0 default id of lead producer
+    LeadProducer,
+    Producer(usize),
     Consumer(usize),
     Consumers(Vec<usize>),
 }
@@ -268,6 +272,36 @@ pub enum Follows {
 pub enum Handle {
     Producer(usize),
     Consumer(usize),
+}
+
+impl Handle {
+    fn id(&self) -> usize {
+        match self {
+            Handle::Producer(id) => *id,
+            Handle::Consumer(id) => *id,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct HandleMap<E, W> {
+    lead: Option<SingleProducer<E, W, true>>,
+    producers: UsizeMap<SingleProducer<E, W, false>>,
+    consumers: UsizeMap<Consumer<E, W>>,
+}
+
+impl<E, W> HandleMap<E, W> {
+    pub fn take_lead(&mut self) -> Option<SingleProducer<E, W, true>> {
+        self.lead.take()
+    }
+
+    pub fn take_producer(&mut self, id: usize) -> Option<SingleProducer<E, W, false>> {
+        self.producers.remove(&id)
+    }
+
+    pub fn take_consumer(&mut self, id: usize) -> Option<Consumer<E, W>> {
+        self.consumers.remove(&id)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
