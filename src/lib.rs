@@ -80,9 +80,7 @@ mod tests {
                 let dc = Arc::clone(&done);
                 s.spawn(move || {
                     sb.wait();
-                    let mut counter = 0;
-                    while counter < 2 {
-                        counter += 1;
+                    for _ in 0..2 {
                         producer.batch_write(publish_amount / 2, |i, seq, _| *i = seq);
                     }
                     dc.fetch_add(1, Ordering::Relaxed);
@@ -141,13 +139,13 @@ mod tests {
         std::thread::scope(|s| {
             let mut producer = handles.take_lead().unwrap();
             s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
+                let mut should_continue = true;
+                while should_continue {
                     producer.batch_write(20, |event, seq, _| {
-                        counter += 1;
                         event.seq = seq;
                         if seq == num_of_events {
                             event.consumer_break = true;
+                            should_continue = false;
                         }
                     })
                 }

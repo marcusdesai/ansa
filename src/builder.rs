@@ -146,8 +146,10 @@ where
         }
         let _ = match find_graph_layers(&self.followed_by, &self.follows_lead) {
             Ok(layers) => layers,
-            Err(cyclic_id) => panic!("Cycle found for id: {}", cyclic_id),
+            Err(dag_error) => dag_error.panic(),
         };
+
+        // todo: ensure producer total order here
 
         let producers = UsizeMap::default();
         let mut consumers = UsizeMap::default();
@@ -203,53 +205,44 @@ where
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum DagError {
+    Cycle(usize),
+    Missing(usize),
+    Disconnected(usize),
+}
+
+impl DagError {
+    fn panic(self) -> ! {
+        match self {
+            DagError::Cycle(cyclic_id) => panic!("Cycle for id: {}", cyclic_id),
+            DagError::Missing(missing_id) => panic!("id not in graph: {}", missing_id),
+            DagError::Disconnected(dis_id) => panic!("Disconnected id: {}", dis_id),
+        }
+    }
+}
+
 /// return Ok(layers) or Err(cycle index)
 ///
 /// Uses topological sort, see: https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 ///
 /// finding the layers allows us to check two things. Whether any consumer shares a layer with a
 /// trailing producer, and whether all consumers are totally ordered with respect to all producers.
-///
-/// Unfortunately, the current implementation results in potentially visiting each node multiple
-/// times, but this is necessary to ensure we calculate the layers correctly.
 fn find_graph_layers(
     graph: &UsizeMap<Vec<usize>>,
     roots: &UsizeSet,
-) -> Result<Vec<Vec<usize>>, usize> {
+) -> Result<Vec<Vec<usize>>, DagError> {
     let mut visiting = UsizeSet::default();
+    let mut visited = UsizeSet::default();
     let mut layers = UsizeMap::default(); // maps nodes -> which layer they inhabit
 
-    fn visit(
-        node: usize,
-        layer: usize,
-        visiting: &mut UsizeSet,
-        layers: &mut UsizeMap<usize>,
-        graph: &UsizeMap<Vec<usize>>,
-    ) -> Option<usize> {
-        layers
-            .entry(node)
-            .and_modify(|l| *l = (*l).max(layer))
-            .or_insert(layer);
-
-        if visiting.contains(&node) {
-            // cycle found
-            return Some(node);
-        }
-
-        visiting.insert(node);
-        // unwrap okay as we'll only use `find_cycle` when `node` is guaranteed to be in `graph`
-        for child in graph.get(&node).unwrap().iter() {
-            if let cycle @ Some(_) = visit(*child, layer + 1, visiting, layers, graph) {
-                return cycle;
-            }
-        }
-        visiting.remove(&node);
-        None
+    for node in roots {
+        visit(*node, 0, &mut visiting, &mut visited, &mut layers, graph)?;
     }
 
-    for node in roots {
-        if let Some(cycle) = visit(*node, 0, &mut visiting, &mut layers, graph) {
-            return Err(cycle);
+    for node in graph.keys() {
+        if !visited.contains(node) {
+            return Err(DagError::Disconnected(*node));
         }
     }
 
@@ -261,13 +254,44 @@ fn find_graph_layers(
             .and_modify(|l| l.push(node_id))
             .or_insert_with(|| vec![node_id]);
     }
-
     let layers_vec = (0..layers_inverted.len())
         // unwrap okay due to above construction of layers_inverted
         .map(|layer| layers_inverted.remove(&layer).unwrap())
         .collect();
 
     Ok(layers_vec)
+}
+
+/// Helper function for recursively visiting the graph nodes using DFS
+fn visit(
+    node: usize,
+    layer: usize,
+    visiting: &mut UsizeSet,
+    visited: &mut UsizeSet,
+    layers: &mut UsizeMap<usize>,
+    graph: &UsizeMap<Vec<usize>>,
+) -> Result<(), DagError> {
+    layers
+        .entry(node)
+        .and_modify(|l| *l = (*l).max(layer))
+        .or_insert(layer);
+
+    if visiting.contains(&node) {
+        return Err(DagError::Cycle(node));
+    }
+
+    visiting.insert(node);
+    match graph.get(&node) {
+        None => return Err(DagError::Missing(node)),
+        Some(children) => {
+            for child in children {
+                visit(*child, layer + 1, visiting, visited, layers, graph)?;
+            }
+        }
+    }
+    visiting.remove(&node);
+    visited.insert(node);
+    Ok(())
 }
 
 // fn ensure_producer_total_order() {}
@@ -305,7 +329,8 @@ impl Handle {
 /// by this store. If any single producer or consumer fails to move on the ring buffer, then the
 /// disruptor as a whole will eventually permanently stall.
 ///
-/// If this is dropped, then all remaining producers and consumers it holds are dropped.
+/// When `debug_assertions` is enabled, a warning is printed if this struct is not empty when
+/// dropped, i.e., there are still further producers or consumers to extract.
 #[derive(Debug)]
 pub struct DisruptorHandles<E, W> {
     lead: Option<SingleProducer<E, W, true>>,
@@ -331,17 +356,19 @@ impl<E, W> DisruptorHandles<E, W> {
     pub fn take_consumer(&mut self, id: usize) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
     }
+
+    /// Returns `true` when no handles are left to take from this struct.
+    pub fn is_empty(&self) -> bool {
+        self.lead.is_none() && self.consumers.is_empty() && self.producers.is_empty()
+    }
 }
 
 #[cfg(debug_assertions)]
 impl<E, W> Drop for DisruptorHandles<E, W> {
     fn drop(&mut self) {
-        let store_is_empty =
-            self.take_lead().is_none() && self.consumers.is_empty() && self.producers.is_empty();
-        assert!(
-            store_is_empty,
-            "HandleStore should be empty when dropped. Unused handles will cause stalls."
-        )
+        if !self.is_empty() {
+            println!("WARNING: DisruptorHandles not empty when dropped");
+        }
     }
 }
 
@@ -379,7 +406,7 @@ mod tests {
             (4, vec![]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(0));
+        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(0)));
 
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
@@ -389,18 +416,36 @@ mod tests {
             (4, vec![2]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(4));
+        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(4)));
+    }
+
+    #[test]
+    fn test_find_disconnected_branch() {
+        // simulate where node 4 is disconnected from the graph
+        let graph = UsizeMap::from_iter([
+            (0, vec![1]),
+            (1, vec![2]),
+            (2, vec![3]),
+            (3, vec![]),
+            (4, vec![5]),
+            (5, vec![4]),
+        ]);
+        let roots = UsizeSet::from_iter([0]);
+        assert_eq!(
+            find_graph_layers(&graph, &roots),
+            Err(DagError::Disconnected(4))
+        );
     }
 
     #[test]
     fn test_find_cycle_self_follow() {
         let graph = UsizeMap::from_iter([(0, vec![1]), (1, vec![1])]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(1));
+        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(1)));
     }
 
     #[test]
-    fn test_find_no_cycle() {
+    fn test_find_layers() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -414,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_roots() {
+    fn test_find_layers_multiple_roots() {
         let graph = UsizeMap::from_iter([
             (0, vec![3]),
             (1, vec![4]),
