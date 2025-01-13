@@ -121,7 +121,7 @@ where
             .followed_by
             .iter()
             .filter(|(_, followed_by)| followed_by.is_empty())
-            // unwrap okay as the cursor for this id must exist at this point
+            // unwrap okay as the cursor for this id must exist by this point
             .map(|(id, _)| Arc::clone(cursor_map.get(id).unwrap()))
             .collect();
 
@@ -132,8 +132,6 @@ where
         }
     }
 
-    // use numbering of unordered layers to reason about trailing producers in the dag
-    // consumers must be totally ordered with respect to producers
     #[allow(clippy::type_complexity)]
     fn construct_handles(
         &self,
@@ -231,12 +229,16 @@ impl DagError {
     }
 }
 
-/// return Ok(layers) or Err(cycle index)
+/// Returns every totally ordered chain of the partially ordered set which makes up the DAG, if
+/// successful.
 ///
-/// Uses topological sort, see: https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
+/// Otherwise, returns the relevant [`DagError`].
 ///
-/// finding the layers allows us to check two things. Whether any consumer shares a layer with a
-/// trailing producer, and whether all consumers are totally ordered with respect to all producers.
+/// Finding the chains allows us to check whether all handles are totally ordered with respect to
+/// all producers.
+///
+/// Uses DFS as purposed for topological sort, see:
+/// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 fn validate_graph(
     graph: &UsizeMap<Vec<usize>>,
     roots: &UsizeSet,
@@ -256,7 +258,7 @@ fn validate_graph(
     Ok(chains)
 }
 
-/// Helper function for recursively visiting the graph nodes using DFS
+/// Helper function for recursively visiting the graph nodes using DFS.
 fn visit(
     node: usize,
     visiting: &mut UsizeSet,
@@ -267,19 +269,17 @@ fn visit(
     if visiting.contains(&node) {
         return Err(DagError::Cycle(node));
     }
+    visiting.insert(node);
 
     chain.push(node);
     let mut chains = Vec::new();
-
-    visiting.insert(node);
-    match graph.get(&node) {
-        None => return Err(DagError::Missing(node)),
-        Some(children) if children.is_empty() => chains.push(chain),
-        Some(children) => {
-            for child in children {
-                let result = visit(*child, visiting, visited, chain.clone(), graph)?;
-                chains.extend(result);
-            }
+    let children = graph.get(&node).ok_or(DagError::Missing(node))?;
+    if children.is_empty() {
+        chains.push(chain)
+    } else {
+        for child in children {
+            let result = visit(*child, visiting, visited, chain.clone(), graph)?;
+            chains.extend(result);
         }
     }
 
