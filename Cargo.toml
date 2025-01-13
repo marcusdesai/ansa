@@ -2,6 +2,7 @@
 name = "ansa"
 version = "0.1.0"
 edition = "2021"
+#rust-version = "1.80.1"
 
 [dependencies]
 crossbeam-utils = { version = "0.8", optional = true }

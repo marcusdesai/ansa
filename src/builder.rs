@@ -18,6 +18,8 @@ pub struct DisruptorBuilder<E, WF, W> {
     follows: UsizeMap<Follows>,
     // All the ids which follow the lead producer
     follows_lead: UsizeSet,
+    // maps ids to handle type (producer or consumer)
+    handles_map: UsizeMap<Handle>,
     wait_type: PhantomData<W>,
 }
 
@@ -34,6 +36,7 @@ impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
             followed_by: UsizeMap::default(),
             follows: UsizeMap::default(),
             follows_lead: UsizeSet::default(),
+            handles_map: UsizeMap::default(),
             wait_type: PhantomData,
         }
     }
@@ -44,16 +47,17 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_consumer(self, id: usize, follows: Follows) -> Self {
-        self.add_handle(Handle::Consumer(id), follows)
+    pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
+        self.handles_map.insert(id, Handle::Consumer);
+        self.add_handle(id, follows)
     }
 
-    pub fn add_producer(self, id: usize, follows: Follows) -> Self {
-        self.add_handle(Handle::Producer(id), follows)
+    pub fn add_producer(mut self, id: usize, follows: Follows) -> Self {
+        self.handles_map.insert(id, Handle::Producer);
+        self.add_handle(id, follows)
     }
 
-    fn add_handle(mut self, handle: Handle, follows: Follows) -> Self {
-        let id = handle.id();
+    fn add_handle(mut self, id: usize, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             panic!("id: {id} already registered")
         }
@@ -87,6 +91,7 @@ where
             followed_by: self.followed_by,
             follows: self.follows,
             follows_lead: self.follows_lead,
+            handles_map: self.handles_map,
             wait_type: PhantomData,
         }
     }
@@ -144,12 +149,16 @@ where
         if self.follows_lead.is_empty() {
             panic!("No ids follow the lead producer")
         }
-        let _ = match find_graph_layers(&self.followed_by, &self.follows_lead) {
-            Ok(layers) => layers,
+        let chains = match validate_graph(&self.followed_by, &self.follows_lead) {
+            Ok(chains) => chains,
             Err(dag_error) => dag_error.panic(),
         };
-
-        // todo: ensure producer total order here
+        if let Some(chain) = validate_producer_total_order(&self.handles_map, &chains) {
+            panic!(
+                "Chain of handles: {:?} does not pass through all producers",
+                chain
+            )
+        }
 
         let producers = UsizeMap::default();
         let mut consumers = UsizeMap::default();
@@ -188,7 +197,7 @@ where
 
             // Ensure all ids which this handle follows are registered
             if let Some(follow_id) = following_unregistered {
-                panic!("Consumer id: {} follows unregistered id: {}", id, follow_id)
+                panic!("Handle id: {} follows unregistered id: {}", id, follow_id)
             }
 
             let consumer = Consumer {
@@ -216,7 +225,7 @@ impl DagError {
     fn panic(self) -> ! {
         match self {
             DagError::Cycle(cyclic_id) => panic!("Cycle for id: {}", cyclic_id),
-            DagError::Missing(missing_id) => panic!("id not in graph: {}", missing_id),
+            DagError::Missing(missing_id) => panic!("id: {} missing from graph", missing_id),
             DagError::Disconnected(dis_id) => panic!("Disconnected id: {}", dis_id),
         }
     }
@@ -228,73 +237,80 @@ impl DagError {
 ///
 /// finding the layers allows us to check two things. Whether any consumer shares a layer with a
 /// trailing producer, and whether all consumers are totally ordered with respect to all producers.
-fn find_graph_layers(
+fn validate_graph(
     graph: &UsizeMap<Vec<usize>>,
     roots: &UsizeSet,
 ) -> Result<Vec<Vec<usize>>, DagError> {
     let mut visiting = UsizeSet::default();
     let mut visited = UsizeSet::default();
-    let mut layers = UsizeMap::default(); // maps nodes -> which layer they inhabit
-
+    let mut chains = Vec::new();
     for node in roots {
-        visit(*node, 0, &mut visiting, &mut visited, &mut layers, graph)?;
+        let result = visit(*node, &mut visiting, &mut visited, Vec::new(), graph)?;
+        chains.extend(result)
     }
-
     for node in graph.keys() {
         if !visited.contains(node) {
             return Err(DagError::Disconnected(*node));
         }
     }
-
-    // invert the index
-    let mut layers_inverted: UsizeMap<Vec<usize>> = UsizeMap::default();
-    for (node_id, layer) in layers {
-        layers_inverted
-            .entry(layer)
-            .and_modify(|l| l.push(node_id))
-            .or_insert_with(|| vec![node_id]);
-    }
-    let layers_vec = (0..layers_inverted.len())
-        // unwrap okay due to above construction of layers_inverted
-        .map(|layer| layers_inverted.remove(&layer).unwrap())
-        .collect();
-
-    Ok(layers_vec)
+    Ok(chains)
 }
 
 /// Helper function for recursively visiting the graph nodes using DFS
 fn visit(
     node: usize,
-    layer: usize,
     visiting: &mut UsizeSet,
     visited: &mut UsizeSet,
-    layers: &mut UsizeMap<usize>,
+    mut chain: Vec<usize>,
     graph: &UsizeMap<Vec<usize>>,
-) -> Result<(), DagError> {
-    layers
-        .entry(node)
-        .and_modify(|l| *l = (*l).max(layer))
-        .or_insert(layer);
-
+) -> Result<Vec<Vec<usize>>, DagError> {
     if visiting.contains(&node) {
         return Err(DagError::Cycle(node));
     }
 
+    chain.push(node);
+    let mut chains = Vec::new();
+
     visiting.insert(node);
     match graph.get(&node) {
         None => return Err(DagError::Missing(node)),
+        Some(children) if children.is_empty() => chains.push(chain),
         Some(children) => {
             for child in children {
-                visit(*child, layer + 1, visiting, visited, layers, graph)?;
+                let result = visit(*child, visiting, visited, chain.clone(), graph)?;
+                chains.extend(result);
             }
         }
     }
+
     visiting.remove(&node);
     visited.insert(node);
-    Ok(())
+    Ok(chains)
 }
 
-// fn ensure_producer_total_order() {}
+/// All chains must contain all producers to ensure that every node in the graph is totally ordered
+/// with respect to all producers.
+fn validate_producer_total_order(
+    handles_map: &UsizeMap<Handle>,
+    chains: &Vec<Vec<usize>>,
+) -> Option<Vec<usize>> {
+    let producer_ids: UsizeSet = handles_map
+        .iter()
+        .filter(|(_, h)| matches!(h, Handle::Producer))
+        .map(|(id, _)| *id)
+        .collect();
+    if producer_ids.is_empty() {
+        return None;
+    }
+    for chain in chains {
+        for id in &producer_ids {
+            if !chain.contains(id) {
+                return Some(chain.clone());
+            }
+        }
+    }
+    None
+}
 
 /// Describes the ordering relationship for a single consumer.
 ///
@@ -310,17 +326,8 @@ pub enum Follows {
 
 #[derive(Copy, Clone, Debug)]
 enum Handle {
-    Producer(usize),
-    Consumer(usize),
-}
-
-impl Handle {
-    fn id(&self) -> usize {
-        match self {
-            Handle::Producer(id) => *id,
-            Handle::Consumer(id) => *id,
-        }
-    }
+    Producer,
+    Consumer,
 }
 
 /// Stores the producers and consumers for a single disruptor.
@@ -406,7 +413,7 @@ mod tests {
             (4, vec![]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(0)));
+        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(0)));
 
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
@@ -416,7 +423,7 @@ mod tests {
             (4, vec![2]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(4)));
+        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(4)));
     }
 
     #[test]
@@ -432,20 +439,30 @@ mod tests {
         ]);
         let roots = UsizeSet::from_iter([0]);
         assert_eq!(
-            find_graph_layers(&graph, &roots),
+            validate_graph(&graph, &roots),
             Err(DagError::Disconnected(4))
         );
+    }
+
+    #[test]
+    fn test_find_missing_id() {
+        let graph = UsizeMap::from_iter([(0, vec![1])]);
+        let roots = UsizeSet::from_iter([0]);
+        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(1)));
+
+        let graph = UsizeMap::from_iter([(0, vec![1, 2]), (1, vec![3]), (2, vec![3])]);
+        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(3)));
     }
 
     #[test]
     fn test_find_cycle_self_follow() {
         let graph = UsizeMap::from_iter([(0, vec![1]), (1, vec![1])]);
         let roots = UsizeSet::from_iter([0]);
-        assert_eq!(find_graph_layers(&graph, &roots), Err(DagError::Cycle(1)));
+        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(1)));
     }
 
     #[test]
-    fn test_find_layers() {
+    fn test_find_chains() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
@@ -454,12 +471,12 @@ mod tests {
             (4, vec![]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        let layers = vec![vec![0], vec![1, 2], vec![3], vec![4]];
-        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
+        let chains = vec![vec![0, 1, 3, 4], vec![0, 2, 4]];
+        assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
 
     #[test]
-    fn test_find_layers_multiple_roots() {
+    fn test_find_chains_multiple_roots() {
         let graph = UsizeMap::from_iter([
             (0, vec![3]),
             (1, vec![4]),
@@ -470,8 +487,8 @@ mod tests {
             (6, vec![]),
         ]);
         let roots = UsizeSet::from_iter([0, 1, 2]);
-        let layers = vec![vec![0, 1, 2], vec![3, 4, 5], vec![6]];
-        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
+        let chains = vec![vec![0, 3, 6], vec![1, 4, 6], vec![2, 5, 6]];
+        assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
 
     // 0 ─► 1 ─► 2 ─► 3 ─► 7
@@ -479,7 +496,7 @@ mod tests {
     // ▼              |
     // 4 ─► 5 ─► 6 ─-─┘
     #[test]
-    fn test_find_layers_fan_out_in_uneven() {
+    fn test_find_chains_fan_out_in_uneven() {
         let graph = UsizeMap::from_iter([
             (0, vec![1, 4]),
             (1, vec![2]),
@@ -491,7 +508,98 @@ mod tests {
             (7, vec![]),
         ]);
         let roots = UsizeSet::from_iter([0]);
-        let layers = vec![vec![0], vec![1, 4], vec![2, 5], vec![6], vec![3], vec![7]];
-        assert_eq!(find_graph_layers(&graph, &roots), Ok(layers));
+        let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
+        assert_eq!(validate_graph(&graph, &roots), Ok(chains));
+    }
+
+    // 0  ─► 1 ─► 2 ─► 3 ─► 7
+    // |               ▲
+    // ▼               |
+    // 4P ─► 5 ─► 6 ─-─┘
+    #[test]
+    fn test_producer_partial_order() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Consumer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Consumer),
+            (4, Handle::Producer),
+            (5, Handle::Consumer),
+            (6, Handle::Consumer),
+            (7, Handle::Consumer),
+        ]);
+        let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, Some(vec![0, 1, 2, 3, 7]))
+    }
+
+    // 0 ─► 1 ─► 2 ─► 3P ─► 7
+    // |              ▲
+    // ▼              |
+    // 4 ─► 5 ─► 6 ─-─┘
+    #[test]
+    fn test_producer_total_order() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Consumer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Producer),
+            (4, Handle::Consumer),
+            (5, Handle::Consumer),
+            (6, Handle::Consumer),
+            (7, Handle::Consumer),
+        ]);
+        let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, None)
+    }
+
+    // 0P ─► 1 ─► 2 ─► 3 ─► 7
+    // |               ▲
+    // ▼               |
+    // 4  ─► 5 ─► 6 ─-─┘
+    #[test]
+    fn test_producer_total_order2() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Producer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Consumer),
+            (4, Handle::Consumer),
+            (5, Handle::Consumer),
+            (6, Handle::Consumer),
+            (7, Handle::Consumer),
+        ]);
+        let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, None)
+    }
+
+    // 0 ─► 1
+    // |    |
+    // ▼    ▼
+    // 2 ─► 3P ─► 4
+    //      |     |
+    //      ▼     ▼
+    //      5  ─► 6P
+    #[test]
+    fn test_producer_total_order3() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Consumer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Producer),
+            (4, Handle::Consumer),
+            (5, Handle::Consumer),
+            (6, Handle::Producer),
+        ]);
+        let chains = vec![
+            vec![0, 1, 3, 4, 6],
+            vec![0, 1, 3, 5, 6],
+            vec![0, 2, 3, 4, 6],
+            vec![0, 2, 3, 5, 6],
+        ];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, None)
     }
 }
