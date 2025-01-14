@@ -7,13 +7,12 @@ pub use builder::*;
 pub use handles::*;
 
 #[cfg(test)]
-mod tests {
+mod integration_tests {
     use super::*;
     use crate::wait::*;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    // Integration tests
 
     #[test]
     fn test_single_producer() {
@@ -120,8 +119,8 @@ mod tests {
         let mut handles = DisruptorBuilder::new(128, Event::default)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(2, Handle::Consumer, Follows::Consumer(0))
-            .add_handle(3, Handle::Consumer, Follows::Consumers(vec![1, 2]))
+            .add_handle(2, Handle::Consumer, Follows::One(0))
+            .add_handle(3, Handle::Consumer, Follows::Many(vec![1, 2]))
             .wait_strategy(|| WaitYield)
             .build();
 
@@ -231,7 +230,7 @@ mod tests {
     fn test_wait_blocking() {
         let mut handles = DisruptorBuilder::new(32, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Consumer, Follows::Consumer(0))
+            .add_handle(1, Handle::Consumer, Follows::One(0))
             .wait_strategy(WaitBlocking::new)
             .build();
 
@@ -301,5 +300,75 @@ mod tests {
 
         assert_eq!(c0_counter.load(Ordering::Relaxed), num_of_events);
         assert_eq!(c1_counter.load(Ordering::Relaxed), num_of_events);
+    }
+
+    #[test]
+    fn test_trailing_single_producer() {
+        let mut handles = DisruptorBuilder::new(64, || 0i64)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Producer, Follows::One(0))
+            .add_handle(2, Handle::Consumer, Follows::One(1))
+            .wait_strategy(|| {
+                WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
+            })
+            .build();
+
+        let num_of_events = 200;
+        let mut result_seqs = vec![0i64; num_of_events + 1];
+        let mut result_blank: Vec<i64> = vec![];
+
+        std::thread::scope(|s| {
+            let mut producer = handles.take_lead().unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    producer.batch_write(20, |i, seq, _| {
+                        counter += 1;
+                        *i = seq;
+                    })
+                }
+            });
+
+            let out_0 = &mut result_seqs;
+            let consumer_0 = handles.take_consumer(0).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_0.batch_read(20, |i, seq, _| {
+                        counter += 1;
+                        out_0[seq as usize] = *i;
+                    })
+                }
+            });
+
+            let mut trailing_producer = handles.take_producer(1).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    trailing_producer.batch_write(20, |i, _, _| {
+                        counter += 1;
+                        *i = 0;
+                    })
+                }
+            });
+
+            let out_2 = &mut result_blank;
+            let consumer_2 = handles.take_consumer(2).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_2.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out_2.push(*i);
+                    })
+                }
+            });
+        });
+
+        let expected_seqs: Vec<_> = (0..=200).collect();
+        assert_eq!(result_seqs, expected_seqs);
+
+        let expected_blank = vec![0; num_of_events];
+        assert_eq!(result_blank, expected_blank);
     }
 }

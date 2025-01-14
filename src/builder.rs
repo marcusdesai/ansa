@@ -62,8 +62,8 @@ where
                 self.follows_lead.insert(id);
                 &[]
             }
-            Follows::Consumer(c) | Follows::Producer(c) => &[*c],
-            Follows::Consumers(cs) => cs,
+            Follows::One(c) => &[*c],
+            Follows::Many(cs) => cs,
         };
         follow_ids.iter().for_each(|c| {
             self.followed_by
@@ -111,8 +111,8 @@ where
         for follows in self.follows.values() {
             let follow_ids: &[u64] = match follows {
                 Follows::LeadProducer => &[],
-                Follows::Consumer(c) | Follows::Producer(c) => &[*c],
-                Follows::Consumers(cs) => cs,
+                Follows::One(c) => &[*c],
+                Follows::Many(cs) => cs,
             };
             for id in follow_ids {
                 if !self.follows.contains_key(id) {
@@ -182,10 +182,8 @@ where
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
-                Follows::Consumer(follow_id) | Follows::Producer(follow_id) => {
-                    Barrier::One(get_cursor(*follow_id, &mut cursor_map))
-                }
-                Follows::Consumers(many) => {
+                Follows::One(follow_id) => Barrier::One(get_cursor(*follow_id, &mut cursor_map)),
+                Follows::Many(many) => {
                     let follows_cursors: Box<[_]> = many
                         .iter()
                         .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
@@ -325,9 +323,8 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Optio
 #[derive(Debug)]
 pub enum Follows {
     LeadProducer,
-    Producer(u64),
-    Consumer(u64),
-    Consumers(Vec<u64>),
+    One(u64),
+    Many(Vec<u64>),
 }
 
 #[derive(Copy, Clone, Debug)]
