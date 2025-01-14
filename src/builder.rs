@@ -1,6 +1,6 @@
 use crate::handles::{Barrier, Consumer, Cursor};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::{WaitBusy, WaitStrategy};
+use crate::wait::{WaitBlocking, WaitStrategy};
 use crate::SingleProducer;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub struct DisruptorBuilder<E, WF, W> {
     buffer: Arc<RingBuffer<E>>,
-    // factory function for building instances of the wait strategy, defaults to WaitBusy
+    // factory function for building instances of the wait strategy, defaults to WaitBlocking
     wait_factory: WF,
     // Maps ids of consumers in a "followed by" relationship. For example, the pair  (3, [5, 7])
     // indicates that the consumer with id 3 is followed by the consumers with ids 5 and 7.
@@ -24,7 +24,7 @@ pub struct DisruptorBuilder<E, WF, W> {
 }
 
 // Separate impl block for `new` so that a default type for wait factory can be provided
-impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
+impl<E> DisruptorBuilder<E, fn() -> WaitBlocking, WaitBlocking> {
     pub fn new<F>(size: usize, element_factory: F) -> Self
     where
         E: Sync,
@@ -32,7 +32,7 @@ impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
     {
         DisruptorBuilder {
             buffer: Arc::new(RingBuffer::new(size, element_factory)),
-            wait_factory: || WaitBusy,
+            wait_factory: WaitBlocking::new,
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
@@ -178,13 +178,13 @@ where
         }
 
         for (&id, follows) in self.follows.iter() {
-            let consumer_cursor = get_cursor(id, &mut cursor_map);
+            let handle_cursor = get_cursor(id, &mut cursor_map);
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
                 Follows::One(follow_id) => Barrier::One(get_cursor(*follow_id, &mut cursor_map)),
                 Follows::Many(many) => {
-                    let follows_cursors: Box<[_]> = many
+                    let follows_cursors = many
                         .iter()
                         .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
                         .collect();
@@ -195,7 +195,7 @@ where
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
                     let producer = SingleProducer {
-                        cursor: consumer_cursor,
+                        cursor: handle_cursor,
                         barrier,
                         buffer: Arc::clone(&self.buffer),
                         free_slots: 0,
@@ -205,7 +205,7 @@ where
                 }
                 Handle::Consumer => {
                     let consumer = Consumer {
-                        cursor: consumer_cursor,
+                        cursor: handle_cursor,
                         barrier,
                         buffer: Arc::clone(&self.buffer),
                         wait_strategy: (self.wait_factory)(),
@@ -316,10 +316,10 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Optio
     None
 }
 
-/// Describes the ordering relationship for a single consumer.
+/// Describes the ordering relationship for a single handle.
 ///
-/// `Follows::Consumers(vec![0, 1])` denotes that a consumer reads elements on the ring buffer only
-/// after both `consumer 0` and `consumer 1` have finished their reads.
+/// `Follows::Many(vec![0, 1])` denotes that a handle interacts with elements on the ring buffer
+/// only after both handles with ids `0` and `1` have finished their interactions.
 #[derive(Debug)]
 pub enum Follows {
     LeadProducer,
@@ -327,6 +327,7 @@ pub enum Follows {
     Many(Vec<u64>),
 }
 
+/// Describes the type of handle.
 #[derive(Copy, Clone, Debug)]
 pub enum Handle {
     Producer,
@@ -339,7 +340,7 @@ pub enum Handle {
 /// by this store. If any single producer or consumer fails to move on the ring buffer, then the
 /// disruptor as a whole will eventually permanently stall.
 ///
-/// When `debug_assertions` is enabled, a warning is printed if this struct is not empty when
+/// When `debug_assertions` are enabled, a warning is printed if this struct is not empty when
 /// dropped, i.e., there are still further producers or consumers to extract.
 #[derive(Debug)]
 pub struct DisruptorHandles<E, W> {
@@ -350,19 +351,19 @@ pub struct DisruptorHandles<E, W> {
 
 impl<E, W> DisruptorHandles<E, W> {
     /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
-    #[must_use = "Disruptor will stall if not used."]
+    #[must_use = "Disruptor will stall if not used"]
     pub fn take_lead(&mut self) -> Option<SingleProducer<E, W, true>> {
         self.lead.take()
     }
 
     /// Returns the producer with this `id`. Returns `None` if this `id` has already been taken.
-    #[must_use = "Disruptor will stall if not used."]
+    #[must_use = "Disruptor will stall if not used"]
     pub fn take_producer(&mut self, id: u64) -> Option<SingleProducer<E, W, false>> {
         self.producers.remove(&id)
     }
 
     /// Returns the consumer with this `id`. Returns `None` if this `id` has already been taken.
-    #[must_use = "Disruptor will stall if not used."]
+    #[must_use = "Disruptor will stall if not used"]
     pub fn take_consumer(&mut self, id: u64) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
     }
@@ -391,7 +392,7 @@ impl Hasher for HashU64 {
     }
 
     fn write(&mut self, _: &[u8]) {
-        unreachable!("`write` should never be called.");
+        unreachable!("`write` should never be called");
     }
 
     fn write_u64(&mut self, i: u64) {
