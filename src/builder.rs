@@ -13,13 +13,13 @@ pub struct DisruptorBuilder<E, WF, W> {
     wait_factory: WF,
     // Maps ids of consumers in a "followed by" relationship. For example, the pair  (3, [5, 7])
     // indicates that the consumer with id 3 is followed by the consumers with ids 5 and 7.
-    followed_by: UsizeMap<Vec<usize>>,
+    followed_by: U64Map<Vec<u64>>,
     // The inverse of followed_by, useful for conveniently constructing barriers for consumers
-    follows: UsizeMap<Follows>,
+    follows: U64Map<Follows>,
     // All the ids which follow the lead producer
-    follows_lead: UsizeSet,
+    follows_lead: U64Set,
     // maps ids to handle type (producer or consumer)
-    handles_map: UsizeMap<Handle>,
+    handles_map: U64Map<Handle>,
     wait_type: PhantomData<W>,
 }
 
@@ -33,10 +33,10 @@ impl<E> DisruptorBuilder<E, fn() -> WaitBusy, WaitBusy> {
         DisruptorBuilder {
             buffer: Arc::new(RingBuffer::new(size, element_factory)),
             wait_factory: || WaitBusy,
-            followed_by: UsizeMap::default(),
-            follows: UsizeMap::default(),
-            follows_lead: UsizeSet::default(),
-            handles_map: UsizeMap::default(),
+            followed_by: U64Map::default(),
+            follows: U64Map::default(),
+            follows_lead: U64Set::default(),
+            handles_map: U64Map::default(),
             wait_type: PhantomData,
         }
     }
@@ -47,22 +47,17 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_consumer(mut self, id: usize, follows: Follows) -> Self {
-        self.handles_map.insert(id, Handle::Consumer);
-        self.add_handle(id, follows)
-    }
-
-    pub fn add_producer(mut self, id: usize, follows: Follows) -> Self {
-        self.handles_map.insert(id, Handle::Producer);
-        self.add_handle(id, follows)
-    }
-
-    fn add_handle(mut self, id: usize, follows: Follows) -> Self {
+    pub fn add_handle(self, id: u64, h: Handle, f: Follows) -> Self {
         if self.follows.contains_key(&id) {
             panic!("id: {id} already registered")
         }
+        unsafe { self.add_handle_unchecked(id, h, f) }
+    }
+
+    pub unsafe fn add_handle_unchecked(mut self, id: u64, h: Handle, f: Follows) -> Self {
+        self.handles_map.insert(id, h);
         self.followed_by.entry(id).or_default();
-        let follow_ids: &[usize] = match &follows {
+        let follow_ids: &[u64] = match &f {
             Follows::LeadProducer => {
                 self.follows_lead.insert(id);
                 &[]
@@ -76,7 +71,7 @@ where
                 .and_modify(|vec| vec.push(id))
                 .or_insert_with(|| vec![id]);
         });
-        self.follows.insert(id, follows);
+        self.follows.insert(id, f);
         self
     }
 
@@ -97,6 +92,38 @@ where
     }
 
     pub fn build(self) -> DisruptorHandles<E, W> {
+        if self.follows.is_empty() {
+            panic!("No ids registered")
+        }
+        if self.follows_lead.is_empty() {
+            panic!("No ids follow the lead producer")
+        }
+        let chains = match validate_graph(&self.followed_by, &self.follows_lead) {
+            Ok(chains) => chains,
+            Err(dag_error) => dag_error.panic(),
+        };
+        if let Some((chain, id)) = validate_order(&self.handles_map, &chains) {
+            panic!(
+                "Chain of handles: {:?} unordered with respect to producer id: {}",
+                chain, id
+            )
+        }
+        for follows in self.follows.values() {
+            let follow_ids: &[u64] = match follows {
+                Follows::LeadProducer => &[],
+                Follows::Consumer(c) | Follows::Producer(c) => &[*c],
+                Follows::Consumers(cs) => cs,
+            };
+            for id in follow_ids {
+                if !self.follows.contains_key(id) {
+                    panic!("unregistered id: {id}")
+                }
+            }
+        }
+        unsafe { self.build_unchecked() }
+    }
+
+    pub unsafe fn build_unchecked(self) -> DisruptorHandles<E, W> {
         let lead_cursor = Arc::new(Cursor::new(0));
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor);
         let barrier = self.construct_lead_barrier(cursor_map);
@@ -116,7 +143,7 @@ where
         }
     }
 
-    fn construct_lead_barrier(&self, cursor_map: UsizeMap<Arc<Cursor>>) -> Barrier {
+    fn construct_lead_barrier(&self, cursor_map: U64Map<Arc<Cursor>>) -> Barrier {
         let mut cursors: Vec<_> = self
             .followed_by
             .iter()
@@ -137,75 +164,57 @@ where
         &self,
         lead_cursor: &Arc<Cursor>,
     ) -> (
-        UsizeMap<SingleProducer<E, W, false>>,
-        UsizeMap<Consumer<E, W>>,
-        UsizeMap<Arc<Cursor>>,
+        U64Map<SingleProducer<E, W, false>>,
+        U64Map<Consumer<E, W>>,
+        U64Map<Arc<Cursor>>,
     ) {
-        if self.follows.is_empty() {
-            panic!("No ids registered")
-        }
-        if self.follows_lead.is_empty() {
-            panic!("No ids follow the lead producer")
-        }
-        let chains = match validate_graph(&self.followed_by, &self.follows_lead) {
-            Ok(chains) => chains,
-            Err(dag_error) => dag_error.panic(),
-        };
-        if let Some((chain, id)) = validate_producer_total_order(&self.handles_map, &chains) {
-            panic!(
-                "Chain of handles: {:?} unordered with respect to producer id: {}",
-                chain, id
-            )
-        }
+        let mut producers = U64Map::default();
+        let mut consumers = U64Map::default();
+        let mut cursor_map = U64Map::default();
 
-        let producers = UsizeMap::default();
-        let mut consumers = UsizeMap::default();
-        let mut cursor_map = UsizeMap::default();
-
-        fn get_cursor(id: usize, map: &mut UsizeMap<Arc<Cursor>>) -> Arc<Cursor> {
+        fn get_cursor(id: u64, map: &mut U64Map<Arc<Cursor>>) -> Arc<Cursor> {
             let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new(0)));
             Arc::clone(cursor)
         }
 
         for (&id, follows) in self.follows.iter() {
             let consumer_cursor = get_cursor(id, &mut cursor_map);
-            let mut following_unregistered = None;
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
                 Follows::Consumer(follow_id) | Follows::Producer(follow_id) => {
-                    if !self.follows.contains_key(follow_id) {
-                        following_unregistered = Some(follow_id)
-                    }
                     Barrier::One(get_cursor(*follow_id, &mut cursor_map))
                 }
                 Follows::Consumers(many) => {
                     let follows_cursors: Box<[_]> = many
                         .iter()
-                        .map(|follow_id| {
-                            if !self.follows.contains_key(follow_id) {
-                                following_unregistered = Some(follow_id)
-                            }
-                            get_cursor(*follow_id, &mut cursor_map)
-                        })
+                        .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
                         .collect();
                     Barrier::Many(follows_cursors)
                 }
             };
-
-            // Ensure all ids which this handle follows are registered
-            if let Some(follow_id) = following_unregistered {
-                panic!("Handle id: {} follows unregistered id: {}", id, follow_id)
+            // unwrap okay as this entry in handles_map is guaranteed to exist for this id
+            match self.handles_map.get(&id).unwrap() {
+                Handle::Producer => {
+                    let producer = SingleProducer {
+                        cursor: consumer_cursor,
+                        barrier,
+                        buffer: Arc::clone(&self.buffer),
+                        free_slots: 0,
+                        wait_strategy: (self.wait_factory)(),
+                    };
+                    producers.insert(id, producer);
+                }
+                Handle::Consumer => {
+                    let consumer = Consumer {
+                        cursor: consumer_cursor,
+                        barrier,
+                        buffer: Arc::clone(&self.buffer),
+                        wait_strategy: (self.wait_factory)(),
+                    };
+                    consumers.insert(id, consumer);
+                }
             }
-
-            let consumer = Consumer {
-                cursor: consumer_cursor,
-                barrier,
-                buffer: Arc::clone(&self.buffer),
-                wait_strategy: (self.wait_factory)(),
-            };
-
-            consumers.insert(id, consumer);
         }
 
         (producers, consumers, cursor_map)
@@ -214,9 +223,9 @@ where
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum DagError {
-    Cycle(usize),
-    Missing(usize),
-    Disconnected(usize),
+    Cycle(u64),
+    Missing(u64),
+    Disconnected(u64),
 }
 
 impl DagError {
@@ -239,12 +248,9 @@ impl DagError {
 ///
 /// Uses DFS as purposed for topological sort, see:
 /// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
-fn validate_graph(
-    graph: &UsizeMap<Vec<usize>>,
-    roots: &UsizeSet,
-) -> Result<Vec<Vec<usize>>, DagError> {
-    let mut visiting = UsizeSet::default();
-    let mut visited = UsizeSet::default();
+fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u64>>, DagError> {
+    let mut visiting = U64Set::default();
+    let mut visited = U64Set::default();
     let mut chains = Vec::new();
     for node in roots {
         let result = visit(*node, &mut visiting, &mut visited, Vec::new(), graph)?;
@@ -260,12 +266,12 @@ fn validate_graph(
 
 /// Helper function for recursively visiting the graph nodes using DFS.
 fn visit(
-    node: usize,
-    visiting: &mut UsizeSet,
-    visited: &mut UsizeSet,
-    mut chain: Vec<usize>,
-    graph: &UsizeMap<Vec<usize>>,
-) -> Result<Vec<Vec<usize>>, DagError> {
+    node: u64,
+    visiting: &mut U64Set,
+    visited: &mut U64Set,
+    mut chain: Vec<u64>,
+    graph: &U64Map<Vec<u64>>,
+) -> Result<Vec<Vec<u64>>, DagError> {
     if visiting.contains(&node) {
         return Err(DagError::Cycle(node));
     }
@@ -293,11 +299,8 @@ fn visit(
 ///
 /// All chains must contain all producers to ensure that every node in the graph is totally ordered
 /// with respect to all producers.
-fn validate_producer_total_order(
-    handles_map: &UsizeMap<Handle>,
-    chains: &Vec<Vec<usize>>,
-) -> Option<(Vec<usize>, usize)> {
-    let producer_ids: UsizeSet = handles_map
+fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Option<(Vec<u64>, u64)> {
+    let producer_ids: U64Set = handles_map
         .iter()
         .filter(|(_, h)| matches!(h, Handle::Producer))
         .map(|(id, _)| *id)
@@ -322,13 +325,13 @@ fn validate_producer_total_order(
 #[derive(Debug)]
 pub enum Follows {
     LeadProducer,
-    Producer(usize),
-    Consumer(usize),
-    Consumers(Vec<usize>),
+    Producer(u64),
+    Consumer(u64),
+    Consumers(Vec<u64>),
 }
 
 #[derive(Copy, Clone, Debug)]
-enum Handle {
+pub enum Handle {
     Producer,
     Consumer,
 }
@@ -344,8 +347,8 @@ enum Handle {
 #[derive(Debug)]
 pub struct DisruptorHandles<E, W> {
     lead: Option<SingleProducer<E, W, true>>,
-    producers: UsizeMap<SingleProducer<E, W, false>>,
-    consumers: UsizeMap<Consumer<E, W>>,
+    producers: U64Map<SingleProducer<E, W, false>>,
+    consumers: U64Map<Consumer<E, W>>,
 }
 
 impl<E, W> DisruptorHandles<E, W> {
@@ -357,13 +360,13 @@ impl<E, W> DisruptorHandles<E, W> {
 
     /// Returns the producer with this `id`. Returns `None` if this `id` has already been taken.
     #[must_use = "Disruptor will stall if not used."]
-    pub fn take_producer(&mut self, id: usize) -> Option<SingleProducer<E, W, false>> {
+    pub fn take_producer(&mut self, id: u64) -> Option<SingleProducer<E, W, false>> {
         self.producers.remove(&id)
     }
 
     /// Returns the consumer with this `id`. Returns `None` if this `id` has already been taken.
     #[must_use = "Disruptor will stall if not used."]
-    pub fn take_consumer(&mut self, id: usize) -> Option<Consumer<E, W>> {
+    pub fn take_consumer(&mut self, id: u64) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
     }
 
@@ -383,9 +386,9 @@ impl<E, W> Drop for DisruptorHandles<E, W> {
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-struct HashUsize(u64);
+struct HashU64(u64);
 
-impl Hasher for HashUsize {
+impl Hasher for HashU64 {
     fn finish(&self) -> u64 {
         self.0
     }
@@ -394,13 +397,13 @@ impl Hasher for HashUsize {
         unreachable!("`write` should never be called.");
     }
 
-    fn write_usize(&mut self, i: usize) {
-        self.0 = i as u64;
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
     }
 }
 
-type UsizeMap<V> = HashMap<usize, V, BuildHasherDefault<HashUsize>>;
-type UsizeSet = HashSet<usize, BuildHasherDefault<HashUsize>>;
+type U64Map<V> = HashMap<u64, V, BuildHasherDefault<HashU64>>;
+type U64Set = HashSet<u64, BuildHasherDefault<HashU64>>;
 
 #[cfg(test)]
 mod tests {
@@ -408,31 +411,31 @@ mod tests {
 
     #[test]
     fn test_find_cycle() {
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
             (2, vec![4]),
             (3, vec![0]),
             (4, vec![]),
         ]);
-        let roots = UsizeSet::from_iter([0]);
+        let roots = U64Set::from_iter([0]);
         assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(0)));
 
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
             (2, vec![4]),
             (3, vec![4]),
             (4, vec![2]),
         ]);
-        let roots = UsizeSet::from_iter([0]);
+        let roots = U64Set::from_iter([0]);
         assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(4)));
     }
 
     #[test]
     fn test_find_disconnected_branch() {
         // simulate where node 4 is disconnected from the graph
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![1]),
             (1, vec![2]),
             (2, vec![3]),
@@ -440,7 +443,7 @@ mod tests {
             (4, vec![5]),
             (5, vec![4]),
         ]);
-        let roots = UsizeSet::from_iter([0]);
+        let roots = U64Set::from_iter([0]);
         assert_eq!(
             validate_graph(&graph, &roots),
             Err(DagError::Disconnected(4))
@@ -449,38 +452,38 @@ mod tests {
 
     #[test]
     fn test_find_missing_id() {
-        let graph = UsizeMap::from_iter([(0, vec![1])]);
-        let roots = UsizeSet::from_iter([0]);
+        let graph = U64Map::from_iter([(0, vec![1])]);
+        let roots = U64Set::from_iter([0]);
         assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(1)));
 
-        let graph = UsizeMap::from_iter([(0, vec![1, 2]), (1, vec![3]), (2, vec![3])]);
+        let graph = U64Map::from_iter([(0, vec![1, 2]), (1, vec![3]), (2, vec![3])]);
         assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(3)));
     }
 
     #[test]
     fn test_find_cycle_self_follow() {
-        let graph = UsizeMap::from_iter([(0, vec![1]), (1, vec![1])]);
-        let roots = UsizeSet::from_iter([0]);
+        let graph = U64Map::from_iter([(0, vec![1]), (1, vec![1])]);
+        let roots = U64Set::from_iter([0]);
         assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(1)));
     }
 
     #[test]
     fn test_find_chains() {
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![1, 2]),
             (1, vec![3]),
             (2, vec![4]),
             (3, vec![4]),
             (4, vec![]),
         ]);
-        let roots = UsizeSet::from_iter([0]);
+        let roots = U64Set::from_iter([0]);
         let chains = vec![vec![0, 1, 3, 4], vec![0, 2, 4]];
         assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
 
     #[test]
     fn test_find_chains_multiple_roots() {
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![3]),
             (1, vec![4]),
             (2, vec![5]),
@@ -489,7 +492,7 @@ mod tests {
             (5, vec![6]),
             (6, vec![]),
         ]);
-        let roots = UsizeSet::from_iter([0, 1, 2]);
+        let roots = U64Set::from_iter([0, 1, 2]);
         let chains = vec![vec![0, 3, 6], vec![1, 4, 6], vec![2, 5, 6]];
         assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
@@ -500,7 +503,7 @@ mod tests {
     // 4 ─► 5 ─► 6 ─-─┘
     #[test]
     fn test_find_chains_fan_out_in_uneven() {
-        let graph = UsizeMap::from_iter([
+        let graph = U64Map::from_iter([
             (0, vec![1, 4]),
             (1, vec![2]),
             (2, vec![3]),
@@ -510,7 +513,7 @@ mod tests {
             (3, vec![7]),
             (7, vec![]),
         ]);
-        let roots = UsizeSet::from_iter([0]);
+        let roots = U64Set::from_iter([0]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
         assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
@@ -521,7 +524,7 @@ mod tests {
     // 4P ─► 5 ─► 6 ─-─┘
     #[test]
     fn test_producer_partial_order() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Consumer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -532,7 +535,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, Some((vec![0, 1, 2, 3, 7], 4)))
     }
 
@@ -542,7 +545,7 @@ mod tests {
     // 4 ─► 5 ─► 6 ─-─┘
     #[test]
     fn test_producer_total_order() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Consumer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -553,7 +556,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, None)
     }
 
@@ -563,7 +566,7 @@ mod tests {
     // 4  ─► 5 ─► 6 ─-─┘
     #[test]
     fn test_producer_total_order2() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Producer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -574,7 +577,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, None)
     }
 
@@ -587,7 +590,7 @@ mod tests {
     //      5  ─► 6P
     #[test]
     fn test_producer_total_order3() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Consumer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -602,7 +605,7 @@ mod tests {
             vec![0, 2, 3, 4, 6],
             vec![0, 2, 3, 5, 6],
         ];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, None)
     }
 
@@ -612,7 +615,7 @@ mod tests {
     // 5
     #[test]
     fn test_producer_partial_order2() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Consumer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -621,7 +624,7 @@ mod tests {
             (5, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, Some((vec![0, 5], 4)))
     }
 
@@ -631,7 +634,7 @@ mod tests {
     // 5
     #[test]
     fn test_producer_total_order4() {
-        let handles_map = UsizeMap::from_iter([
+        let handles_map = U64Map::from_iter([
             (0, Handle::Consumer),
             (1, Handle::Consumer),
             (2, Handle::Consumer),
@@ -640,7 +643,7 @@ mod tests {
             (5, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
-        let result = validate_producer_total_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, &chains);
         assert_eq!(result, None)
     }
 }

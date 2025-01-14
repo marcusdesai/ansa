@@ -18,7 +18,7 @@ mod tests {
     #[test]
     fn test_single_producer() {
         let mut handles = DisruptorBuilder::new(64, || 0i64)
-            .add_consumer(0, Follows::LeadProducer)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .wait_strategy(|| {
                 WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
             })
@@ -59,7 +59,7 @@ mod tests {
     fn test_multi_producer() {
         let size = 512;
         let mut handles = DisruptorBuilder::new(size, || 0i64)
-            .add_consumer(0, Follows::LeadProducer)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .wait_strategy(|| WaitBusy)
             .build();
 
@@ -118,10 +118,10 @@ mod tests {
         }
 
         let mut handles = DisruptorBuilder::new(128, Event::default)
-            .add_consumer(0, Follows::LeadProducer)
-            .add_consumer(1, Follows::LeadProducer)
-            .add_consumer(2, Follows::Consumer(0))
-            .add_consumer(3, Follows::Consumers(vec![1, 2]))
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(2, Handle::Consumer, Follows::Consumer(0))
+            .add_handle(3, Handle::Consumer, Follows::Consumers(vec![1, 2]))
             .wait_strategy(|| WaitYield)
             .build();
 
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn test_wait_blocking() {
         let mut handles = DisruptorBuilder::new(32, || 0i64)
-            .add_consumer(0, Follows::LeadProducer)
-            .add_consumer(1, Follows::Consumer(0))
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::Consumer(0))
             .wait_strategy(WaitBlocking::new)
             .build();
 
