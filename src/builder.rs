@@ -151,10 +151,10 @@ where
             Ok(chains) => chains,
             Err(dag_error) => dag_error.panic(),
         };
-        if let Some(chain) = validate_producer_total_order(&self.handles_map, &chains) {
+        if let Some((chain, id)) = validate_producer_total_order(&self.handles_map, &chains) {
             panic!(
-                "Chain of handles: {:?} does not pass through all producers",
-                chain
+                "Chain of handles: {:?} unordered with respect to producer id: {}",
+                chain, id
             )
         }
 
@@ -288,12 +288,15 @@ fn visit(
     Ok(chains)
 }
 
+/// Returns `None` if all chains contain all producers. Otherwise, returns the (chain, id) pair
+/// where the producer id is not in the chain.
+///
 /// All chains must contain all producers to ensure that every node in the graph is totally ordered
 /// with respect to all producers.
 fn validate_producer_total_order(
     handles_map: &UsizeMap<Handle>,
     chains: &Vec<Vec<usize>>,
-) -> Option<Vec<usize>> {
+) -> Option<(Vec<usize>, usize)> {
     let producer_ids: UsizeSet = handles_map
         .iter()
         .filter(|(_, h)| matches!(h, Handle::Producer))
@@ -305,7 +308,7 @@ fn validate_producer_total_order(
     for chain in chains {
         for id in &producer_ids {
             if !chain.contains(id) {
-                return Some(chain.clone());
+                return Some((chain.clone(), *id));
             }
         }
     }
@@ -530,7 +533,7 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
         let result = validate_producer_total_order(&handles_map, &chains);
-        assert_eq!(result, Some(vec![0, 1, 2, 3, 7]))
+        assert_eq!(result, Some((vec![0, 1, 2, 3, 7], 4)))
     }
 
     // 0 ─► 1 ─► 2 ─► 3P ─► 7
@@ -599,6 +602,44 @@ mod tests {
             vec![0, 2, 3, 4, 6],
             vec![0, 2, 3, 5, 6],
         ];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, None)
+    }
+
+    // 0 ─► 1 ─► 2 ─► 3 ─► 4P
+    // |
+    // ▼
+    // 5
+    #[test]
+    fn test_producer_partial_order2() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Consumer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Consumer),
+            (4, Handle::Producer),
+            (5, Handle::Consumer),
+        ]);
+        let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
+        let result = validate_producer_total_order(&handles_map, &chains);
+        assert_eq!(result, Some((vec![0, 5], 4)))
+    }
+
+    // 0 ─► 1 ─► 2 ─► 3 ─► 4
+    // |
+    // ▼
+    // 5
+    #[test]
+    fn test_producer_total_order4() {
+        let handles_map = UsizeMap::from_iter([
+            (0, Handle::Consumer),
+            (1, Handle::Consumer),
+            (2, Handle::Consumer),
+            (3, Handle::Consumer),
+            (4, Handle::Consumer),
+            (5, Handle::Consumer),
+        ]);
+        let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
         let result = validate_producer_total_order(&handles_map, &chains);
         assert_eq!(result, None)
     }
