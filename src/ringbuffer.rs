@@ -11,29 +11,27 @@ pub(crate) struct RingBuffer<E> {
     slots: Box<[UnsafeCell<E>]>,
 }
 
-// SAFETY: `RingBuffer` provides an API that does not, by itself, enable safe references to a
+// SAFETY: `RingBuffer` provides an API that does not, by itself, guarantee safe references to a
 // single `RingBuffer` across multiple threads. In a single thread, accesses to `RingBuffer`
 // elements, using `RingBuffer::get`, must ensure that no mutable aliasing occurs. With multiple
 // threads, accesses to elements must also ensure no mutable aliasing occurs across threads.
 //
-// Note: `E` must be `Sync` because multiple references to `E` are required across threads.
+// Note: `E` must be `Sync` because it must be possible to refer to `E` across multiple threads.
 unsafe impl<E> Sync for RingBuffer<E> where E: Sync {}
 
 impl<E> RingBuffer<E> {
     /// Create a [`RingBuffer`]. Uses a boxed slice for storage, ensuring data is held contiguously
     /// in memory.
     ///
-    /// # Panics
-    /// If the provided `size` is zero or not a power of 2.
+    /// `size` must be a non-zero power of two.
     pub(crate) fn new<F>(size: usize, mut factory: F) -> Self
     where
         F: FnMut() -> E,
     {
-        if size == 0 || (size & (size - 1)) != 0 {
-            // panic instead of return result as this state is non-recoverable
-            panic!("RingBuffer size must be a non-zero power of 2; given size: {size}")
-        }
-
+        assert!(
+            size > 0 && (size & (size - 1)) == 0,
+            "size: {size} not power of 2"
+        );
         let slots: Box<[UnsafeCell<E>]> = (0..size).map(|_| UnsafeCell::new(factory())).collect();
         RingBuffer { slots }
     }
@@ -86,21 +84,6 @@ pub(crate) fn mod_m_po2(n: i64, m: i64) -> i64 {
 mod tests {
     use super::*;
     use rand::{thread_rng, Rng};
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    #[should_panic(expected = "RingBuffer size must be a non-zero power of 2; given size: 0")]
-    fn test_ring_buffer_zero_size_panic() {
-        RingBuffer::new(0, || 0);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    #[should_panic(expected = "RingBuffer size must be a non-zero power of 2; given size: 12")]
-    fn test_ring_buffer_non_po2_size_panic() {
-        RingBuffer::new(12, || 0);
-    }
-
     #[test]
     #[cfg_attr(miri, ignore)] // miri works on this code but is slow, and its check are unnecessary
     fn validate_mod_m_square() {

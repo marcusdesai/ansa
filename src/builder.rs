@@ -3,58 +3,67 @@ use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBlocking, WaitStrategy};
 use crate::SingleProducer;
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-pub struct DisruptorBuilder<E, WF, W> {
-    buffer: Arc<RingBuffer<E>>,
-    // factory function for building instances of the wait strategy, defaults to WaitBlocking
+pub struct DisruptorBuilder<F, E, WF, W> {
+    /// Size of the ring buffer, must be power of 2.
+    buffer_size: usize,
+    /// Factory function for populating the buffer with elements. Wrapped in an option only to
+    /// facilitate moving the value out of the builder while the builder is still in use.
+    element_factory: Option<F>,
+    /// Factory function for building instances of the wait strategy, defaults to WaitBlocking.
     wait_factory: WF,
-    // Maps ids of consumers in a "followed by" relationship. For example, the pair  (3, [5, 7])
-    // indicates that the consumer with id 3 is followed by the consumers with ids 5 and 7.
+    /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
+    /// indicates that the consumer with id `3` is followed by the consumers with ids `5` and `7`.
     followed_by: U64Map<Vec<u64>>,
-    // The inverse of followed_by, useful for conveniently constructing barriers for consumers
+    /// The inverse of followed_by, useful for conveniently constructing barriers for consumers.
     follows: U64Map<Follows>,
-    // All the ids which follow the lead producer
+    /// All the ids which follow the lead producer. These are the roots of the graph.
     follows_lead: U64Set,
-    // maps ids to handle type (producer or consumer)
+    /// Maps ids to handle type (producer or consumer).
     handles_map: U64Map<Handle>,
+    /// Tracks whether ids have been reused.
+    overlapping_ids: U64Set,
+    element_type: PhantomData<E>,
     wait_type: PhantomData<W>,
 }
 
-// Separate impl block for `new` so that a default type for wait factory can be provided
-impl<E> DisruptorBuilder<E, fn() -> WaitBlocking, WaitBlocking> {
-    pub fn new<F>(size: usize, element_factory: F) -> Self
+// separate impl block for `new` so that a default type for wait factory can be provided
+impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
+    pub fn new(size: usize, element_factory: F) -> Self
     where
         E: Sync,
         F: FnMut() -> E,
     {
         DisruptorBuilder {
-            buffer: Arc::new(RingBuffer::new(size, element_factory)),
+            buffer_size: size,
+            element_factory: Some(element_factory),
             wait_factory: WaitBlocking::new,
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
             handles_map: U64Map::default(),
+            overlapping_ids: U64Set::default(),
+            element_type: PhantomData,
             wait_type: PhantomData,
         }
     }
 }
 
-impl<E, WF, W> DisruptorBuilder<E, WF, W>
+impl<F, E, WF, W> DisruptorBuilder<F, E, WF, W>
 where
+    F: FnMut() -> E,
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    pub fn add_handle(self, id: u64, h: Handle, f: Follows) -> Self {
+    pub fn add_handle(mut self, id: u64, h: Handle, f: Follows) -> Self {
         if self.follows.contains_key(&id) {
-            panic!("id: {id} already registered")
+            self.overlapping_ids.insert(id);
         }
-        unsafe { self.add_handle_unchecked(id, h, f) }
-    }
-
-    pub unsafe fn add_handle_unchecked(mut self, id: u64, h: Handle, f: Follows) -> Self {
         self.handles_map.insert(id, h);
         self.followed_by.entry(id).or_default();
         let follow_ids: &[u64] = match &f {
@@ -75,72 +84,47 @@ where
         self
     }
 
-    pub fn wait_strategy<WF2, W2>(self, wait_factory: WF2) -> DisruptorBuilder<E, WF2, W2>
+    pub fn wait_strategy<WF2, W2>(self, wait_factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,
         W2: WaitStrategy,
     {
         DisruptorBuilder {
-            buffer: self.buffer,
+            buffer_size: self.buffer_size,
+            element_factory: self.element_factory,
             wait_factory,
             followed_by: self.followed_by,
             follows: self.follows,
             follows_lead: self.follows_lead,
             handles_map: self.handles_map,
+            overlapping_ids: self.overlapping_ids,
+            element_type: PhantomData,
             wait_type: PhantomData,
         }
     }
 
-    pub fn build(self) -> DisruptorHandles<E, W> {
-        if self.follows.is_empty() {
-            panic!("No ids registered")
-        }
-        if self.follows_lead.is_empty() {
-            panic!("No ids follow the lead producer")
-        }
-        let chains = match validate_graph(&self.followed_by, &self.follows_lead) {
-            Ok(chains) => chains,
-            Err(dag_error) => dag_error.panic(),
-        };
-        if let Some((chain, id)) = validate_order(&self.handles_map, &chains) {
-            panic!(
-                "Chain of handles: {:?} unordered with respect to producer id: {}",
-                chain, id
-            )
-        }
-        for follows in self.follows.values() {
-            let follow_ids: &[u64] = match follows {
-                Follows::LeadProducer => &[],
-                Follows::One(c) => &[*c],
-                Follows::Many(cs) => cs,
-            };
-            for id in follow_ids {
-                if !self.follows.contains_key(id) {
-                    panic!("unregistered id: {id}")
-                }
-            }
-        }
-        unsafe { self.build_unchecked() }
-    }
-
-    pub unsafe fn build_unchecked(self) -> DisruptorHandles<E, W> {
+    pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
+        self.validate()?;
+        // unwrap okay as this value will always be inhabited as per construction of the builder
+        let element_factory = self.element_factory.take().unwrap();
+        let buffer = Arc::new(RingBuffer::new(self.buffer_size, element_factory));
         let lead_cursor = Arc::new(Cursor::new(0));
-        let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor);
+        let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
         let lead_producer = SingleProducer {
             cursor: lead_cursor,
             barrier,
-            buffer: Arc::clone(&self.buffer),
+            buffer,
             free_slots: 0,
             wait_strategy: (self.wait_factory)(),
         };
 
-        DisruptorHandles {
+        Ok(DisruptorHandles {
             lead: Some(lead_producer),
             producers,
             consumers,
-        }
+        })
     }
 
     fn construct_lead_barrier(&self, cursor_map: U64Map<Arc<Cursor>>) -> Barrier {
@@ -163,6 +147,7 @@ where
     fn construct_handles(
         &self,
         lead_cursor: &Arc<Cursor>,
+        buffer: &Arc<RingBuffer<E>>,
     ) -> (
         U64Map<SingleProducer<E, W, false>>,
         U64Map<Consumer<E, W>>,
@@ -197,7 +182,7 @@ where
                     let producer = SingleProducer {
                         cursor: handle_cursor,
                         barrier,
-                        buffer: Arc::clone(&self.buffer),
+                        buffer: Arc::clone(buffer),
                         free_slots: 0,
                         wait_strategy: (self.wait_factory)(),
                     };
@@ -207,7 +192,7 @@ where
                     let consumer = Consumer {
                         cursor: handle_cursor,
                         barrier,
-                        buffer: Arc::clone(&self.buffer),
+                        buffer: Arc::clone(buffer),
                         wait_strategy: (self.wait_factory)(),
                     };
                     consumers.insert(id, consumer);
@@ -217,24 +202,100 @@ where
 
         (producers, consumers, cursor_map)
     }
+
+    fn validate(&self) -> Result<(), BuildError> {
+        let size = self.buffer_size;
+        if size == 0 || (size & (size - 1)) != 0 {
+            return Err(BuildError::BufferSize(size));
+        }
+        if !self.overlapping_ids.is_empty() {
+            return Err(BuildError::OverlappingIDs(
+                self.overlapping_ids.iter().copied().collect(),
+            ));
+        }
+        if self.follows.is_empty() {
+            return Err(BuildError::EmptyGraph);
+        }
+        if self.follows_lead.is_empty() {
+            return Err(BuildError::LeadNotFollowed);
+        }
+        let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
+        if let Some((chain, id)) = validate_order(&self.handles_map, &chains) {
+            return Err(BuildError::UnorderedProducer((chain, id)));
+        }
+        for follows in self.follows.values() {
+            let follow_ids: &[u64] = match follows {
+                Follows::LeadProducer => &[],
+                Follows::One(c) => &[*c],
+                Follows::Many(cs) => cs,
+            };
+            for id in follow_ids {
+                if !self.follows.contains_key(id) {
+                    return Err(BuildError::UnregisteredID(*id));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-enum DagError {
+pub enum BuildError {
+    BufferSize(usize),
+    OverlappingIDs(Vec<u64>),
+    EmptyGraph,
+    LeadNotFollowed,
+    UnorderedProducer((Vec<u64>, u64)),
+    UnregisteredID(u64),
+    DagError(DagError),
+}
+
+impl From<DagError> for BuildError {
+    fn from(value: DagError) -> Self {
+        BuildError::DagError(value)
+    }
+}
+
+impl Display for BuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            BuildError::BufferSize(size) => {
+                format!("RingBuffer size must be a non-zero power of 2; given size: {size}")
+            }
+            BuildError::OverlappingIDs(ids) => format!("Found overlapping ids: {ids:?}"),
+            BuildError::EmptyGraph => "Graph empty, no ids registered".to_owned(),
+            BuildError::LeadNotFollowed => "No ids follow the lead producer".to_owned(),
+            BuildError::UnorderedProducer((chain, id)) => {
+                format!("Chain of handles: {chain:?} unordered with respect to producer id: {id}")
+            }
+            BuildError::UnregisteredID(id) => format!("Found unregistered id: {id}"),
+            BuildError::DagError(err) => return Display::fmt(&err, f),
+        };
+        write!(f, "{}", str)
+    }
+}
+
+impl Error for BuildError {}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum DagError {
     Cycle(u64),
     Missing(u64),
     Disconnected(u64),
 }
 
-impl DagError {
-    fn panic(self) -> ! {
-        match self {
-            DagError::Cycle(cyclic_id) => panic!("Cycle for id: {}", cyclic_id),
-            DagError::Missing(missing_id) => panic!("id: {} missing from graph", missing_id),
-            DagError::Disconnected(dis_id) => panic!("Disconnected id: {}", dis_id),
-        }
+impl Display for DagError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let str = match self {
+            DagError::Cycle(cyclic_id) => format!("Cycle in graph for id: {}", cyclic_id),
+            DagError::Missing(missing_id) => format!("id: {} missing from graph", missing_id),
+            DagError::Disconnected(dis_id) => format!("id: {} disconnected from graph", dis_id),
+        };
+        write!(f, "{}", str)
     }
 }
+
+impl Error for DagError {}
 
 /// Returns every totally ordered chain of the partially ordered set which makes up the DAG, if
 /// successful.

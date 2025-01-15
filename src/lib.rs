@@ -21,7 +21,8 @@ mod integration_tests {
             .wait_strategy(|| {
                 WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
             })
-            .build();
+            .build()
+            .unwrap();
 
         let num_of_events = 200;
         let mut result = vec![0i64; num_of_events + 1];
@@ -60,7 +61,8 @@ mod integration_tests {
         let mut handles = DisruptorBuilder::new(size, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .wait_strategy(|| WaitBusy)
-            .build();
+            .build()
+            .unwrap();
 
         let multi_1 = handles.take_lead().unwrap().into_multi();
         let multi_2 = multi_1.clone();
@@ -122,7 +124,8 @@ mod integration_tests {
             .add_handle(2, Handle::Consumer, Follows::One(0))
             .add_handle(3, Handle::Consumer, Follows::Many(vec![1, 2]))
             .wait_strategy(|| WaitYield)
-            .build();
+            .build()
+            .unwrap();
 
         // vec of all written events
         let mut consumer_0_out = vec![];
@@ -232,7 +235,8 @@ mod integration_tests {
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::One(0))
             .wait_strategy(WaitBlocking::new)
-            .build();
+            .build()
+            .unwrap();
 
         let mut producer = handles.take_lead().unwrap();
         let consumer_0 = handles.take_consumer(0).unwrap();
@@ -311,7 +315,8 @@ mod integration_tests {
             .wait_strategy(|| {
                 WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
             })
-            .build();
+            .build()
+            .unwrap();
 
         let num_of_events = 200;
         let mut result_seqs = vec![0i64; num_of_events + 1];
