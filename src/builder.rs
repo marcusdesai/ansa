@@ -34,6 +34,11 @@ pub struct DisruptorBuilder<F, E, WF, W> {
 
 // separate impl block for `new` so that a default type for wait factory can be provided
 impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
+    /// Returns a new [`DisruptorBuilder`].
+    ///
+    /// `size` must be a non-zero power of 2.
+    ///
+    /// The default wait factory returns instances of: [`WaitBlocking`].
     pub fn new(size: usize, element_factory: F) -> Self
     where
         E: Sync,
@@ -60,6 +65,11 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
+    /// Add either a producer or consumer handle to the disruptor.
+    ///
+    /// Following conditions must be met...
+    ///
+    /// Examples...
     pub fn add_handle(mut self, id: u64, h: Handle, f: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
@@ -84,6 +94,9 @@ where
         self
     }
 
+    /// Set the wait strategy to be used by all consumers and producers.
+    ///
+    /// For details of all provided wait strategies, see the module docs for [`wait`](crate::wait).
     pub fn wait_strategy<WF2, W2>(self, wait_factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,
@@ -103,6 +116,10 @@ where
         }
     }
 
+    /// Returns the constructed [`DisruptorHandles`] struct if successful, otherwise returns
+    /// [`BuildError`].
+    ///
+    /// For details on failure states, please see [`BuildError`].
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
         // unwrap okay as this value will always be inhabited as per construction of the builder
@@ -209,9 +226,7 @@ where
             return Err(BuildError::BufferSize(size));
         }
         if !self.overlapping_ids.is_empty() {
-            return Err(BuildError::OverlappingIDs(
-                self.overlapping_ids.iter().copied().collect(),
-            ));
+            return Err(BuildError::OverlappingIDs(self.overlapping_ids.clone()));
         }
         if self.follows.is_empty() {
             return Err(BuildError::EmptyGraph);
@@ -237,21 +252,27 @@ where
     }
 }
 
+/// Describes the possible errors encountered when building a disruptor.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BuildError {
+    /// A buffer size which failed the non-zero power of 2 requirement.
     BufferSize(usize),
-    OverlappingIDs(Vec<u64>),
+    /// A set of ids which have been added multiple times.
+    OverlappingIDs(U64Set),
+    /// Indicates that no handles have been added to the disruptor.
     EmptyGraph,
+    /// Indicates that no handle directly follows the lead producer.
     LeadNotFollowed,
+    /// Indicates that some handles are not ordered for a producer.
     UnorderedProducer((Vec<u64>, u64)),
+    /// A handle ID which had not been explicitly added.
     UnregisteredID(u64),
-    DagError(DagError),
-}
-
-impl From<DagError> for BuildError {
-    fn from(value: DagError) -> Self {
-        BuildError::DagError(value)
-    }
+    /// A handle ID which loops in the graph.
+    GraphCycle(u64),
+    /// An ID which is referred to in the graph, but has not been added explicitly.
+    MissingNode(u64),
+    /// An ID which is disconnected from the rest of the graph nodes.
+    DisconnectedNode(u64),
 }
 
 impl Display for BuildError {
@@ -261,39 +282,21 @@ impl Display for BuildError {
                 format!("RingBuffer size must be a non-zero power of 2; given size: {size}")
             }
             BuildError::OverlappingIDs(ids) => format!("Found overlapping ids: {ids:?}"),
-            BuildError::EmptyGraph => "Graph empty, no ids registered".to_owned(),
-            BuildError::LeadNotFollowed => "No ids follow the lead producer".to_owned(),
+            BuildError::EmptyGraph => "Graph empty, no handles added".to_owned(),
+            BuildError::LeadNotFollowed => "No handles follow the lead producer".to_owned(),
             BuildError::UnorderedProducer((chain, id)) => {
                 format!("Chain of handles: {chain:?} does not contain producer id: {id}")
             }
             BuildError::UnregisteredID(id) => format!("Found unregistered id: {id}"),
-            BuildError::DagError(err) => return Display::fmt(&err, f),
+            BuildError::GraphCycle(id) => format!("Cycle in graph for id: {id}"),
+            BuildError::MissingNode(id) => format!("id: {id} missing from graph"),
+            BuildError::DisconnectedNode(id) => format!("id: {id} disconnected from graph"),
         };
         write!(f, "{}", str)
     }
 }
 
 impl Error for BuildError {}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum DagError {
-    Cycle(u64),
-    Missing(u64),
-    Disconnected(u64),
-}
-
-impl Display for DagError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let str = match self {
-            DagError::Cycle(id) => format!("Cycle in graph for id: {id}"),
-            DagError::Missing(id) => format!("id: {id} missing from graph"),
-            DagError::Disconnected(id) => format!("id: {id} disconnected from graph"),
-        };
-        write!(f, "{}", str)
-    }
-}
-
-impl Error for DagError {}
 
 /// Returns every totally ordered chain of the partially ordered set which makes up the DAG, if
 /// successful.
@@ -305,7 +308,7 @@ impl Error for DagError {}
 ///
 /// Uses DFS as purposed for topological sort, see:
 /// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
-fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u64>>, DagError> {
+fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u64>>, BuildError> {
     let mut visiting = U64Set::default();
     let mut visited = U64Set::default();
     let mut chains = Vec::new();
@@ -315,7 +318,7 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
     }
     for node in graph.keys() {
         if !visited.contains(node) {
-            return Err(DagError::Disconnected(*node));
+            return Err(BuildError::DisconnectedNode(*node));
         }
     }
     Ok(chains)
@@ -328,15 +331,15 @@ fn visit(
     visited: &mut U64Set,
     mut chain: Vec<u64>,
     graph: &U64Map<Vec<u64>>,
-) -> Result<Vec<Vec<u64>>, DagError> {
+) -> Result<Vec<Vec<u64>>, BuildError> {
     if visiting.contains(&node) {
-        return Err(DagError::Cycle(node));
+        return Err(BuildError::GraphCycle(node));
     }
     visiting.insert(node);
 
     chain.push(node);
     let mut chains = Vec::new();
-    let children = graph.get(&node).ok_or(DagError::Missing(node))?;
+    let children = graph.get(&node).ok_or(BuildError::MissingNode(node))?;
     if children.is_empty() {
         chains.push(chain)
     } else {
@@ -478,7 +481,10 @@ mod tests {
             (4, vec![]),
         ]);
         let roots = U64Set::from_iter([0]);
-        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(0)));
+        assert_eq!(
+            validate_graph(&graph, &roots),
+            Err(BuildError::GraphCycle(0))
+        );
 
         let graph = U64Map::from_iter([
             (0, vec![1, 2]),
@@ -488,7 +494,10 @@ mod tests {
             (4, vec![2]),
         ]);
         let roots = U64Set::from_iter([0]);
-        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(4)));
+        assert_eq!(
+            validate_graph(&graph, &roots),
+            Err(BuildError::GraphCycle(4))
+        );
     }
 
     #[test]
@@ -505,7 +514,7 @@ mod tests {
         let roots = U64Set::from_iter([0]);
         assert_eq!(
             validate_graph(&graph, &roots),
-            Err(DagError::Disconnected(4))
+            Err(BuildError::DisconnectedNode(4))
         );
     }
 
@@ -513,17 +522,26 @@ mod tests {
     fn test_find_missing_id() {
         let graph = U64Map::from_iter([(0, vec![1])]);
         let roots = U64Set::from_iter([0]);
-        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(1)));
+        assert_eq!(
+            validate_graph(&graph, &roots),
+            Err(BuildError::MissingNode(1))
+        );
 
         let graph = U64Map::from_iter([(0, vec![1, 2]), (1, vec![3]), (2, vec![3])]);
-        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Missing(3)));
+        assert_eq!(
+            validate_graph(&graph, &roots),
+            Err(BuildError::MissingNode(3))
+        );
     }
 
     #[test]
     fn test_find_cycle_self_follow() {
         let graph = U64Map::from_iter([(0, vec![1]), (1, vec![1])]);
         let roots = U64Set::from_iter([0]);
-        assert_eq!(validate_graph(&graph, &roots), Err(DagError::Cycle(1)));
+        assert_eq!(
+            validate_graph(&graph, &roots),
+            Err(BuildError::GraphCycle(1))
+        );
     }
 
     #[test]
@@ -716,9 +734,6 @@ mod tests {
             .add_handle(1, Handle::Consumer, Follows::Many(vec![]))
             .build();
 
-        assert_eq!(
-            result.err().unwrap(),
-            BuildError::DagError(DagError::Disconnected(1))
-        )
+        assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(1))
     }
 }
