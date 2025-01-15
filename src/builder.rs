@@ -220,9 +220,7 @@ where
             return Err(BuildError::LeadNotFollowed);
         }
         let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
-        if let Some((chain, id)) = validate_order(&self.handles_map, &chains) {
-            return Err(BuildError::UnorderedProducer((chain, id)));
-        }
+        validate_order(&self.handles_map, &chains)?;
         for follows in self.follows.values() {
             let follow_ids: &[u64] = match follows {
                 Follows::LeadProducer => &[],
@@ -266,7 +264,7 @@ impl Display for BuildError {
             BuildError::EmptyGraph => "Graph empty, no ids registered".to_owned(),
             BuildError::LeadNotFollowed => "No ids follow the lead producer".to_owned(),
             BuildError::UnorderedProducer((chain, id)) => {
-                format!("Chain of handles: {chain:?} unordered with respect to producer id: {id}")
+                format!("Chain of handles: {chain:?} does not contain producer id: {id}")
             }
             BuildError::UnregisteredID(id) => format!("Found unregistered id: {id}"),
             BuildError::DagError(err) => return Display::fmt(&err, f),
@@ -287,9 +285,9 @@ pub enum DagError {
 impl Display for DagError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let str = match self {
-            DagError::Cycle(cyclic_id) => format!("Cycle in graph for id: {}", cyclic_id),
-            DagError::Missing(missing_id) => format!("id: {} missing from graph", missing_id),
-            DagError::Disconnected(dis_id) => format!("id: {} disconnected from graph", dis_id),
+            DagError::Cycle(id) => format!("Cycle in graph for id: {id}"),
+            DagError::Missing(id) => format!("id: {id} missing from graph"),
+            DagError::Disconnected(id) => format!("id: {id} disconnected from graph"),
         };
         write!(f, "{}", str)
     }
@@ -353,28 +351,30 @@ fn visit(
     Ok(chains)
 }
 
-/// Returns `None` if all chains contain all producers. Otherwise, returns the (chain, id) pair
-/// where the producer id is not in the chain.
+/// Returns `None` if all chains of the graph contain all producers. Otherwise, returns the
+/// `(chain, id)` pair where the producer id is not in the chain.
 ///
-/// All chains must contain all producers to ensure that every node in the graph is totally ordered
-/// with respect to all producers.
-fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Option<(Vec<u64>, u64)> {
+/// A chain is a totally-ordered subset of a partially-ordered set (poset). If a chain does not
+/// include an element, `e`, of the poset, then there exist elements of that chain which are
+/// unordered with respect to `e`. Thus, to ensure that every element in the graph is totally
+/// ordered with respect to all producers, it must hold that all chains contain all producers.
+fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Result<(), BuildError> {
     let producer_ids: U64Set = handles_map
         .iter()
         .filter(|(_, h)| matches!(h, Handle::Producer))
         .map(|(id, _)| *id)
         .collect();
     if producer_ids.is_empty() {
-        return None;
+        return Ok(());
     }
     for chain in chains {
         for id in &producer_ids {
             if !chain.contains(id) {
-                return Some((chain.clone(), *id));
+                return Err(BuildError::UnorderedProducer((chain.clone(), *id)));
             }
         }
     }
-    None
+    Ok(())
 }
 
 /// Describes the ordering relationship for a single handle.
@@ -595,7 +595,10 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, Some((vec![0, 1, 2, 3, 7], 4)))
+        assert_eq!(
+            result,
+            Err(BuildError::UnorderedProducer((vec![0, 1, 2, 3, 7], 4)))
+        )
     }
 
     // 0 ─► 1 ─► 2 ─► 3P ─► 7
@@ -616,7 +619,7 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, None)
+        assert_eq!(result, Ok(()))
     }
 
     // 0P ─► 1 ─► 2 ─► 3 ─► 7
@@ -637,7 +640,7 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, None)
+        assert_eq!(result, Ok(()))
     }
 
     // 0 ─► 1
@@ -665,7 +668,7 @@ mod tests {
             vec![0, 2, 3, 5, 6],
         ];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, None)
+        assert_eq!(result, Ok(()))
     }
 
     // 0 ─► 1 ─► 2 ─► 3 ─► 4P
@@ -684,7 +687,7 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, Some((vec![0, 5], 4)))
+        assert_eq!(result, Err(BuildError::UnorderedProducer((vec![0, 5], 4))))
     }
 
     // 0 ─► 1 ─► 2 ─► 3 ─► 4
@@ -703,6 +706,19 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, None)
+        assert_eq!(result, Ok(()))
+    }
+
+    #[test]
+    fn test_builder_empty_follows_disconnected_err() {
+        let result = DisruptorBuilder::new(32, || 0)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::Many(vec![]))
+            .build();
+
+        assert_eq!(
+            result.err().unwrap(),
+            BuildError::DagError(DagError::Disconnected(1))
+        )
     }
 }
