@@ -121,8 +121,8 @@ mod integration_tests {
         let mut handles = DisruptorBuilder::new(128, Event::default)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(2, Handle::Consumer, Follows::One(0))
-            .add_handle(3, Handle::Consumer, Follows::Many(vec![1, 2]))
+            .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
+            .add_handle(3, Handle::Consumer, Follows::Handles(vec![1, 2]))
             .wait_strategy(|| WaitYield)
             .build()
             .unwrap();
@@ -233,7 +233,7 @@ mod integration_tests {
     fn test_wait_blocking() {
         let mut handles = DisruptorBuilder::new(32, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Consumer, Follows::One(0))
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .wait_strategy(WaitBlocking::new)
             .build()
             .unwrap();
@@ -310,11 +310,8 @@ mod integration_tests {
     fn test_trailing_single_producer() {
         let mut handles = DisruptorBuilder::new(64, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Producer, Follows::One(0))
-            .add_handle(2, Handle::Consumer, Follows::One(1))
-            .wait_strategy(|| {
-                WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
-            })
+            .add_handle(1, Handle::Producer, Follows::Handles(vec![0]))
+            .add_handle(2, Handle::Consumer, Follows::Handles(vec![1]))
             .build()
             .unwrap();
 

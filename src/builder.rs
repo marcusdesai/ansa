@@ -81,8 +81,7 @@ where
                 self.follows_lead.insert(id);
                 &[]
             }
-            Follows::One(c) => &[*c],
-            Follows::Many(cs) => cs,
+            Follows::Handles(cs) => cs,
         };
         follow_ids.iter().for_each(|c| {
             self.followed_by
@@ -97,7 +96,7 @@ where
     /// Set the wait strategy to be used by all consumers and producers.
     ///
     /// For details of all provided wait strategies, see the module docs for [`wait`](crate::wait).
-    pub fn wait_strategy<WF2, W2>(self, wait_factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
+    pub fn wait_strategy<WF2, W2>(self, factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,
         W2: WaitStrategy,
@@ -105,7 +104,7 @@ where
         DisruptorBuilder {
             buffer_size: self.buffer_size,
             element_factory: self.element_factory,
-            wait_factory,
+            wait_factory: factory,
             followed_by: self.followed_by,
             follows: self.follows,
             follows_lead: self.follows_lead,
@@ -184,8 +183,10 @@ where
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
-                Follows::One(follow_id) => Barrier::One(get_cursor(*follow_id, &mut cursor_map)),
-                Follows::Many(many) => {
+                Follows::Handles(ids) if ids.len() == 1 => {
+                    Barrier::One(get_cursor(ids[0], &mut cursor_map))
+                }
+                Follows::Handles(many) => {
                     let follows_cursors = many
                         .iter()
                         .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
@@ -238,8 +239,7 @@ where
         for follows in self.follows.values() {
             let follow_ids: &[u64] = match follows {
                 Follows::LeadProducer => &[],
-                Follows::One(c) => &[*c],
-                Follows::Many(cs) => cs,
+                Follows::Handles(cs) => cs,
             };
             for id in follow_ids {
                 if !self.follows.contains_key(id) {
@@ -376,13 +376,12 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
 
 /// Describes the ordering relationship for a single handle.
 ///
-/// `Follows::Many(vec![0, 1])` denotes that a handle interacts with elements on the ring buffer
+/// `Follows::Handles(vec![0, 1])` denotes that a handle interacts with elements on the ring buffer
 /// only after both handles with ids `0` and `1` have finished their interactions.
 #[derive(Debug)]
 pub enum Follows {
     LeadProducer,
-    One(u64),
-    Many(Vec<u64>),
+    Handles(Vec<u64>),
 }
 
 /// Describes the type of handle.
@@ -725,7 +724,7 @@ mod tests {
     fn test_builder_empty_follows_disconnected_err() {
         let result = DisruptorBuilder::new(32, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Consumer, Follows::Many(vec![]))
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![]))
             .build();
 
         assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(1))
@@ -751,7 +750,7 @@ mod tests {
         let result = DisruptorBuilder::new(32, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Consumer, Follows::One(0))
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .build();
 
         assert_eq!(result.err().unwrap(), BuildError::OverlappingIDs(vec![1]))
@@ -766,8 +765,8 @@ mod tests {
     #[test]
     fn test_builder_lead_not_followed() {
         let result = DisruptorBuilder::new(32, || 0)
-            .add_handle(0, Handle::Consumer, Follows::One(8))
-            .add_handle(1, Handle::Consumer, Follows::One(0))
+            .add_handle(0, Handle::Consumer, Follows::Handles(vec![8]))
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .build();
         assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(0))
     }
