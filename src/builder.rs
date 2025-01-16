@@ -119,7 +119,7 @@ where
     /// Returns the constructed [`DisruptorHandles`] struct if successful, otherwise returns
     /// [`BuildError`].
     ///
-    /// For details on failure states, please see [`BuildError`].
+    /// For details on error states, please see [`BuildError`].
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
         // unwrap okay as this value will always be inhabited as per construction of the builder
@@ -226,13 +226,12 @@ where
             return Err(BuildError::BufferSize(size));
         }
         if !self.overlapping_ids.is_empty() {
-            return Err(BuildError::OverlappingIDs(self.overlapping_ids.clone()));
+            return Err(BuildError::OverlappingIDs(
+                self.overlapping_ids.iter().copied().collect(),
+            ));
         }
         if self.follows.is_empty() {
             return Err(BuildError::EmptyGraph);
-        }
-        if self.follows_lead.is_empty() {
-            return Err(BuildError::LeadNotFollowed);
         }
         let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
         validate_order(&self.handles_map, &chains)?;
@@ -258,20 +257,17 @@ pub enum BuildError {
     /// A buffer size which failed the non-zero power of 2 requirement.
     BufferSize(usize),
     /// A set of ids which have been added multiple times.
-    OverlappingIDs(U64Set),
+    OverlappingIDs(Vec<u64>),
     /// Indicates that no handles have been added to the disruptor.
     EmptyGraph,
-    /// Indicates that no handle directly follows the lead producer.
-    LeadNotFollowed,
-    /// Indicates that some handles are not ordered for a producer.
-    UnorderedProducer((Vec<u64>, u64)),
-    /// A handle ID which had not been explicitly added.
+    /// Indicates that some handles are not ordered for this producer id.
+    UnorderedProducer(Vec<u64>, u64),
+    /// An ID which is referred to in the graph, but has not been added explicitly.
     UnregisteredID(u64),
     /// A handle ID which loops in the graph.
     GraphCycle(u64),
-    /// An ID which is referred to in the graph, but has not been added explicitly.
-    MissingNode(u64),
-    /// An ID which is disconnected from the rest of the graph nodes.
+    /// An ID which is disconnected from the rest of the graph nodes. This naturally occurs if no
+    /// registered nodes follow the lead producer.
     DisconnectedNode(u64),
 }
 
@@ -283,13 +279,11 @@ impl Display for BuildError {
             }
             BuildError::OverlappingIDs(ids) => format!("Found overlapping ids: {ids:?}"),
             BuildError::EmptyGraph => "Graph empty, no handles added".to_owned(),
-            BuildError::LeadNotFollowed => "No handles follow the lead producer".to_owned(),
-            BuildError::UnorderedProducer((chain, id)) => {
-                format!("Chain of handles: {chain:?} does not contain producer id: {id}")
+            BuildError::UnorderedProducer(chain, id) => {
+                format!("Chain of handle ids: {chain:?} does not contain producer id: {id}")
             }
-            BuildError::UnregisteredID(id) => format!("Found unregistered id: {id}"),
+            BuildError::UnregisteredID(id) => format!("Unregistered id: {id} referred to in graph"),
             BuildError::GraphCycle(id) => format!("Cycle in graph for id: {id}"),
-            BuildError::MissingNode(id) => format!("id: {id} missing from graph"),
             BuildError::DisconnectedNode(id) => format!("id: {id} disconnected from graph"),
         };
         write!(f, "{}", str)
@@ -339,7 +333,7 @@ fn visit(
 
     chain.push(node);
     let mut chains = Vec::new();
-    let children = graph.get(&node).ok_or(BuildError::MissingNode(node))?;
+    let children = graph.get(&node).ok_or(BuildError::UnregisteredID(node))?;
     if children.is_empty() {
         chains.push(chain)
     } else {
@@ -354,7 +348,7 @@ fn visit(
     Ok(chains)
 }
 
-/// Returns `None` if all chains of the graph contain all producers. Otherwise, returns the
+/// Returns `Ok` if all chains of the graph contain all producers. Otherwise, returns the
 /// `(chain, id)` pair where the producer id is not in the chain.
 ///
 /// A chain is a totally-ordered subset of a partially-ordered set (poset). If a chain does not
@@ -373,7 +367,7 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
     for chain in chains {
         for id in &producer_ids {
             if !chain.contains(id) {
-                return Err(BuildError::UnorderedProducer((chain.clone(), *id)));
+                return Err(BuildError::UnorderedProducer(chain.clone(), *id));
             }
         }
     }
@@ -519,18 +513,18 @@ mod tests {
     }
 
     #[test]
-    fn test_find_missing_id() {
+    fn test_find_unregistered_id() {
         let graph = U64Map::from_iter([(0, vec![1])]);
         let roots = U64Set::from_iter([0]);
         assert_eq!(
             validate_graph(&graph, &roots),
-            Err(BuildError::MissingNode(1))
+            Err(BuildError::UnregisteredID(1))
         );
 
         let graph = U64Map::from_iter([(0, vec![1, 2]), (1, vec![3]), (2, vec![3])]);
         assert_eq!(
             validate_graph(&graph, &roots),
-            Err(BuildError::MissingNode(3))
+            Err(BuildError::UnregisteredID(3))
         );
     }
 
@@ -615,7 +609,7 @@ mod tests {
         let result = validate_order(&handles_map, &chains);
         assert_eq!(
             result,
-            Err(BuildError::UnorderedProducer((vec![0, 1, 2, 3, 7], 4)))
+            Err(BuildError::UnorderedProducer(vec![0, 1, 2, 3, 7], 4))
         )
     }
 
@@ -705,7 +699,7 @@ mod tests {
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
         let result = validate_order(&handles_map, &chains);
-        assert_eq!(result, Err(BuildError::UnorderedProducer((vec![0, 5], 4))))
+        assert_eq!(result, Err(BuildError::UnorderedProducer(vec![0, 5], 4)))
     }
 
     // 0 ─► 1 ─► 2 ─► 3 ─► 4
@@ -735,5 +729,46 @@ mod tests {
             .build();
 
         assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(1))
+    }
+
+    #[test]
+    fn test_builder_buffer_size_error() {
+        // buffer size cannot be 0
+        let result = DisruptorBuilder::new(0, || 0)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .build();
+        assert_eq!(result.err().unwrap(), BuildError::BufferSize(0));
+
+        // buffer size must be power of 2
+        let result2 = DisruptorBuilder::new(12, || 0)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .build();
+        assert_eq!(result2.err().unwrap(), BuildError::BufferSize(12))
+    }
+
+    #[test]
+    fn test_builder_overlapping_ids() {
+        let result = DisruptorBuilder::new(32, || 0)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::One(0))
+            .build();
+
+        assert_eq!(result.err().unwrap(), BuildError::OverlappingIDs(vec![1]))
+    }
+
+    #[test]
+    fn test_builder_empty_graph() {
+        let result = DisruptorBuilder::new(32, || 0).build();
+        assert_eq!(result.err().unwrap(), BuildError::EmptyGraph)
+    }
+
+    #[test]
+    fn test_builder_lead_not_followed() {
+        let result = DisruptorBuilder::new(32, || 0)
+            .add_handle(0, Handle::Consumer, Follows::One(8))
+            .add_handle(1, Handle::Consumer, Follows::One(0))
+            .build();
+        assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(0))
     }
 }
