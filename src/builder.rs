@@ -70,26 +70,24 @@ where
     /// Following conditions must be met...
     ///
     /// Examples...
-    pub fn add_handle(mut self, id: u64, h: Handle, f: Follows) -> Self {
+    pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
         }
-        self.handles_map.insert(id, h);
+        self.handles_map.insert(id, handle);
         self.followed_by.entry(id).or_default();
-        let follow_ids: &[u64] = match &f {
+        match &follows {
             Follows::LeadProducer => {
                 self.follows_lead.insert(id);
-                &[]
             }
-            Follows::Handles(cs) => cs,
-        };
-        follow_ids.iter().for_each(|c| {
-            self.followed_by
-                .entry(*c)
-                .and_modify(|vec| vec.push(id))
-                .or_insert_with(|| vec![id]);
-        });
-        self.follows.insert(id, f);
+            Follows::Handles(cs) => cs.iter().for_each(|c| {
+                self.followed_by
+                    .entry(*c)
+                    .and_modify(|vec| vec.push(id))
+                    .or_insert_with(|| vec![id]);
+            }),
+        }
+        self.follows.insert(id, follows);
         self
     }
 
@@ -179,15 +177,15 @@ where
         }
 
         for (&id, follows) in self.follows.iter() {
-            let handle_cursor = get_cursor(id, &mut cursor_map);
+            let cursor = get_cursor(id, &mut cursor_map);
 
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
                 Follows::Handles(ids) if ids.len() == 1 => {
                     Barrier::One(get_cursor(ids[0], &mut cursor_map))
                 }
-                Follows::Handles(many) => {
-                    let follows_cursors = many
+                Follows::Handles(ids) => {
+                    let follows_cursors = ids
                         .iter()
                         .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
                         .collect();
@@ -198,7 +196,7 @@ where
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
                     let producer = SingleProducer {
-                        cursor: handle_cursor,
+                        cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
                         free_slots: 0,
@@ -208,7 +206,7 @@ where
                 }
                 Handle::Consumer => {
                     let consumer = Consumer {
-                        cursor: handle_cursor,
+                        cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
                         wait_strategy: (self.wait_factory)(),
@@ -236,15 +234,9 @@ where
         }
         let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
         validate_order(&self.handles_map, &chains)?;
-        for follows in self.follows.values() {
-            let follow_ids: &[u64] = match follows {
-                Follows::LeadProducer => &[],
-                Follows::Handles(cs) => cs,
-            };
-            for id in follow_ids {
-                if !self.follows.contains_key(id) {
-                    return Err(BuildError::UnregisteredID(*id));
-                }
+        for id in self.followed_by.keys() {
+            if !self.follows.contains_key(id) {
+                return Err(BuildError::UnregisteredID(*id));
             }
         }
         Ok(())
@@ -292,16 +284,13 @@ impl Display for BuildError {
 
 impl Error for BuildError {}
 
-/// Returns every totally ordered chain of the partially ordered set which makes up the DAG, if
-/// successful.
+/// Checks whether the given graph is a fully connected Directed Acyclic Graph.
 ///
-/// Otherwise, returns the relevant [`DagError`].
+/// Returns every totally ordered chain of the partially ordered set which makes up the DAG, if
+/// successful. Otherwise, returns the relevant [`BuildError`].
 ///
 /// Finding the chains allows us to check whether all handles are totally ordered with respect to
 /// all producers.
-///
-/// Uses DFS as purposed for topological sort, see:
-/// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u64>>, BuildError> {
     let mut visiting = U64Set::default();
     let mut visited = U64Set::default();
@@ -319,6 +308,9 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
 }
 
 /// Helper function for recursively visiting the graph nodes using DFS.
+///
+/// Uses DFS as purposed for topological sort, see:
+/// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 fn visit(
     node: u64,
     visiting: &mut U64Set,
