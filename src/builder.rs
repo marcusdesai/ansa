@@ -252,7 +252,10 @@ pub enum BuildError {
     OverlappingIDs(Vec<u64>),
     /// Indicates that no handles have been added to the disruptor.
     EmptyGraph,
-    /// Indicates that some handles are not ordered for this producer id.
+    /// Indicates that some handles are not ordered with respect to this producer id. The lack of
+    /// ordering allows producer accesses to the buffer to overlap with these unordered handles.
+    /// Because such graphs cannot be guaranteed to avoid Undefined Behaviour, they are not
+    /// permitted to be built.
     UnorderedProducer(Vec<u64>, u64),
     /// An ID which is referred to in the graph, but has not been added explicitly.
     UnregisteredID(u64),

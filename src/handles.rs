@@ -39,11 +39,11 @@ where
             current_claim = new_current;
             claim_end = new_current + size;
         }
-        // Wait for the last consumer barrier to move past the end of the claim.
+        // Wait for the barrier to move past the end of the claim.
         if LEAD {
-            // Utilise the constraint that `claim_end` >= `self.barrier_seq`. Note that, because
-            // `claim_end` does not represent the position of the producer cursor, it is allowed to
-            // hold a value greater than the last consumer cursor position on the ring buffer.
+            // Utilise the constraint that `claim_end` >= `self.barrier_seq`. Note that `claim_end`
+            // does not represent the position of the producer cursor, so it is allowed to hold a
+            // value greater than barrier.
             while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
@@ -51,14 +51,13 @@ where
         } else {
             // If this is not the lead producer we need to wait until claim_end <= barrier_seq
             while claim_end > self.barrier_seq {
-                // todo: issue here with miri
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
         }
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
-        // cover the entire time during which the buffer is written to, so we use a fence here
-        // before any of the cursor loads.
+        // cover the entire duration of the buffer writes, so we use a fence here before any of the
+        // cursor loads.
         fence(Ordering::Acquire);
         // Begin writing events to the buffer.
         for seq in current_claim + 1..=claim_end {
@@ -73,7 +72,7 @@ where
         }
         // Now wait for producer cursor to catch up to start of claimed sequence. This ensures that
         // writes later in the sequence are not made visible to consumers until all earlier writes
-        // are completed. Without this check, we might accidentally make unfinished writes visible
+        // are completed. Without this check, we might prematurely make unfinished writes visible
         // which could cause overlapping immutable and mutable refs to be created.
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
@@ -155,8 +154,8 @@ where
                 self.free_slots = barrier_seq - producer_seq;
             }
         }
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
-        // accept `AcqRel`, so use a fence to make the pair.
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
+        // duration of the writes.
         fence(Ordering::Acquire);
         // Begin writing events to the buffer.
         let batch_end = producer_seq + size;
@@ -222,8 +221,8 @@ where
             self.wait_strategy.wait();
             barrier_seq = self.barrier.sequence();
         }
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
-        // accept `AcqRel`, so use a fence to make the pair.
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
+        // duration of the reads.
         fence(Ordering::Acquire);
         // Begin reading a batch of events from the buffer.
         let batch_end = consumer_seq + size;
