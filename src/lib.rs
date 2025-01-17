@@ -373,4 +373,111 @@ mod integration_tests {
         let expected_blank = vec![0; num_of_events];
         assert_eq!(result_blank, expected_blank);
     }
+
+    #[test]
+    fn test_trailing_multi_producer() {
+        let mut handles = DisruptorBuilder::new(64, || 0i64)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(2, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(3, Handle::Producer, Follows::Handles(vec![0, 1, 2]))
+            .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]))
+            .wait_strategy(|| WaitBusy)
+            .build()
+            .unwrap();
+
+        let num_of_events = 200;
+        let mut results_c0 = vec![];
+        let mut results_c1 = vec![];
+        let mut results_c2 = vec![];
+        let mut results_c4 = vec![];
+
+        std::thread::scope(|s| {
+            let mut producer = handles.take_lead().unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    producer.batch_write(20, |i, seq, _| {
+                        counter += 1;
+                        *i = seq;
+                    })
+                }
+            });
+
+            let out_0 = &mut results_c0;
+            let consumer_0 = handles.take_consumer(0).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_0.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out_0.push(*i);
+                    })
+                }
+            });
+
+            let out_1 = &mut results_c1;
+            let consumer_1 = handles.take_consumer(1).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_1.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out_1.push(*i);
+                    })
+                }
+            });
+
+            let out_2 = &mut results_c2;
+            let consumer_2 = handles.take_consumer(2).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_2.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out_2.push(*i);
+                    })
+                }
+            });
+
+            let mut trailing_multi_1 = handles.take_producer(3).unwrap().into_multi();
+            let mut trailing_multi_2 = trailing_multi_1.clone();
+
+            s.spawn(move || {
+                for _ in 0..10 {
+                    trailing_multi_1.batch_write(10, |i, _, _| {
+                        *i = 0;
+                    })
+                }
+            });
+
+            s.spawn(move || {
+                for _ in 0..10 {
+                    trailing_multi_2.batch_write(10, |i, _, _| {
+                        *i = 0;
+                    })
+                }
+            });
+
+            let out_4 = &mut results_c4;
+            let consumer_4 = handles.take_consumer(4).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer_4.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out_4.push(*i);
+                    })
+                }
+            });
+        });
+
+        let expected_seqs: Vec<_> = (1i64..=200).collect();
+        assert_eq!(expected_seqs, results_c0);
+        assert_eq!(expected_seqs, results_c1);
+        assert_eq!(expected_seqs, results_c2);
+
+        let expected_blank = vec![0; num_of_events as usize];
+        assert_eq!(expected_blank, results_c4);
+    }
 }

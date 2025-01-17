@@ -39,17 +39,27 @@ where
             current_claim = new_current;
             claim_end = new_current + size;
         }
-        // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
-        // which we can do by passing 0 as the buffer length.
-        let buf_len = if LEAD { self.buffer.len() } else { 0 };
-        // Wait for the last consumer barrier to move past the end of the claim. This calculation
-        // utilises the constraint that `claim_end` >= `self.barrier_seq`. Note that, because
-        // `claim_end` does not represent the position of the producer cursor, it is allowed to
-        // hold a value greater than the position of the last consumer cursor on the ring buffer.
-        while producer_barrier_delta(buf_len, claim_end, self.barrier_seq) < 0 {
-            self.wait_strategy.wait();
-            self.barrier_seq = self.barrier.sequence();
+        // Wait for the last consumer barrier to move past the end of the claim.
+        if LEAD {
+            // Utilise the constraint that `claim_end` >= `self.barrier_seq`. Note that, because
+            // `claim_end` does not represent the position of the producer cursor, it is allowed to
+            // hold a value greater than the last consumer cursor position on the ring buffer.
+            while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
+                self.wait_strategy.wait();
+                self.barrier_seq = self.barrier.sequence();
+            }
+        } else {
+            // If this is not the lead producer we need to wait until claim_end <= barrier_seq
+            while claim_end > self.barrier_seq {
+                // todo: issue here with miri
+                self.wait_strategy.wait();
+                self.barrier_seq = self.barrier.sequence();
+            }
         }
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
+        // cover the entire time during which the buffer is written to, so we use a fence here
+        // before any of the cursor loads.
+        fence(Ordering::Acquire);
         // Begin writing events to the buffer.
         for seq in current_claim + 1..=claim_end {
             // SAFETY:
@@ -65,14 +75,11 @@ where
         // writes later in the sequence are not made visible to consumers until all earlier writes
         // are completed. Without this check, we might accidentally make unfinished writes visible
         // which could cause overlapping immutable and mutable refs to be created.
-        let mut cursor_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
             self.wait_strategy.wait();
-            cursor_seq = self.cursor.sequence.load(Ordering::Relaxed);
+            cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
-        // accept `AcqRel`, so use a fence to make the pair.
-        fence(Ordering::Acquire);
         // Finally, advance producer cursor to publish the writes upto the end of the claimed
         // sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
@@ -137,14 +144,16 @@ where
         );
         let size = size as i64;
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        // If this is not the lead producer we need to calculate barrier_seq - producer_seq,
-        // which we can do by passing 0 as the buffer length.
-        let buf_len = if LEAD { self.buffer.len() } else { 0 };
         // Wait until there are free slots to write events to.
         while self.free_slots < size {
             self.wait_strategy.wait();
             let barrier_seq = self.barrier.sequence();
-            self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
+            if LEAD {
+                let buf_len = self.buffer.len();
+                self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
+            } else {
+                self.free_slots = barrier_seq - producer_seq;
+            }
         }
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. `store` doesn't
         // accept `AcqRel`, so use a fence to make the pair.
@@ -318,67 +327,21 @@ impl Drop for Barrier {
 /// Positive return values represent available distance to this producer's barrier. Zero or
 /// negative values represent no available write distance.
 ///
-/// When `buffer_size > 0`, this calculation utilises the constraint that:
-/// `0 <= barrier_seq <= producer_seq`. Callers must ensure that this constraint holds.
-///
-/// This function can also be used to calculate `barrier_seq - producer_seq` by passing `0` as the
-/// `buffer_size`. To use the function in this way, it must be the case that:
-/// `barrier_seq >= producer_seq`.
+/// When the producer sequence comes from the lead producer, this calculation utilises the
+/// constraint that: `0 <= barrier_seq <= producer_seq`. Callers must ensure that this holds.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
-    #[cfg(debug_assertions)]
-    match buffer_size {
-        0 => assert!(
-            barrier_seq >= producer_seq,
-            "buffer_size == 0, but barrier_seq ({barrier_seq}) < producer_seq ({producer_seq})"
-        ),
-        _ => assert!(
-            0 <= barrier_seq && barrier_seq <= producer_seq,
-            "Order error: 0 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
-        ),
-    }
+    assert!(
+        0 <= barrier_seq && barrier_seq <= producer_seq,
+        "Constraint error: 0 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
+    );
     buffer_size as i64 - (producer_seq - barrier_seq)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::prelude::IteratorRandom;
     use rand::{thread_rng, Rng};
-
-    // This is just a check of a very simple math equality, but if this implementation is somehow
-    // wrong, everything breaks, so better to be sure. Also, IME, math is often where bugs hide.
-    //
-    // Check that the calculation:
-    //     barrier_seq = producer_seq - buffer_size
-    //
-    // always results in a barrier_seq which returns 0 when all three values are supplied to
-    // `producer_barrier_delta`. This should work regardless of whether buffer size == 0.
-    #[test]
-    fn test_producer_barrier_delta_always_zero() {
-        let mut rng = thread_rng();
-
-        for _ in 0..100 {
-            // random power of two
-            let buffer_size = (0..=32).map(|i| 2_i64.pow(i)).choose(&mut rng).unwrap();
-            let producer_seq = rng.gen_range(100..i64::MAX / 2);
-            let barrier_seq = producer_seq - buffer_size;
-
-            let result = producer_barrier_delta(buffer_size as usize, producer_seq, barrier_seq);
-            assert_eq!(result, 0, "{buffer_size}, {producer_seq}, {barrier_seq}");
-        }
-    }
-
-    #[test]
-    fn test_producer_barrier_delta_zero_buffer_size() {
-        let mut rng = thread_rng();
-        for _ in 0..100 {
-            let p_seq = rng.gen_range(100..i64::MAX / 2);
-            let b_seq = rng.gen_range(p_seq..i64::MAX / 2);
-
-            assert_eq!(b_seq - p_seq, producer_barrier_delta(0, p_seq, b_seq))
-        }
-    }
 
     #[test]
     fn test_producer_barrier_delta() {
