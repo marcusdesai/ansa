@@ -4,11 +4,11 @@ use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct MultiProducer<E, W, const LEAD: bool = true> {
-    cursor: Arc<Cursor>, // shared between all multi producers and as a barrier for consumers
-    barrier: Barrier,    // This must be made up of the last consumer cursors.
-    buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
-    claim: Arc<Cursor>,  // shared between all multi producers
+pub struct MultiProducer<E, W, const LEAD: bool> {
+    cursor: Arc<Cursor>, // shared between all clones of this multi producer and as a barrier
+    barrier: Barrier,    // This must be made up of the last handles cursors
+    buffer: Arc<RingBuffer<E>>, // shared between all handles
+    claim: Arc<Cursor>,  // shared between all clones of this multi producer
     barrier_seq: i64,
     wait_strategy: W,
 }
@@ -27,7 +27,7 @@ where
             self.buffer.len()
         );
         let size = size as i64;
-        // Claim a sequence. The 'claim' is used to coordinate producers.
+        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
         while let Err(new_current) = self.claim.sequence.compare_exchange(
@@ -120,10 +120,10 @@ where
 }
 
 #[derive(Debug)]
-pub struct SingleProducer<E, W, const LEAD: bool = true> {
-    pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier for consumers
-    pub(crate) barrier: Barrier,    // This must be the last consumer cursors.
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
+pub struct SingleProducer<E, W, const LEAD: bool> {
+    pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier
+    pub(crate) barrier: Barrier,    // This must be the last handles cursors
+    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all handles
     pub(crate) free_slots: i64,
     pub(crate) wait_strategy: W,
 }
@@ -190,9 +190,9 @@ where
 
 #[derive(Debug)]
 pub struct Consumer<E, W> {
-    pub(crate) cursor: Arc<Cursor>, // shared between this consumer and as a barrier for consumers or producers
+    pub(crate) cursor: Arc<Cursor>, // shared between this consumer and as a barrier
     pub(crate) barrier: Barrier,
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all consumers and producers
+    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all handles
     pub(crate) wait_strategy: W,
 }
 
@@ -326,8 +326,8 @@ impl Drop for Barrier {
 /// Positive return values represent available distance to this producer's barrier. Zero or
 /// negative values represent no available write distance.
 ///
-/// When the producer sequence comes from the lead producer, this calculation utilises the
-/// constraint that: `0 <= barrier_seq <= producer_seq`. Callers must ensure that this holds.
+/// This calculation utilises the constraint that: `0 <= barrier_seq <= producer_seq`, which is
+/// only true for lead producers. Callers must ensure that this holds.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
     assert!(
