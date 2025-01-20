@@ -1,3 +1,5 @@
+//! todo Wait strategies ordered by best latency
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -5,6 +7,7 @@ use std::time::{Duration, Instant};
 pub trait WaitStrategy {
     fn wait(&self);
 
+    /// Is called at the end of every read and write of the buffer. It is not synchronised.
     #[inline]
     fn finalise(&self) {
         // defaults to noop
@@ -75,7 +78,7 @@ pub struct WaitBlocking {
 #[derive(Copy, Clone, Debug)]
 struct Empty;
 
-// All producers and consumers share the same condvar
+// All handles share the same condvar
 static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
     LazyLock::new(|| Arc::new((Condvar::new(), Mutex::new(Empty))));
 
@@ -102,16 +105,15 @@ impl WaitStrategy for WaitBlocking {
     #[inline]
     fn wait(&self) {
         let (condvar, mutex) = &*self.pair;
-        // We don't need the mutex to do any work, so just make a new one on every call. This also
-        // makes the unwrap okay, because no thread will attempt to lock twice, so we'll never get
-        // an error from the call to `lock`.
+        // We don't need the mutex to do any work. The unwrap is okay because no thread will
+        // attempt to lock twice, so we should not get errors from multiple calls to `lock`.
         let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.duration);
     }
 
     #[inline]
     fn finalise(&self) {
         let (condvar, _) = &*self.pair;
-        // waking everything allows the implementation to remain unaware of producers and consumers
+        // waking everything allows the implementation to remain unaware of handles
         condvar.notify_all()
     }
 }

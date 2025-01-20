@@ -12,6 +12,7 @@ pub use handles::*;
 mod integration_tests {
     use super::*;
     use crate::wait::*;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -389,92 +390,56 @@ mod integration_tests {
             .unwrap();
 
         let num_of_events = 200;
-        let mut results_c0 = vec![];
-        let mut results_c1 = vec![];
-        let mut results_c2 = vec![];
-        let mut results_c4 = vec![];
 
-        std::thread::scope(|s| {
-            let mut producer = handles.take_lead().unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    producer.batch_write(20, |i, seq, _| {
-                        counter += 1;
-                        *i = seq;
-                    })
-                }
-            });
-
-            let out_0 = &mut results_c0;
-            let consumer_0 = handles.take_consumer(0).unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    consumer_0.batch_read(20, |i, _, _| {
-                        counter += 1;
-                        out_0.push(*i);
-                    })
-                }
-            });
-
-            let out_1 = &mut results_c1;
-            let consumer_1 = handles.take_consumer(1).unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    consumer_1.batch_read(20, |i, _, _| {
-                        counter += 1;
-                        out_1.push(*i);
-                    })
-                }
-            });
-
-            let out_2 = &mut results_c2;
-            let consumer_2 = handles.take_consumer(2).unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    consumer_2.batch_read(20, |i, _, _| {
-                        counter += 1;
-                        out_2.push(*i);
-                    })
-                }
-            });
-
-            let mut trailing_multi_1 = handles.take_producer(3).unwrap().into_multi();
-            let mut trailing_multi_2 = trailing_multi_1.clone();
-
-            s.spawn(move || {
-                for _ in 0..10 {
-                    trailing_multi_1.batch_write(10, |i, _, _| {
-                        *i = 0;
-                    })
-                }
-            });
-
-            s.spawn(move || {
-                for _ in 0..10 {
-                    trailing_multi_2.batch_write(10, |i, _, _| {
-                        *i = 0;
-                    })
-                }
-            });
-
-            let out_4 = &mut results_c4;
-            let consumer_4 = handles.take_consumer(4).unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    consumer_4.batch_read(20, |i, _, _| {
-                        counter += 1;
-                        out_4.push(*i);
-                    })
-                }
-            });
+        let mut producer = handles.take_lead().unwrap();
+        let join_lead = std::thread::spawn(move || {
+            let mut counter = 0;
+            while counter < num_of_events {
+                producer.batch_write(20, |i, seq, _| {
+                    counter += 1;
+                    *i = seq;
+                })
+            }
         });
+        let mut producer_joins = vec![join_lead];
 
-        let expected_seqs: Vec<_> = (1i64..=200).collect();
+        let trailing_multi = handles.take_producer(3).unwrap().into_multi();
+        for mut multi_producer in [trailing_multi.clone(), trailing_multi] {
+            let join = std::thread::spawn(move || {
+                for _ in 0..10 {
+                    multi_producer.batch_write(10, |i, _, _| {
+                        *i = 0;
+                    })
+                }
+            });
+            producer_joins.push(join)
+        }
+
+        let mut results = HashMap::new();
+        for (id, consumer) in handles.drain_consumers() {
+            let join = std::thread::spawn(move || {
+                let mut counter = 0;
+                let mut out = vec![];
+                while counter < num_of_events {
+                    consumer.batch_read(20, |i, _, _| {
+                        counter += 1;
+                        out.push(*i);
+                    })
+                }
+                out
+            });
+            results.insert(id, join);
+        }
+
+        producer_joins
+            .into_iter()
+            .for_each(|h| h.join().expect("done producer"));
+        let results_c0 = results.remove(&0).unwrap().join().expect("done c0");
+        let results_c1 = results.remove(&1).unwrap().join().expect("done c1");
+        let results_c2 = results.remove(&2).unwrap().join().expect("done c2");
+        let results_c4 = results.remove(&4).unwrap().join().expect("done c4");
+
+        let expected_seqs: Vec<_> = (1i64..=num_of_events).collect();
         assert_eq!(expected_seqs, results_c0);
         assert_eq!(expected_seqs, results_c1);
         assert_eq!(expected_seqs, results_c2);
@@ -482,4 +447,19 @@ mod integration_tests {
         let expected_blank = vec![0; num_of_events as usize];
         assert_eq!(expected_blank, results_c4);
     }
+
+    // #[test]
+    // fn test_producer_conversions() {
+    //     struct Event {
+    //         seq: i64,
+    //         seq_times_2: i64,
+    //     }
+    //
+    //     let mut handles = DisruptorBuilder::new(128, || 0i64)
+    //         .add_handle(0, Handle::Producer, Follows::LeadProducer)
+    //         .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+    //         .wait_strategy(|| WaitBusy)
+    //         .build()
+    //         .unwrap();
+    // }
 }

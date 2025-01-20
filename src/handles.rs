@@ -70,10 +70,10 @@ where
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == claim_end);
         }
-        // Now wait for producer cursor to catch up to start of claimed sequence. This ensures that
-        // writes later in the sequence are not made visible to consumers until all earlier writes
-        // are completed. Without this check, we might prematurely make unfinished writes visible
-        // which could cause overlapping immutable and mutable refs to be created.
+        // Wait for the cursor to catch up to start of claimed sequence. This ensures that writes
+        // later in the sequence are not made visible until all earlier writes by this multi
+        // producer or its clones are completed. Without this check, unfinished writes may become
+        // prematurely visible, allowing overlapping immutable and mutable refs to be created.
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
             self.wait_strategy.wait();
@@ -85,15 +85,15 @@ where
         self.wait_strategy.finalise()
     }
 
-    /// Return a [`SingleProducer`] if there exists only one [`MultiProducer`] associated with
+    /// Return a [`Producer`] if there exists only one [`MultiProducer`] associated with
     /// this producer cursor.
     ///
     /// Otherwise, return `None` and drop this [`MultiProducer`].
     ///
     /// If this function is called when only one [`MultiProducer`] exists, then it is guaranteed to
-    /// return a [`SingleProducer`].
-    pub fn into_single(self) -> Option<SingleProducer<E, W, LEAD>> {
-        Arc::into_inner(self.claim).map(|_| SingleProducer {
+    /// return a [`Producer`].
+    pub fn into_single(self) -> Option<Producer<E, W, LEAD>> {
+        Arc::into_inner(self.claim).map(|_| Producer {
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
@@ -120,7 +120,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct SingleProducer<E, W, const LEAD: bool> {
+pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier
     pub(crate) barrier: Barrier,    // This must be the last handles cursors
     pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all handles
@@ -128,7 +128,7 @@ pub struct SingleProducer<E, W, const LEAD: bool> {
     pub(crate) wait_strategy: W,
 }
 
-impl<E, W, const LEAD: bool> SingleProducer<E, W, LEAD>
+impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: WaitStrategy,
 {

@@ -1,7 +1,6 @@
-use crate::handles::{Barrier, Consumer, Cursor};
+use crate::handles::{Barrier, Consumer, Cursor, Producer};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBlocking, WaitStrategy};
-use crate::SingleProducer;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -9,6 +8,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Lazily evaluated
 #[derive(Debug)]
 pub struct DisruptorBuilder<F, E, WF, W> {
     /// Size of the ring buffer, must be power of 2.
@@ -97,7 +97,7 @@ where
     /// # Examples
     ///
     ///```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::*;
     ///
     /// let _ = DisruptorBuilder::new(64, || 0)
     ///    .extend_handles([
@@ -150,7 +150,7 @@ where
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
-        let lead_producer = SingleProducer {
+        let lead_producer = Producer {
             cursor: lead_cursor,
             barrier,
             buffer,
@@ -187,7 +187,7 @@ where
         lead_cursor: &Arc<Cursor>,
         buffer: &Arc<RingBuffer<E>>,
     ) -> (
-        U64Map<SingleProducer<E, W, false>>,
+        U64Map<Producer<E, W, false>>,
         U64Map<Consumer<E, W>>,
         U64Map<Arc<Cursor>>,
     ) {
@@ -219,7 +219,7 @@ where
             // unwrap okay as this entry in handles_map is guaranteed to exist for this id
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
-                    let producer = SingleProducer {
+                    let producer = Producer {
                         cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
@@ -292,9 +292,9 @@ pub enum BuildError {
     ///
     /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![1], 2));
     /// ```
-    /// Since producer 2 does not explicitly follow consumer 1, it cannot be guaranteed that their
-    /// buffer access do not overlap. We can fix this by adding id `1` to the `Follows` vec for
-    /// producer 2.
+    /// Since producer `2` does not explicitly follow consumer `1`, it cannot be guaranteed that
+    /// their buffer access do not overlap. We can fix this by adding id `1` to the `Follows` vec
+    /// for producer `2`.
     ///
     /// ```
     /// use ansa::*;
@@ -312,8 +312,9 @@ pub enum BuildError {
     ///
     /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![0, 1], 5));
     /// ```
-    /// Even though it may appear very likely that consumer 1 will finish before producer 5, it
-    /// cannot be guaranteed. This can be fixed by adding id `1` to the `Follows` vec for producer 5.
+    /// Even though it may appear very likely that consumer `1` will finish before producer `5`, it
+    /// cannot be guaranteed. This can be fixed by adding id `1` to the `Follows` vec for producer
+    /// `5`.
     ///
     /// ```
     /// use ansa::*;
@@ -336,9 +337,9 @@ pub enum BuildError {
     /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![0, 4, 5, 6, 7], 1));
     /// ```
     /// In the second call to `extend_handles`, the added handles are not ordered with respect to
-    /// producer 1. This means we cannot guarantee that those handles and producer 1 will not
+    /// producer `1`. This means we cannot guarantee that those handles and producer `1` will not
     /// overlap buffer accesses. The fix here is not so obvious, but any addition of a `Follows`
-    /// relationship so that id `1` appears in the chain `[0, 4, 5, 6, 7]` will resolve the error.
+    /// ordering so that id `1` appears in the chain `[0, 4, 5, 6, 7]` will resolve the error.
     UnorderedProducer(Vec<u64>, u64),
     /// An ID which is referred to in the graph, but has not been added explicitly.
     ///
@@ -517,28 +518,38 @@ pub enum Handle {
 /// dropped, i.e., there are still further producers or consumers to extract.
 #[derive(Debug)]
 pub struct DisruptorHandles<E, W> {
-    lead: Option<SingleProducer<E, W, true>>,
-    producers: U64Map<SingleProducer<E, W, false>>,
+    lead: Option<Producer<E, W, true>>,
+    producers: U64Map<Producer<E, W, false>>,
     consumers: U64Map<Consumer<E, W>>,
 }
 
 impl<E, W> DisruptorHandles<E, W> {
     /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
-    #[must_use = "Disruptor will stall if not used"]
-    pub fn take_lead(&mut self) -> Option<SingleProducer<E, W, true>> {
+    #[must_use = "Disruptor will stall if any handle is not used "]
+    pub fn take_lead(&mut self) -> Option<Producer<E, W, true>> {
         self.lead.take()
     }
 
     /// Returns the producer with this `id`. Returns `None` if this `id` has already been taken.
-    #[must_use = "Disruptor will stall if not used"]
-    pub fn take_producer(&mut self, id: u64) -> Option<SingleProducer<E, W, false>> {
+    #[must_use = "Disruptor will stall if any handle is not used"]
+    pub fn take_producer(&mut self, id: u64) -> Option<Producer<E, W, false>> {
         self.producers.remove(&id)
     }
 
     /// Returns the consumer with this `id`. Returns `None` if this `id` has already been taken.
-    #[must_use = "Disruptor will stall if not used"]
+    #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn take_consumer(&mut self, id: u64) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
+    }
+
+    #[must_use = "Disruptor will stall if any handle is not used"]
+    pub fn drain_producers(&mut self) -> impl Iterator<Item = (u64, Producer<E, W, false>)> + '_ {
+        self.producers.drain()
+    }
+
+    #[must_use = "Disruptor will stall if any handle is not used"]
+    pub fn drain_consumers(&mut self) -> impl Iterator<Item = (u64, Consumer<E, W>)> + '_ {
+        self.consumers.drain()
     }
 
     /// Returns `true` when no handles are left to take from this struct.
