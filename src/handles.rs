@@ -313,7 +313,7 @@ impl Barrier {
 }
 
 impl Drop for Barrier {
-    // We need to break the Arc cycle of barriers. Just get rid of all the `Arc`s to guarantee this.
+    // We need to break the Arc cycle of barriers. Just get rid of all the Arcs to guarantee this.
     fn drop(&mut self) {
         match self {
             Barrier::One(one) => *one = Arc::new(Cursor::new(0)),

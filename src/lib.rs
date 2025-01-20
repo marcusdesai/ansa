@@ -1,3 +1,5 @@
+//! MPMC queue implementation using the disruptor pattern
+
 mod builder;
 mod handles;
 mod ringbuffer;
