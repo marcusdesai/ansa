@@ -448,18 +448,96 @@ mod integration_tests {
         assert_eq!(expected_blank, results_c4);
     }
 
-    // #[test]
-    // fn test_producer_conversions() {
-    //     struct Event {
-    //         seq: i64,
-    //         seq_times_2: i64,
-    //     }
-    //
-    //     let mut handles = DisruptorBuilder::new(128, || 0i64)
-    //         .add_handle(0, Handle::Producer, Follows::LeadProducer)
-    //         .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
-    //         .wait_strategy(|| WaitBusy)
-    //         .build()
-    //         .unwrap();
-    // }
+    #[test]
+    fn test_producer_conversions() {
+        struct Event {
+            seq: i64,
+            seq_times_2: i64,
+        }
+
+        impl Event {
+            fn new() -> Self {
+                Event {
+                    seq: 0,
+                    seq_times_2: 0,
+                }
+            }
+        }
+
+        let mut handles = DisruptorBuilder::new(128, Event::new)
+            .add_handle(0, Handle::Producer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+            .wait_strategy(|| WaitBusy)
+            .build()
+            .unwrap();
+
+        let num_of_events = 300;
+        let mut is_times_2 = true;
+
+        std::thread::scope(|s| {
+            let lead = handles.take_lead().unwrap();
+            s.spawn(move || {
+                let mut producer = lead;
+                for _ in 0..2 {
+                    producer.batch_write(50, |event, seq, _| event.seq = seq)
+                }
+                let multi = producer.into_multi();
+                let mut joins = vec![];
+                for mut multi_producer in [multi.clone(), multi] {
+                    let join = std::thread::spawn(move || {
+                        for _ in 0..5 {
+                            multi_producer.batch_write(10, |event, seq, _| event.seq = seq)
+                        }
+                        multi_producer
+                    });
+                    joins.push(join)
+                }
+                let mut producer = joins
+                    .into_iter()
+                    .map(|h| h.join().expect("done"))
+                    .fold(None, |opt, i| opt.or(i.into_single()))
+                    .expect("single");
+                for _ in 0..2 {
+                    producer.batch_write(50, |event, seq, _| event.seq = seq)
+                }
+            });
+
+            let trailing = handles.take_producer(0).unwrap();
+            s.spawn(move || {
+                let multi = trailing.into_multi();
+                let mut joins = vec![];
+                for mut multi_producer in [multi.clone(), multi.clone(), multi] {
+                    let join = std::thread::spawn(move || {
+                        for _ in 0..5 {
+                            multi_producer
+                                .batch_write(10, |event, _, _| event.seq_times_2 = event.seq * 2)
+                        }
+                        multi_producer
+                    });
+                    joins.push(join)
+                }
+                let mut producer = joins
+                    .into_iter()
+                    .map(|h| h.join().expect("done"))
+                    .fold(None, |opt, i| opt.or(i.into_single()))
+                    .expect("single");
+                for _ in 0..3 {
+                    producer.batch_write(50, |event, _, _| event.seq_times_2 = event.seq * 2)
+                }
+            });
+
+            let consumer = handles.take_consumer(1).unwrap();
+            s.spawn(move || {
+                let mut counter = 0;
+                while counter < num_of_events {
+                    consumer.batch_read(20, |event, seq, _| {
+                        counter += 1;
+                        is_times_2 = event.seq == seq && event.seq_times_2 == seq * 2;
+                    })
+                }
+            });
+        });
+
+        assert!(is_times_2);
+    }
 }
