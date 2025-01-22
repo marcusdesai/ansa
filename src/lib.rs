@@ -450,21 +450,13 @@ mod integration_tests {
 
     #[test]
     fn test_producer_conversions() {
+        #[derive(Default)]
         struct Event {
             seq: i64,
             seq_times_2: i64,
         }
 
-        impl Event {
-            fn new() -> Self {
-                Event {
-                    seq: 0,
-                    seq_times_2: 0,
-                }
-            }
-        }
-
-        let mut handles = DisruptorBuilder::new(128, Event::new)
+        let mut handles = DisruptorBuilder::new(128, Event::default)
             .add_handle(0, Handle::Producer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .wait_strategy(|| WaitBusy)
@@ -532,7 +524,7 @@ mod integration_tests {
                 while counter < num_of_events {
                     consumer.batch_read(20, |event, seq, _| {
                         counter += 1;
-                        is_times_2 = event.seq == seq && event.seq_times_2 == seq * 2;
+                        is_times_2 = is_times_2 && event.seq == seq && event.seq_times_2 == seq * 2;
                     })
                 }
             });

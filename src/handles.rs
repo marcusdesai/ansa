@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
-    cursor: Arc<Cursor>, // shared between all clones of this multi producer and as a barrier
-    barrier: Barrier,    // This must be made up of the last handles cursors
-    buffer: Arc<RingBuffer<E>>, // shared between all handles
-    claim: Arc<Cursor>,  // shared between all clones of this multi producer
+    cursor: Arc<Cursor>,
+    barrier: Barrier,
+    buffer: Arc<RingBuffer<E>>,
+    claim: Arc<Cursor>, // shared between all clones of this multi producer
     barrier_seq: i64,
     wait_strategy: W,
 }
@@ -41,15 +41,15 @@ where
         }
         // Wait for the barrier to move past the end of the claim.
         if LEAD {
-            // Utilise the constraint that `claim_end` >= `self.barrier_seq`. Note that `claim_end`
-            // does not represent the position of the producer cursor, so it is allowed to hold a
-            // value greater than barrier.
+            // Utilise the constraint that `claim_end` >= `barrier_seq`. Note that `claim_end` does
+            // not represent the position of the producer cursor, so it is allowed to hold a value
+            // ahead of the producer barrier.
             while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
         } else {
-            // If this is not the lead producer we need to wait until claim_end <= barrier_seq
+            // If this is not the lead producer we need to wait until `claim_end` <= `barrier_seq`
             while claim_end > self.barrier_seq {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
@@ -121,9 +121,9 @@ where
 
 #[derive(Debug)]
 pub struct Producer<E, W, const LEAD: bool> {
-    pub(crate) cursor: Arc<Cursor>, // shared by this producer and as barrier
-    pub(crate) barrier: Barrier,    // This must be the last handles cursors
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all handles
+    pub(crate) cursor: Arc<Cursor>,
+    pub(crate) barrier: Barrier,
+    pub(crate) buffer: Arc<RingBuffer<E>>,
     pub(crate) free_slots: i64,
     pub(crate) wait_strategy: W,
 }
@@ -190,9 +190,9 @@ where
 
 #[derive(Debug)]
 pub struct Consumer<E, W> {
-    pub(crate) cursor: Arc<Cursor>, // shared between this consumer and as a barrier
+    pub(crate) cursor: Arc<Cursor>,
     pub(crate) barrier: Barrier,
-    pub(crate) buffer: Arc<RingBuffer<E>>, // shared between all handles
+    pub(crate) buffer: Arc<RingBuffer<E>>,
     pub(crate) wait_strategy: W,
 }
 

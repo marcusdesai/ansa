@@ -1,3 +1,5 @@
+//! todo: Examples like fan out, fan in, etc...
+
 use crate::handles::{Barrier, Consumer, Cursor, Producer};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBlocking, WaitStrategy};
@@ -371,8 +373,8 @@ pub enum BuildError {
     /// assert_eq!(result.err().unwrap(), BuildError::GraphCycle(2));
     /// ```
     GraphCycle(u64),
-    /// An ID which is disconnected from the rest of the graph nodes. This naturally occurs if no
-    /// registered nodes follow the lead producer.
+    /// An ID which is disconnected from the rest of the graph. Disconnected in this context means
+    /// this id is not reachable from the root of the graph when traversing the follows relationships.
     ///
     /// ## Example Cause
     /// ```
@@ -891,6 +893,6 @@ mod tests {
             .add_handle(0, Handle::Consumer, Follows::Handles(vec![8]))
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .build();
-        assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(0))
+        assert_eq!(result.err().unwrap(), BuildError::UnregisteredID(8))
     }
 }
