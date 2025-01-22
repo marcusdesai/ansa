@@ -319,17 +319,17 @@ where
         }
         fence(Ordering::Acquire);
         // SAFETY:
-        // 1) The mutable pointer to the event is immediately converted to an immutable ref,
-        //    ensuring multiple mutable refs do not exist.
+        // 1) The mutable pointer to the event is immediately converted to an immutable pointer,
+        //    ensuring multiple mutable refs cannot be created here.
         // 2) The Acquire-Release synchronisation ensures that the consumer cursor does not visibly
         //    update its value until all the events are processed, which in turn ensures that
         //    producers will not write here while the consumer is reading. This ensures that no
         //    mutable ref to this element is created while this immutable ref exists.
-        // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the check
+        // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the checks
         //    on BATCH size.
+        let mut seq = consumer_seq + 1;
+        let mut pointer = self.buffer.get(seq) as *const E;
         unsafe {
-            let mut seq = consumer_seq + 1;
-            let mut pointer = self.buffer.get(seq) as *const E;
             for _ in 0..BATCH - 1 {
                 read(&*pointer, seq, false);
                 pointer = pointer.add(1);
@@ -337,7 +337,7 @@ where
             }
             read(&*pointer, seq, true);
         }
-        self.cursor.sequence.store(barrier_seq, Ordering::Release);
+        self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
     }
 }
