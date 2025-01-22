@@ -148,7 +148,7 @@ where
         // unwrap okay as this value will always be inhabited as per construction of the builder
         let element_factory = self.element_factory.take().unwrap();
         let buffer = Arc::new(RingBuffer::new(self.buffer_size, element_factory));
-        let lead_cursor = Arc::new(Cursor::new(0));
+        let lead_cursor = Arc::new(Cursor::new(-1));
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
@@ -198,7 +198,8 @@ where
         let mut cursor_map = U64Map::default();
 
         fn get_cursor(id: u64, map: &mut U64Map<Arc<Cursor>>) -> Arc<Cursor> {
-            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new(0)));
+            // start cursors at -1 to make buffer accesses zero indexed from the start
+            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new(-1)));
             Arc::clone(cursor)
         }
 
@@ -246,6 +247,9 @@ where
     }
 
     fn validate(&self) -> Result<(), BuildError> {
+        if self.follows.is_empty() {
+            return Err(BuildError::EmptyGraph);
+        }
         for id in self.followed_by.keys() {
             if !self.follows.contains_key(id) {
                 return Err(BuildError::UnregisteredID(*id));
@@ -259,9 +263,6 @@ where
             return Err(BuildError::OverlappingIDs(
                 self.overlapping_ids.iter().copied().collect(),
             ));
-        }
-        if self.follows.is_empty() {
-            return Err(BuildError::EmptyGraph);
         }
         let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
         validate_order(&self.handles_map, &chains)?;
@@ -321,6 +322,11 @@ pub enum BuildError {
     /// ```
     /// use ansa::*;
     ///
+    /// // defines the following graph:
+    /// // lead ─► 0 ─► 1P ─► 2 ─► 3 ─► 7
+    /// //         |                    ▲
+    /// //         ▼                    |
+    /// //         4 ─► 5 ─► 6 ─-------─┘
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .extend_handles([
     ///         (0, Handle::Consumer, Follows::LeadProducer),
@@ -338,10 +344,10 @@ pub enum BuildError {
     ///
     /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![0, 4, 5, 6, 7], 1));
     /// ```
-    /// In the second call to `extend_handles`, the added handles are not ordered with respect to
-    /// producer `1`. This means we cannot guarantee that those handles and producer `1` will not
+    /// In the second call to `extend_handles`, the handles `[4, 5, 6]` are not ordered with respect
+    /// to producer `1`. This means we cannot guarantee that those handles and producer `1` will not
     /// overlap buffer accesses. The fix here is not so obvious, but any addition of a `Follows`
-    /// ordering so that id `1` appears in the chain `[0, 4, 5, 6, 7]` will resolve the error.
+    /// ordering so that every id in `[4, 5, 6]` is ordered with id `1` will resolve the error.
     UnorderedProducer(Vec<u64>, u64),
     /// An ID which is referred to in the graph, but has not been added explicitly.
     ///
@@ -436,7 +442,7 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
 
 /// Helper function for recursively visiting the graph nodes using DFS.
 ///
-/// Uses DFS as purposed for topological sort, see:
+/// Uses DFS as usually purposed for topological sort, see:
 /// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
 fn visit(
     node: u64,
@@ -474,6 +480,9 @@ fn visit(
 /// include an element, `e`, of the poset, then there exist elements of that chain which are
 /// unordered with respect to `e`. Thus, to ensure that every element in the graph is totally
 /// ordered with respect to all producers, it must hold that all chains contain all producers.
+///
+/// Another way of thinking about this is: it should not be possible to traverse the DAG without
+/// visiting all producers.
 fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Result<(), BuildError> {
     let producer_ids: U64Set = handles_map
         .iter()
@@ -544,11 +553,13 @@ impl<E, W> DisruptorHandles<E, W> {
         self.consumers.remove(&id)
     }
 
+    /// Returns an iterator of all producers. Returns an empty iterator on all subsequent calls.
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_producers(&mut self) -> impl Iterator<Item = (u64, Producer<E, W, false>)> + '_ {
         self.producers.drain()
     }
 
+    /// Returns an iterator of all consumers. Returns an empty iterator on all subsequent calls.
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_consumers(&mut self) -> impl Iterator<Item = (u64, Consumer<E, W>)> + '_ {
         self.consumers.drain()

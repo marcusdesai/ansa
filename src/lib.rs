@@ -28,7 +28,7 @@ mod integration_tests {
             .unwrap();
 
         let num_of_events = 200;
-        let mut result = vec![0i64; num_of_events + 1];
+        let mut result = vec![0i64; num_of_events];
 
         std::thread::scope(|s| {
             let mut producer = handles.take_lead().unwrap();
@@ -54,7 +54,7 @@ mod integration_tests {
             });
         });
 
-        let expected: Vec<_> = (0..=200).collect();
+        let expected: Vec<_> = (0..200).collect();
         assert_eq!(result, expected);
     }
 
@@ -107,7 +107,7 @@ mod integration_tests {
         assert_eq!(done.load(Ordering::Relaxed), 3);
 
         let mut expected = vec![0i64; size];
-        for i in 0..=publish_amount * 3 {
+        for i in 0..publish_amount * 3 {
             expected[i as usize] = i as i64
         }
         assert_eq!(result, expected);
@@ -148,7 +148,7 @@ mod integration_tests {
                 while should_continue {
                     producer.batch_write(20, |event, seq, _| {
                         event.seq = seq;
-                        if seq == num_of_events {
+                        if seq == num_of_events - 1 {
                             event.consumer_break = true;
                             should_continue = false;
                         }
@@ -211,7 +211,7 @@ mod integration_tests {
             });
         });
 
-        let mut consumer_0_out_expected: Vec<_> = (1..=num_of_events)
+        let mut consumer_0_out_expected: Vec<_> = (0..num_of_events)
             .map(|i| Event {
                 consumer_break: false,
                 seq: i,
@@ -251,7 +251,7 @@ mod integration_tests {
 
         let join_p = std::thread::spawn(move || {
             let mut counter = 0;
-            while counter < num_of_events {
+            while counter < num_of_events - 1 {
                 producer.batch_write(10, |i, seq, _| {
                     counter += 1;
                     *i = seq;
@@ -267,7 +267,7 @@ mod integration_tests {
             while should_continue {
                 consumer_0.read(|_, seq, _| {
                     c0_out.fetch_add(1, Ordering::Relaxed);
-                    should_continue = seq < num_of_events;
+                    should_continue = seq < num_of_events - 1;
                 });
             }
         });
@@ -278,7 +278,7 @@ mod integration_tests {
             while should_continue {
                 consumer_1.batch_read(5, |_, seq, _| {
                     c1_out.fetch_add(1, Ordering::Relaxed);
-                    should_continue = seq < num_of_events;
+                    should_continue = seq < num_of_events - 1;
                 });
             }
         });
@@ -319,7 +319,7 @@ mod integration_tests {
             .unwrap();
 
         let num_of_events = 200;
-        let mut result_seqs = vec![0i64; num_of_events + 1];
+        let mut result_seqs = vec![0i64; num_of_events];
         let mut result_blank: Vec<i64> = vec![];
 
         std::thread::scope(|s| {
@@ -370,7 +370,7 @@ mod integration_tests {
             });
         });
 
-        let expected_seqs: Vec<_> = (0..=200).collect();
+        let expected_seqs: Vec<_> = (0..num_of_events as i64).collect();
         assert_eq!(result_seqs, expected_seqs);
 
         let expected_blank = vec![0; num_of_events];
@@ -439,7 +439,7 @@ mod integration_tests {
         let results_c2 = results.remove(&2).unwrap().join().expect("done c2");
         let results_c4 = results.remove(&4).unwrap().join().expect("done c4");
 
-        let expected_seqs: Vec<_> = (1i64..=num_of_events).collect();
+        let expected_seqs: Vec<_> = (0i64..num_of_events).collect();
         assert_eq!(expected_seqs, results_c0);
         assert_eq!(expected_seqs, results_c1);
         assert_eq!(expected_seqs, results_c2);

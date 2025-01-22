@@ -72,7 +72,7 @@ impl<E> RingBuffer<E> {
 
 /// Return `n mod m` where `m` must be a positive non-zero power of two.
 #[inline]
-pub(crate) fn mod_m_po2(n: i64, m: i64) -> i64 {
+fn mod_m_po2(n: i64, m: i64) -> i64 {
     assert!(
         m > 0 && (m & (m - 1)) == 0,
         "modulus must be a positive non-zero power of 2; found: {m}"

@@ -91,7 +91,23 @@ where
     /// Otherwise, return `None` and drop this [`MultiProducer`].
     ///
     /// If this function is called when only one [`MultiProducer`] exists, then it is guaranteed to
-    /// return a [`Producer`].
+    /// return a [`Producer`]. Note that independent [`MultiProducer`]s, which do not share a
+    /// cursor, will not affect calls to this method.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let mut handles = DisruptorBuilder::new(16, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build();
+    ///
+    /// let multi = handles.unwrap().take_lead().unwrap().into_multi();
+    /// let multi_clone = multi.clone();
+    ///
+    /// assert!(matches!(multi.into_single(), None));
+    /// assert!(matches!(multi_clone.into_single(), Some(Producer { .. })));
+    /// ```
     pub fn into_single(self) -> Option<Producer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|_| Producer {
             cursor: self.cursor,
@@ -274,6 +290,58 @@ where
     }
 }
 
+// todo: to create, we need to check first that BATCH is a factor of buffer_size, then chck that
+//  either seq + 1 == 0, or that BATCH is a factor of seq + 1 % buffer_size
+pub struct ExactConsumer<E, W, const BATCH: u32> {
+    cursor: Arc<Cursor>,
+    barrier: Barrier,
+    buffer: Arc<RingBuffer<E>>,
+    wait_strategy: W,
+}
+
+impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
+where
+    W: WaitStrategy,
+{
+    pub fn read_exact<F>(&self, mut read: F)
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let mut barrier_seq = self.barrier.sequence();
+        while barrier_seq - consumer_seq < BATCH as i64 {
+            assert!(
+                consumer_seq <= barrier_seq,
+                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
+            );
+            self.wait_strategy.wait();
+            barrier_seq = self.barrier.sequence();
+        }
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+        //    ensuring multiple mutable refs do not exist.
+        // 2) The Acquire-Release synchronisation ensures that the consumer cursor does not visibly
+        //    update its value until all the events are processed, which in turn ensures that
+        //    producers will not write here while the consumer is reading. This ensures that no
+        //    mutable ref to this element is created while this immutable ref exists.
+        // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the check
+        //    on BATCH size.
+        unsafe {
+            let mut seq = consumer_seq + 1;
+            let mut pointer = self.buffer.get(seq) as *const E;
+            for _ in 0..BATCH - 1 {
+                read(&*pointer, seq, false);
+                pointer = pointer.add(1);
+                seq += 1;
+            }
+            read(&*pointer, seq, true);
+        }
+        self.cursor.sequence.store(barrier_seq, Ordering::Release);
+        self.wait_strategy.finalise()
+    }
+}
+
 #[derive(Debug)]
 #[repr(transparent)]
 pub(crate) struct Cursor {
@@ -284,7 +352,7 @@ pub(crate) struct Cursor {
 }
 
 impl Cursor {
-    pub(crate) fn new(seq: i64) -> Self {
+    pub(crate) const fn new(seq: i64) -> Self {
         Cursor {
             #[cfg(not(feature = "cache-padded"))]
             sequence: AtomicI64::new(seq),
@@ -323,15 +391,15 @@ impl Drop for Barrier {
 }
 
 /// Calculate the distance on the ring buffer from a producer provided sequence to its barrier.
-/// Positive return values represent available distance to this producer's barrier. Zero or
-/// negative values represent no available write distance.
+/// Positive return values represent available distance to the barrier. Zero or negative values
+/// represent no available write distance.
 ///
 /// This calculation utilises the constraint that: `0 <= barrier_seq <= producer_seq`, which is
 /// only true for lead producers. Callers must ensure that this holds.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
     assert!(
-        0 <= barrier_seq && barrier_seq <= producer_seq,
+        -1 <= barrier_seq && barrier_seq <= producer_seq,
         "Constraint error: 0 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
     );
     buffer_size as i64 - (producer_seq - barrier_seq)
