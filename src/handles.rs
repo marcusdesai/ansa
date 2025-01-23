@@ -288,10 +288,52 @@ where
         self.cursor.sequence.store(barrier_seq, Ordering::Release);
         self.wait_strategy.finalise()
     }
+
+    /// Returns an [`ExactConsumer`] if successful, otherwise returns the consumer which called
+    /// this method.
+    ///
+    /// Three conditions must be met to create an [`ExactConsumer`]:
+    /// 1) `BATCH` must not be zero.
+    /// 2) The buffer size associated with this consumer must be divisible by `BATCH`.
+    /// 3) This consumer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
+    ///    that sequence values start at `-1`.
+    ///
+    /// Note that, before this consumer reads any data from the buffer (i.e., moves its cursor),
+    /// the third condition is trivially met by any `BATCH` value.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let consumer = handles.take_consumer(0).unwrap();
+    ///
+    /// let result = consumer.into_exact::<10>();
+    /// assert!(matches!(result, Err(Consumer { .. })));
+    ///
+    /// let result = result.unwrap_err().into_exact::<16>();
+    /// assert!(matches!(result, Ok(ExactConsumer { .. })));
+    /// ```
+    pub fn into_exact<const BATCH: u32>(self) -> Result<ExactConsumer<E, W, BATCH>, Self> {
+        let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
+        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 || sequence % BATCH as i64 != 0 {
+            return Err(self);
+        }
+        Ok(ExactConsumer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            wait_strategy: self.wait_strategy,
+        })
+    }
 }
 
-// todo: to create, we need to check first that BATCH is a factor of buffer_size, then chck that
-//  either seq + 1 == 0, or that BATCH is a factor of seq + 1 % buffer_size
+#[derive(Debug)]
 pub struct ExactConsumer<E, W, const BATCH: u32> {
     cursor: Arc<Cursor>,
     barrier: Barrier,
@@ -326,7 +368,7 @@ where
         //    producers will not write here while the consumer is reading. This ensures that no
         //    mutable ref to this element is created while this immutable ref exists.
         // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the checks
-        //    on BATCH size.
+        //    on BATCH size made when creating this struct.
         let mut seq = consumer_seq + 1;
         let mut pointer = self.buffer.get(seq) as *const E;
         unsafe {
@@ -359,6 +401,12 @@ impl Cursor {
             #[cfg(feature = "cache-padded")]
             sequence: crossbeam_utils::CachePadded::new(AtomicI64::new(seq)),
         }
+    }
+
+    /// Create a cursor at the start of the sequence. Since all reads and writes begin on the
+    /// _next_ position in the sequence, we start at `-1` so that reads and writes start at `0`
+    pub(crate) const fn start() -> Self {
+        Cursor::new(-1)
     }
 }
 
@@ -394,7 +442,7 @@ impl Drop for Barrier {
 /// Positive return values represent available distance to the barrier. Zero or negative values
 /// represent no available write distance.
 ///
-/// This calculation utilises the constraint that: `0 <= barrier_seq <= producer_seq`, which is
+/// This calculation utilises the constraint that: `-1 <= barrier_seq <= producer_seq`, which is
 /// only true for lead producers. Callers must ensure that this holds.
 #[inline]
 fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {

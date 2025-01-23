@@ -148,7 +148,7 @@ where
         // unwrap okay as this value will always be inhabited as per construction of the builder
         let element_factory = self.element_factory.take().unwrap();
         let buffer = Arc::new(RingBuffer::new(self.buffer_size, element_factory));
-        let lead_cursor = Arc::new(Cursor::new(-1));
+        let lead_cursor = Arc::new(Cursor::start());
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
@@ -199,7 +199,7 @@ where
 
         fn get_cursor(id: u64, map: &mut U64Map<Arc<Cursor>>) -> Arc<Cursor> {
             // start cursors at -1 to make buffer accesses zero indexed from the start
-            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::new(-1)));
+            let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::start()));
             Arc::clone(cursor)
         }
 
