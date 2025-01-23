@@ -85,6 +85,32 @@ where
         self.wait_strategy.finalise()
     }
 
+    /// Returns the count of [`MultiProducer`] associated with this producer's cursor.
+    ///
+    /// Care should be taken when performing actions based upon this number, as any thread which
+    /// holds an associated [`MultiProducer`] may clone it at any time, thereby changing the count.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let multi = handles.take_lead().unwrap().into_multi();
+    /// assert_eq!(multi.count(), 1);
+    /// let multi_2 = multi.clone();
+    /// assert_eq!(multi.count(), 2);
+    /// // consume a `MultiProducer` by attempting the conversion into a `Producer`
+    /// assert!(matches!(multi.into_single(), None));
+    /// assert_eq!(multi_2.count(), 1);
+    /// ```
+    pub fn count(&self) -> usize {
+        Arc::strong_count(&self.claim)
+    }
+
     /// Return a [`Producer`] if there exists only one [`MultiProducer`] associated with
     /// this producer cursor.
     ///
@@ -117,6 +143,37 @@ where
             wait_strategy: self.wait_strategy,
         })
     }
+
+    /// there can only be one
+    ///
+    /// Footgun: it is possible to lose all access to this multi producer if condition for creating exact version not met.
+    pub fn into_exact<const BATCH: u32>(
+        self,
+    ) -> Result<Option<ExactMultiProducer<E, W, LEAD, BATCH>>, Self> {
+        if self.count() != 1 {
+            return Err(self);
+        }
+        match Arc::into_inner(self.claim) {
+            None => Ok(None),
+            Some(_) => {
+                let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
+                if BATCH == 0
+                    || self.buffer.len() % BATCH as usize != 0
+                    || sequence % BATCH as i64 != 0
+                {
+                    return Ok(None);
+                }
+                Ok(Some(ExactMultiProducer {
+                    cursor: self.cursor,
+                    barrier: self.barrier,
+                    buffer: self.buffer,
+                    claim: Arc::new(Cursor::new(sequence)),
+                    barrier_seq: self.barrier_seq,
+                    wait_strategy: self.wait_strategy,
+                }))
+            }
+        }
+    }
 }
 
 impl<E, W, const LEAD: bool> Clone for MultiProducer<E, W, LEAD>
@@ -132,6 +189,107 @@ where
             barrier_seq: self.barrier_seq,
             wait_strategy: self.wait_strategy.clone(),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct ExactMultiProducer<E, W, const LEAD: bool, const BATCH: u32> {
+    cursor: Arc<Cursor>,
+    barrier: Barrier,
+    buffer: Arc<RingBuffer<E>>,
+    claim: Arc<Cursor>, // shared between all clones of this multi producer
+    barrier_seq: i64,
+    wait_strategy: W,
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategy,
+{
+    pub fn write_exact<F>(&mut self, mut write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
+        let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
+        let mut claim_end = current_claim + BATCH as i64;
+        while let Err(new_current) = self.claim.sequence.compare_exchange(
+            current_claim,
+            claim_end,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            current_claim = new_current;
+            claim_end = new_current + BATCH as i64;
+        }
+        // Wait for the barrier to move past the end of the claim.
+        if LEAD {
+            // Utilise the constraint that `claim_end` >= `barrier_seq`. Note that `claim_end` does
+            // not represent the position of the producer cursor, so it is allowed to hold a value
+            // ahead of the producer barrier.
+            while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
+                self.wait_strategy.wait();
+                self.barrier_seq = self.barrier.sequence();
+            }
+        } else {
+            // If this is not the lead producer we need to wait until `claim_end` <= `barrier_seq`
+            while claim_end > self.barrier_seq {
+                self.wait_strategy.wait();
+                self.barrier_seq = self.barrier.sequence();
+            }
+        }
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
+        // cover the entire duration of the buffer writes, so we use a fence here before any of the
+        // cursor loads.
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) We know that this sequence has been claimed by only one producer, so multiple
+        //    mutable refs to this element cannot exist.
+        // 2) The Acquire-Release memory barrier ensures this memory location will not be read
+        //    while it is written to. This ensures that immutable refs will not be created for
+        //    this element while the mutable ref exists.
+        // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the checks
+        //    on BATCH size made when creating this struct.
+        let mut seq = current_claim + 1;
+        let mut pointer = self.buffer.get(seq);
+        unsafe {
+            for _ in 0..BATCH - 1 {
+                write(&mut *pointer, seq, false);
+                pointer = pointer.add(1);
+                seq += 1;
+            }
+            write(&mut *pointer, seq, true);
+        }
+
+        // Wait for the cursor to catch up to start of claimed sequence. This ensures that writes
+        // later in the sequence are not made visible until all earlier writes by this multi
+        // producer or its clones are completed. Without this check, unfinished writes may become
+        // prematurely visible, allowing overlapping immutable and mutable refs to be created.
+        let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
+        while cursor_seq != current_claim {
+            self.wait_strategy.wait();
+            cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
+        }
+        // Finally, advance producer cursor to publish the writes upto the end of the claimed
+        // sequence.
+        self.cursor.sequence.store(claim_end, Ordering::Release);
+        self.wait_strategy.finalise()
+    }
+
+    pub fn count(&self) -> usize {
+        Arc::strong_count(&self.claim)
+    }
+
+    /// there can only be one
+    pub fn into_multi(self) -> Option<MultiProducer<E, W, LEAD>> {
+        Arc::into_inner(self.claim).map(|claim| MultiProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            claim: Arc::new(claim),
+            barrier_seq: self.barrier_seq,
+            wait_strategy: self.wait_strategy,
+        })
     }
 }
 
@@ -204,34 +362,6 @@ where
         }
     }
 
-    pub fn into_exact<const BATCH: u32>(self) -> Result<ExactProducer<E, W, LEAD, BATCH>, Self> {
-        let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 || sequence % BATCH as i64 != 0 {
-            return Err(self);
-        }
-        Ok(ExactProducer {
-            cursor: self.cursor,
-            barrier: self.barrier,
-            buffer: self.buffer,
-            free_slots: self.free_slots,
-            wait_strategy: self.wait_strategy,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
-    pub(crate) cursor: Arc<Cursor>,
-    pub(crate) barrier: Barrier,
-    pub(crate) buffer: Arc<RingBuffer<E>>,
-    pub(crate) free_slots: i64,
-    pub(crate) wait_strategy: W,
-}
-
-impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
-where
-    W: WaitStrategy,
-{
     /// Returns an [`ExactProducer`] if successful, otherwise returns the producer which called
     /// this method.
     ///
@@ -262,6 +392,34 @@ where
     /// let result = result.unwrap_err().into_exact::<16>();
     /// assert!(matches!(result, Ok(ExactProducer { .. })));
     /// ```
+    pub fn into_exact<const BATCH: u32>(self) -> Result<ExactProducer<E, W, LEAD, BATCH>, Self> {
+        let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
+        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 || sequence % BATCH as i64 != 0 {
+            return Err(self);
+        }
+        Ok(ExactProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            free_slots: self.free_slots,
+            wait_strategy: self.wait_strategy,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
+    pub(crate) cursor: Arc<Cursor>,
+    pub(crate) barrier: Barrier,
+    pub(crate) buffer: Arc<RingBuffer<E>>,
+    pub(crate) free_slots: i64,
+    pub(crate) wait_strategy: W,
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategy,
+{
     pub fn write_exact<F>(&mut self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -305,6 +463,7 @@ where
         self.wait_strategy.finalise()
     }
 
+    /// Converts this [`ExactProducer`] into a [`Producer`].
     pub fn into_producer(self) -> Producer<E, W, LEAD> {
         Producer {
             cursor: self.cursor,
@@ -495,6 +654,7 @@ where
         self.wait_strategy.finalise()
     }
 
+    /// Converts this [`ExactConsumer`] into a [`Consumer`].
     pub fn into_consumer(self) -> Consumer<E, W> {
         Consumer {
             cursor: self.cursor,
@@ -524,8 +684,8 @@ impl Cursor {
         }
     }
 
-    /// Create a cursor at the start of the sequence. Since all reads and writes begin on the
-    /// _next_ position in the sequence, we start at `-1` so that reads and writes start at `0`
+    /// Create a cursor at the start of the sequence. All reads and writes begin on the _next_
+    /// position in the sequence, so cursors start at `-1`, meaning reads and writes start at `0`.
     pub(crate) const fn start() -> Self {
         Cursor::new(-1)
     }
