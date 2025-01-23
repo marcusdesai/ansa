@@ -177,7 +177,8 @@ where
         let batch_end = producer_seq + size;
         for seq in producer_seq + 1..=batch_end {
             // SAFETY:
-            // 1) We know that there is only one producer, so multiple mutable refs cannot exist.
+            // 1) We know that there is only one producer accessing this section of the buffer, so
+            //    multiple mutable refs cannot exist.
             // 2) The Acquire-Release memory barrier ensures this memory location will not be read
             //    while it is written to. This ensures that immutable refs will not be created for
             //    this element while the mutable ref exists.
@@ -199,6 +200,117 @@ where
             buffer: self.buffer,
             claim: Arc::new(Cursor::new(producer_seq)),
             barrier_seq,
+            wait_strategy: self.wait_strategy,
+        }
+    }
+
+    pub fn into_exact<const BATCH: u32>(self) -> Result<ExactProducer<E, W, LEAD, BATCH>, Self> {
+        let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
+        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 || sequence % BATCH as i64 != 0 {
+            return Err(self);
+        }
+        Ok(ExactProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            free_slots: self.free_slots,
+            wait_strategy: self.wait_strategy,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
+    pub(crate) cursor: Arc<Cursor>,
+    pub(crate) barrier: Barrier,
+    pub(crate) buffer: Arc<RingBuffer<E>>,
+    pub(crate) free_slots: i64,
+    pub(crate) wait_strategy: W,
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategy,
+{
+    /// Returns an [`ExactProducer`] if successful, otherwise returns the producer which called
+    /// this method.
+    ///
+    /// Three conditions must be met to create an [`ExactProducer`]:
+    /// 1) `BATCH` must not be zero.
+    /// 2) The buffer size associated with this producer must be divisible by `BATCH`.
+    /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
+    ///    that sequence values start at `-1`.
+    ///
+    /// Note that, before this producer writes any data to the buffer (i.e., moves its cursor),
+    /// the third condition is trivially met by any `BATCH` value.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let producer = handles.take_lead().unwrap();
+    ///
+    /// let result = producer.into_exact::<10>();
+    /// assert!(matches!(result, Err(Producer { .. })));
+    ///
+    /// let result = result.unwrap_err().into_exact::<16>();
+    /// assert!(matches!(result, Ok(ExactProducer { .. })));
+    /// ```
+    pub fn write_exact<F>(&mut self, mut write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        // Wait until there are free slots to write events to.
+        while self.free_slots < BATCH as i64 {
+            self.wait_strategy.wait();
+            let barrier_seq = self.barrier.sequence();
+            if LEAD {
+                let buf_len = self.buffer.len();
+                self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
+            } else {
+                self.free_slots = barrier_seq - producer_seq;
+            }
+        }
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
+        // duration of the writes.
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) We know that there is only one producer accessing this section of the buffer, so
+        //    multiple mutable refs cannot exist.
+        // 2) The Acquire-Release memory barrier ensures this memory location will not be read
+        //    while it is written to. This ensures that immutable refs will not be created for
+        //    this element while the mutable ref exists.
+        // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the checks
+        //    on BATCH size made when creating this struct.
+        let mut seq = producer_seq + 1;
+        let mut pointer = self.buffer.get(seq);
+        unsafe {
+            for _ in 0..BATCH - 1 {
+                write(&mut *pointer, seq, false);
+                pointer = pointer.add(1);
+                seq += 1;
+            }
+            write(&mut *pointer, seq, true);
+        }
+        self.free_slots -= BATCH as i64;
+        // Move cursor upto the end of the written batch.
+        self.cursor.sequence.store(seq, Ordering::Release);
+        self.wait_strategy.finalise()
+    }
+
+    pub fn into_producer(self) -> Producer<E, W, LEAD> {
+        Producer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            free_slots: self.free_slots,
             wait_strategy: self.wait_strategy,
         }
     }
@@ -381,6 +493,15 @@ where
         }
         self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
+    }
+
+    pub fn into_consumer(self) -> Consumer<E, W> {
+        Consumer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            wait_strategy: self.wait_strategy,
+        }
     }
 }
 
