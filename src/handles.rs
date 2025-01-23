@@ -144,24 +144,68 @@ where
         })
     }
 
-    /// there can only be one
+    /// Returns an [`ExactMultiProducer`] if successful, otherwise returns the producer which called
+    /// this method.
     ///
-    /// Footgun: it is possible to lose all access to this multi producer if condition for creating exact version not met.
+    /// If a [`MultiProducer`] clone is created as this function runs, then it will return
+    /// `Ok(None)` and consume this producer.
+    ///
+    /// Four conditions must be met to create an [`ExactMultiProducer`]:
+    /// 1) Only one [`MultiProducer`] associated with this producer's cursor must exist.
+    /// 2) `BATCH` must not be zero.
+    /// 3) The buffer size associated with this producer must be divisible by `BATCH`.
+    /// 4) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
+    ///    that sequence values start at `-1`.
+    ///
+    /// Note that, before this producer writes any data to the buffer (i.e., moves its cursor),
+    /// the third condition is trivially met by any `BATCH` value.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let multi = handles.take_lead().unwrap().into_multi();
+    /// let multi_2 = multi.clone();
+    ///
+    /// // two multi producers exist for this cursor, but the incorrect BATCH value means
+    /// // neither will be consumed in this call
+    /// let result = multi.into_exact::<10>();
+    /// assert!(matches!(result, Err(MultiProducer { .. })));
+    ///
+    /// // BATCH meets the required conditions, but there are two producers for this cursor
+    /// let result = result.unwrap_err().into_exact::<16>();
+    /// assert!(matches!(result, Ok(None)));
+    ///
+    /// let result = multi_2.into_exact::<16>();
+    /// assert!(matches!(result, Ok(Some(ExactMultiProducer { .. }))));
+    /// ```
     pub fn into_exact<const BATCH: u32>(
         self,
     ) -> Result<Option<ExactMultiProducer<E, W, LEAD, BATCH>>, Self> {
-        if self.count() != 1 {
+        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 {
             return Err(self);
         }
         match Arc::into_inner(self.claim) {
             None => Ok(None),
             Some(_) => {
                 let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-                if BATCH == 0
-                    || self.buffer.len() % BATCH as usize != 0
-                    || sequence % BATCH as i64 != 0
-                {
-                    return Ok(None);
+                if sequence % BATCH as i64 != 0 {
+                    // There is at most one producer associated with this cursor, so a new claim
+                    // cursor can be made without issue.
+                    return Err(MultiProducer {
+                        cursor: self.cursor,
+                        barrier: self.barrier,
+                        buffer: self.buffer,
+                        claim: Arc::new(Cursor::new(sequence)),
+                        barrier_seq: self.barrier_seq,
+                        wait_strategy: self.wait_strategy,
+                    });
                 }
                 Ok(Some(ExactMultiProducer {
                     cursor: self.cursor,
@@ -210,7 +254,6 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + BATCH as i64;
         while let Err(new_current) = self.claim.sequence.compare_exchange(
@@ -222,25 +265,17 @@ where
             current_claim = new_current;
             claim_end = new_current + BATCH as i64;
         }
-        // Wait for the barrier to move past the end of the claim.
         if LEAD {
-            // Utilise the constraint that `claim_end` >= `barrier_seq`. Note that `claim_end` does
-            // not represent the position of the producer cursor, so it is allowed to hold a value
-            // ahead of the producer barrier.
             while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
         } else {
-            // If this is not the lead producer we need to wait until `claim_end` <= `barrier_seq`
             while claim_end > self.barrier_seq {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
         }
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
-        // cover the entire duration of the buffer writes, so we use a fence here before any of the
-        // cursor loads.
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that this sequence has been claimed by only one producer, so multiple
@@ -260,22 +295,40 @@ where
             }
             write(&mut *pointer, seq, true);
         }
-
-        // Wait for the cursor to catch up to start of claimed sequence. This ensures that writes
-        // later in the sequence are not made visible until all earlier writes by this multi
-        // producer or its clones are completed. Without this check, unfinished writes may become
-        // prematurely visible, allowing overlapping immutable and mutable refs to be created.
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
             self.wait_strategy.wait();
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
-        // Finally, advance producer cursor to publish the writes upto the end of the claimed
-        // sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
         self.wait_strategy.finalise()
     }
 
+    /// Returns the count of [`ExactMultiProducer`] associated with this producer's cursor.
+    ///
+    /// Care should be taken when performing actions based upon this number, as any thread which
+    /// holds an associated [`ExactMultiProducer`] may clone it at any time, thereby changing the
+    /// count.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let lead = handles.take_lead().unwrap().into_multi();
+    /// let exact_multi = lead.into_exact::<16>().expect("exact").unwrap();
+    ///
+    /// assert_eq!(exact_multi.count(), 1);
+    /// let exact_multi_2 = exact_multi.clone();
+    /// assert_eq!(exact_multi.count(), 2);
+    /// // consume `ExactMultiProducer` by attempting conversion into `MultiProducer`
+    /// assert!(matches!(exact_multi.into_multi(), None));
+    /// assert_eq!(exact_multi_2.count(), 1);
+    /// ```
     pub fn count(&self) -> usize {
         Arc::strong_count(&self.claim)
     }
@@ -290,6 +343,22 @@ where
             barrier_seq: self.barrier_seq,
             wait_strategy: self.wait_strategy,
         })
+    }
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> Clone for ExactMultiProducer<E, W, LEAD, BATCH>
+where
+    W: Clone,
+{
+    fn clone(&self) -> Self {
+        ExactMultiProducer {
+            cursor: Arc::clone(&self.cursor),
+            barrier: self.barrier.clone(),
+            buffer: Arc::clone(&self.buffer),
+            claim: Arc::clone(&self.claim),
+            barrier_seq: self.barrier_seq,
+            wait_strategy: self.wait_strategy.clone(),
+        }
     }
 }
 
@@ -425,7 +494,6 @@ where
         F: FnMut(&mut E, i64, bool),
     {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        // Wait until there are free slots to write events to.
         while self.free_slots < BATCH as i64 {
             self.wait_strategy.wait();
             let barrier_seq = self.barrier.sequence();
@@ -436,8 +504,6 @@ where
                 self.free_slots = barrier_seq - producer_seq;
             }
         }
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
-        // duration of the writes.
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that there is only one producer accessing this section of the buffer, so
@@ -458,7 +524,6 @@ where
             write(&mut *pointer, seq, true);
         }
         self.free_slots -= BATCH as i64;
-        // Move cursor upto the end of the written batch.
         self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
     }
