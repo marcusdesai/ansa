@@ -10,7 +10,10 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// Lazily evaluated
+/// Configures and builds the buffer and handles for a single disruptor.
+///
+/// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
+/// is called.
 #[derive(Debug)]
 pub struct DisruptorBuilder<F, E, WF, W> {
     /// Size of the ring buffer, must be power of 2.
@@ -42,6 +45,23 @@ impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
     /// `size` must be a non-zero power of 2.
     ///
     /// The default wait factory returns instances of: [`WaitBlocking`].
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// // with a very simple element_factory
+    /// let builder = DisruptorBuilder::new(64, || 0i64);
+    ///
+    /// // using a closure to capture state
+    /// let mut counter = 0;
+    /// let factory = move || {
+    ///     let ret = counter;
+    ///     counter += 1;
+    ///     ret
+    /// };
+    /// let builder = DisruptorBuilder::new(64, factory);
+    /// ```
     pub fn new(size: usize, element_factory: F) -> Self
     where
         E: Sync,
@@ -68,11 +88,61 @@ where
     WF: Fn() -> W,
     W: WaitStrategy,
 {
-    /// Add either a producer or consumer handle to the disruptor.
+    /// Add a handle to the disruptor.
     ///
-    /// Following conditions must be met...
+    /// Each handle must be associated with a unique id, and must be either a consumer or producer.
     ///
-    /// Examples...
+    /// Every handle must describe how it relates to other handles by indicating which handles it
+    /// follows. In the disruptor pattern, the management of access to the underlying ring buffer
+    /// is organised by ordering handles according to which handles come before.
+    ///
+    /// The handles of a disruptor must create a directed acyclic graph, where each handle follows
+    /// either the lead producer, or other handles. The "lead producer" is implicitly defined
+    /// simply by creating the ['DisruptorBuilder']. This lead serves as the root of the graph,
+    /// everything else must in some way follow it, and it will always be a producer.
+    ///
+    /// # Examples
+    ///
+    /// Consumer handles do not need to necessarily follow one another, which allows for them to
+    /// overlap reads of the ring buffer.
+    /// ```
+    /// use ansa::*;
+    ///
+    /// // lead ─► 0
+    /// //    |
+    /// //    ▼
+    /// //    1
+    /// let _ = DisruptorBuilder::new(0, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer);
+    /// ```
+    /// This represents a fan-out from the lead producer to the following consumers `0` and `1`.
+    ///
+    /// But all producers must always follow or be followed by other handles, as there cannot be
+    /// overlapping writes of the buffer.
+    /// ```
+    /// use ansa::*;
+    ///
+    /// // lead ─► 0 ─► 2
+    /// //         |    |
+    /// //         ▼    ▼
+    /// //         1 ─► 3P ─► 4
+    /// let _ = DisruptorBuilder::new(0, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+    ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
+    ///     .add_handle(3, Handle::Producer, Follows::Handles(vec![1, 2])) // fan-in
+    ///     .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]));
+    /// ```
+    ///
+    /// Another way of expressing this is that: it is possible to add consumer handles which are
+    /// partially ordered with respect to other consumer handles, but all handles (of any kind)
+    /// must be totally ordered with respect to all producer handles.
+    ///
+    /// See: [`BuildError`], for full details on error states encountered when building the
+    /// disruptor. Such invalid states are most often caused by misconfigured calls to
+    /// [`add_handle`](DisruptorBuilder::add_handle) or
+    /// [`extend_handles`](DisruptorBuilder::extend_handles).
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
@@ -95,6 +165,9 @@ where
     }
 
     /// Extend the handles graph with an iterator.
+    ///
+    /// The implementation simply calls [`add_handle`](DisruptorBuilder::add_handle) on each
+    /// element of the iterator.
     ///
     /// # Examples
     ///
@@ -142,7 +215,7 @@ where
     /// Returns the constructed [`DisruptorHandles`] struct if successful, otherwise returns
     /// [`BuildError`].
     ///
-    /// For details on error states, please see [`BuildError`].
+    /// For full details on error states, please see [`BuildError`].
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
         // unwrap okay as this value will always be inhabited as per construction of the builder
@@ -504,8 +577,24 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
 
 /// Describes the ordering relationship for a single handle.
 ///
-/// `Follows::Handles(vec![0, 1])` denotes that a handle interacts with elements on the ring buffer
-/// only after both handles with ids `0` and `1` have finished their interactions.
+/// # Examples
+/// ```
+/// use ansa::*;
+///
+/// // ordered directly after the lead producer
+/// let _ = Follows::LeadProducer;
+///
+/// // ordered directly after the handle with id `0`
+/// let _ = Follows::Handles(vec![0]);
+///
+/// // ordered directly after the handles with ids `0`, `1` and `2`
+/// let _ = Follows::Handles(vec![0, 1, 2]); // fan-in
+/// ```
+/// When one handles is 'ordered directly' after another, it will interact with a sequence on the
+/// buffer only after all handles it follows have concluded their interactions with that sequence.
+///
+/// In disruptor terminology, the cursors of all handles ordered directly before handle `A` will
+/// together form the barrier for `A`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Follows {
     LeadProducer,
