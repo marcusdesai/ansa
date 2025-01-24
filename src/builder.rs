@@ -1,5 +1,3 @@
-//! todo: Examples like fan out, fan in, etc...
-
 use crate::handles::{Barrier, Consumer, Cursor, Producer};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitBlocking, WaitStrategy};
@@ -26,7 +24,7 @@ pub struct DisruptorBuilder<F, E, WF, W> {
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
     /// indicates that the consumer with id `3` is followed by the consumers with ids `5` and `7`.
     followed_by: U64Map<Vec<u64>>,
-    /// The inverse of followed_by, useful for conveniently constructing barriers for consumers.
+    /// The inverse of followed_by, useful for conveniently constructing barriers for handles.
     follows: U64Map<Follows>,
     /// All the ids which follow the lead producer. These are the roots of the graph.
     follows_lead: U64Set,
@@ -433,7 +431,7 @@ pub enum BuildError {
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0, 2])) // <- here
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::UnregisteredID(2));
+    /// assert!(matches!(result, Err(BuildError::UnregisteredID(2))));
     /// ```
     UnregisteredID(u64),
     /// An ID which loops in the graph. Loops between handles will cause the disruptor to deadlock.
@@ -449,7 +447,7 @@ pub enum BuildError {
     ///     .add_handle(3, Handle::Consumer, Follows::Handles(vec![2]))
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::GraphCycle(2));
+    /// assert!(matches!(result, Err(BuildError::GraphCycle(2))));
     /// ```
     GraphCycle(u64),
     /// An ID which is disconnected from the rest of the graph. Disconnected in this context means
@@ -464,7 +462,7 @@ pub enum BuildError {
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![])) // <- here
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::DisconnectedNode(1));
+    /// assert!(matches!(result, Err(BuildError::DisconnectedNode(1))));
     /// ```
     DisconnectedNode(u64),
 }
