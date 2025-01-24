@@ -533,6 +533,8 @@ mod integration_tests {
         assert!(is_times_2);
     }
 
+    // Only passes miri when MIRIFLAGS="-Zmiri-tree-borrows" is set. In other words: the exact
+    // handles don't adhere to the Stacked-Borrow rules.
     #[test]
     fn test_exact_handles() {
         let mut handles = DisruptorBuilder::new(128, || 0)
@@ -549,7 +551,7 @@ mod integration_tests {
             let lead = handles.take_lead().unwrap();
             let mut lead_exact = lead.into_exact::<16>().unwrap();
             s.spawn(move || {
-                for _ in 0..20 {
+                for _ in 0..num_of_events / 16 {
                     lead_exact.write_exact(|i, seq, _| {
                         *i = seq;
                     })
@@ -560,7 +562,7 @@ mod integration_tests {
             let multi_exact = multi.into_exact::<16>().unwrap().unwrap();
             for mut producer in [multi_exact.clone(), multi_exact] {
                 s.spawn(move || {
-                    for _ in 0..10 {
+                    for _ in 0..(num_of_events / 16) / 2 {
                         producer.write_exact(|i, _, _| {
                             *i *= 2;
                         })
@@ -572,7 +574,7 @@ mod integration_tests {
             let consumer_exact = consumer.into_exact::<32>().unwrap();
             let last = &mut last_i;
             s.spawn(move || {
-                for _ in 0..10 {
+                for _ in 0..num_of_events / 32 {
                     consumer_exact.read_exact(|i, seq, _| {
                         is_times_2 = is_times_2 && *i == seq * 2;
                         *last = *i;

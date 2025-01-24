@@ -44,7 +44,7 @@ where
             // Utilise the constraint that `claim_end` >= `barrier_seq`. Note that `claim_end` does
             // not represent the position of the producer cursor, so it is allowed to hold a value
             // ahead of the producer barrier.
-            while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
+            while lead_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
@@ -273,7 +273,7 @@ where
             claim_end = new_current + BATCH as i64;
         }
         if LEAD {
-            while producer_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
+            while lead_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
                 self.wait_strategy.wait();
                 self.barrier_seq = self.barrier.sequence();
             }
@@ -400,7 +400,7 @@ where
             let barrier_seq = self.barrier.sequence();
             if LEAD {
                 let buf_len = self.buffer.len();
-                self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
+                self.free_slots = lead_barrier_delta(buf_len, producer_seq, barrier_seq);
             } else {
                 self.free_slots = barrier_seq - producer_seq;
             }
@@ -428,7 +428,7 @@ where
 
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = (producer_seq - self.buffer.len() as i64).max(0);
+        let barrier_seq = (producer_seq - self.buffer.len() as i64).max(START_SEQ);
         MultiProducer {
             cursor: self.cursor,
             barrier: self.barrier,
@@ -508,7 +508,7 @@ where
             let barrier_seq = self.barrier.sequence();
             if LEAD {
                 let buf_len = self.buffer.len();
-                self.free_slots = producer_barrier_delta(buf_len, producer_seq, barrier_seq);
+                self.free_slots = lead_barrier_delta(buf_len, producer_seq, barrier_seq);
             } else {
                 self.free_slots = barrier_seq - producer_seq;
             }
@@ -751,6 +751,8 @@ pub(crate) struct Cursor {
     sequence: crossbeam_utils::CachePadded<AtomicI64>,
 }
 
+const START_SEQ: i64 = -1;
+
 impl Cursor {
     pub(crate) const fn new(seq: i64) -> Self {
         Cursor {
@@ -764,7 +766,7 @@ impl Cursor {
     /// Create a cursor at the start of the sequence. All reads and writes begin on the _next_
     /// position in the sequence, so cursors start at `-1`, meaning reads and writes start at `0`.
     pub(crate) const fn start() -> Self {
-        Cursor::new(-1)
+        Cursor::new(START_SEQ)
     }
 }
 
@@ -803,10 +805,10 @@ impl Drop for Barrier {
 /// This calculation utilises the constraint that: `-1 <= barrier_seq <= producer_seq`, which is
 /// only true for lead producers. Callers must ensure that this holds.
 #[inline]
-fn producer_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
+fn lead_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
     assert!(
         -1 <= barrier_seq && barrier_seq <= producer_seq,
-        "Constraint error: 0 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
+        "Constraint error: -1 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
     );
     buffer_size as i64 - (producer_seq - barrier_seq)
 }
@@ -821,15 +823,15 @@ mod tests {
         let mut rng = thread_rng();
         // calculation should match buffer size - (producer sequence - barrier sequence)
         let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(producer_barrier_delta(16, prod_seq, prod_seq - 20), -4);
+        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 20), -4);
 
         let same_seq = rng.gen_range(0..i64::MAX / 2);
-        assert_eq!(producer_barrier_delta(16, same_seq, same_seq), 16);
+        assert_eq!(lead_barrier_delta(16, same_seq, same_seq), 16);
 
         let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(producer_barrier_delta(16, prod_seq, prod_seq - 12), 4);
+        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 12), 4);
 
         let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(producer_barrier_delta(16, prod_seq, prod_seq - 16), 0);
+        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 16), 0);
     }
 }
