@@ -586,13 +586,12 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
 /// let _ = Follows::Handles(vec![0]);
 ///
 /// // ordered directly after the handles with ids `0`, `1` and `2`
-/// let _ = Follows::Handles(vec![0, 1, 2]); // fan-in
+/// let _ = Follows::Handles(vec![0, 1, 2]);
 /// ```
 /// When one handles is 'ordered directly' after another, it will interact with a sequence on the
 /// buffer only after all handles it follows have concluded their interactions with that sequence.
 ///
-/// In disruptor terminology, the cursors of all handles ordered directly before handle `A` will
-/// together form the barrier for `A`.
+/// In disruptor terms: a handle's barrier includes the cursors for all handles it directly follows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Follows {
     LeadProducer,
@@ -606,9 +605,9 @@ pub enum Handle {
     Consumer,
 }
 
-/// Stores the producers and consumers for a single disruptor.
+/// Holds the producers and consumers for a single disruptor.
 ///
-/// **Important**: It is likely a programming error to not use all the producers and consumers held
+/// **Warning**: It is likely a programming error to not use all the producers and consumers held
 /// by this store. If any single producer or consumer fails to move on the ring buffer, then the
 /// disruptor as a whole will eventually permanently stall.
 ///
@@ -641,12 +640,18 @@ impl<E, W> DisruptorHandles<E, W> {
     }
 
     /// Returns an iterator of all producers. Returns an empty iterator on all subsequent calls.
+    ///
+    /// **Warning**: If the returned iterator is dropped before being fully consumed, it
+    /// drops the remaining key-value pairs. Dropped handles will cause the disruptor to stall.
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_producers(&mut self) -> impl Iterator<Item = (u64, Producer<E, W, false>)> + '_ {
         self.producers.drain()
     }
 
     /// Returns an iterator of all consumers. Returns an empty iterator on all subsequent calls.
+    ///
+    /// **Warning**: If the returned iterator is dropped before being fully consumed, it
+    /// drops the remaining key-value pairs. Dropped handles will cause the disruptor to stall.
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_consumers(&mut self) -> impl Iterator<Item = (u64, Consumer<E, W>)> + '_ {
         self.consumers.drain()

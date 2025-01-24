@@ -532,4 +532,56 @@ mod integration_tests {
 
         assert!(is_times_2);
     }
+
+    #[test]
+    fn test_exact_handles() {
+        let mut handles = DisruptorBuilder::new(128, || 0)
+            .add_handle(0, Handle::Producer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+            .build()
+            .unwrap();
+
+        let num_of_events = 320;
+        let mut is_times_2 = true;
+        let mut last_i = 0;
+
+        std::thread::scope(|s| {
+            let lead = handles.take_lead().unwrap();
+            let mut lead_exact = lead.into_exact::<16>().unwrap();
+            s.spawn(move || {
+                for _ in 0..20 {
+                    lead_exact.write_exact(|i, seq, _| {
+                        *i = seq;
+                    })
+                }
+            });
+
+            let multi = handles.take_producer(0).unwrap().into_multi();
+            let multi_exact = multi.into_exact::<16>().unwrap().unwrap();
+            for mut producer in [multi_exact.clone(), multi_exact] {
+                s.spawn(move || {
+                    for _ in 0..10 {
+                        producer.write_exact(|i, _, _| {
+                            *i *= 2;
+                        })
+                    }
+                });
+            }
+
+            let consumer = handles.take_consumer(1).unwrap();
+            let consumer_exact = consumer.into_exact::<32>().unwrap();
+            let last = &mut last_i;
+            s.spawn(move || {
+                for _ in 0..10 {
+                    consumer_exact.read_exact(|i, seq, _| {
+                        is_times_2 = is_times_2 && *i == seq * 2;
+                        *last = *i;
+                    })
+                }
+            });
+        });
+
+        assert_eq!(last_i, (num_of_events - 1) * 2);
+        assert!(is_times_2);
+    }
 }

@@ -144,21 +144,25 @@ where
         })
     }
 
-    /// Returns an [`ExactMultiProducer`] if successful, otherwise returns the producer which called
-    /// this method.
+    /// Attempts to create an [`ExactMultiProducer`] from this [`MultiProducer`].
     ///
-    /// If a [`MultiProducer`] clone is created as this function runs, then it will return
-    /// `Ok(None)` and consume this producer.
-    ///
-    /// Four conditions must be met to create an [`ExactMultiProducer`]:
-    /// 1) Only one [`MultiProducer`] associated with this producer's cursor must exist.
-    /// 2) `BATCH` must not be zero.
-    /// 3) The buffer size associated with this producer must be divisible by `BATCH`.
-    /// 4) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
+    /// Three conditions must be met to create an [`ExactMultiProducer`]:
+    /// 1) `BATCH` must not be zero.
+    /// 2) The buffer size associated with this producer must be divisible by `BATCH`.
+    /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
     ///    that sequence values start at `-1`.
     ///
     /// Note that, before this producer writes any data to the buffer (i.e., moves its cursor),
     /// the third condition is trivially met by any `BATCH` value.
+    ///
+    /// If any of these conditions are _not_ met, returns `Err(`[`MultiProducer`]`)`.
+    ///
+    /// If these conditions are met, but more than one [`MultiProducer`] exists for this producer
+    /// cursor, returns `Ok(None)`, and consumes the calling producer. This behaviour ensures
+    /// exact and non-exact multi producers won't exist for the same cursor. If allowed, then exact
+    /// producers would lose the guarantee to not perform out-of-bounds ring buffer accesses.
+    ///
+    /// Otherwise, returns `Ok(Some(`[`ExactMultiProducer`]`))`.
     ///
     /// # Examples
     /// ```
@@ -173,7 +177,7 @@ where
     /// let multi = handles.take_lead().unwrap().into_multi();
     /// let multi_2 = multi.clone();
     ///
-    /// // two multi producers exist for this cursor, but the incorrect BATCH value means
+    /// // two multi producers exist for this cursor, but the invalid BATCH value means
     /// // neither will be consumed in this call
     /// let result = multi.into_exact::<10>();
     /// assert!(matches!(result, Err(MultiProducer { .. })));
@@ -193,16 +197,16 @@ where
         }
         match Arc::into_inner(self.claim) {
             None => Ok(None),
-            Some(_) => {
+            Some(claim) => {
                 let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
                 if sequence % BATCH as i64 != 0 {
-                    // There is at most one producer associated with this cursor, so a new claim
-                    // cursor can be made without issue.
+                    // There is at most one producer associated with this cursor, so a new shared
+                    // claim can be made without issue.
                     return Err(MultiProducer {
                         cursor: self.cursor,
                         barrier: self.barrier,
                         buffer: self.buffer,
-                        claim: Arc::new(Cursor::new(sequence)),
+                        claim: Arc::new(claim),
                         barrier_seq: self.barrier_seq,
                         wait_strategy: self.wait_strategy,
                     });
@@ -211,7 +215,7 @@ where
                     cursor: self.cursor,
                     barrier: self.barrier,
                     buffer: self.buffer,
-                    claim: Arc::new(Cursor::new(sequence)),
+                    claim: Arc::new(claim),
                     barrier_seq: self.barrier_seq,
                     wait_strategy: self.wait_strategy,
                 }))
@@ -236,6 +240,8 @@ where
     }
 }
 
+/// Construction conditions ensure no out-of-bounds buffer accesses, allowing these accesses to be
+/// optimised.
 #[derive(Debug)]
 pub struct ExactMultiProducer<E, W, const LEAD: bool, const BATCH: u32> {
     cursor: Arc<Cursor>,
@@ -250,6 +256,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: WaitStrategy,
 {
+    /// Works with Tree-Borrows but not Stacked-Borrows
     pub fn write_exact<F>(&mut self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -300,7 +307,8 @@ where
             self.wait_strategy.wait();
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
-        self.cursor.sequence.store(claim_end, Ordering::Release);
+        assert_eq!(seq, claim_end);
+        self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
     }
 
@@ -489,6 +497,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: WaitStrategy,
 {
+    /// Works with Tree-Borrows but not Stacked-Borrows
     pub fn write_exact<F>(&mut self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -523,6 +532,7 @@ where
             }
             write(&mut *pointer, seq, true);
         }
+        assert_eq!(seq, producer_seq + BATCH as i64);
         self.free_slots -= BATCH as i64;
         self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
@@ -681,6 +691,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: WaitStrategy,
 {
+    /// Works with Tree-Borrows but not Stacked-Borrows
     pub fn read_exact<F>(&self, mut read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -715,6 +726,7 @@ where
             }
             read(&*pointer, seq, true);
         }
+        assert_eq!(seq, consumer_seq + BATCH as i64);
         self.cursor.sequence.store(seq, Ordering::Release);
         self.wait_strategy.finalise()
     }
