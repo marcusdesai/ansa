@@ -1,5 +1,5 @@
 use crate::ringbuffer::RingBuffer;
-use crate::wait::WaitStrategy;
+use crate::wait::{Timeout, WaitStrategy, WaitStrategyTimeout};
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -9,7 +9,6 @@ pub struct MultiProducer<E, W, const LEAD: bool> {
     barrier: Barrier,
     buffer: Arc<RingBuffer<E>>,
     claim: Arc<Cursor>, // shared between all clones of this multi producer
-    barrier_seq: i64,
     wait_strategy: W,
 }
 
@@ -40,21 +39,13 @@ where
             claim_end = new_current + size;
         }
         // Wait for the barrier to move past the end of the claim.
-        if LEAD {
-            // Utilise the constraint that `claim_end` >= `barrier_seq`. Note that `claim_end` does
-            // not represent the position of the producer cursor, so it is allowed to hold a value
-            // ahead of the producer barrier.
-            while lead_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
-                self.wait_strategy.wait();
-                self.barrier_seq = self.barrier.sequence();
-            }
+        let expected = if LEAD {
+            claim_end - self.buffer.len() as i64
         } else {
-            // If this is not the lead producer we need to wait until `claim_end` <= `barrier_seq`
-            while claim_end > self.barrier_seq {
-                self.wait_strategy.wait();
-                self.barrier_seq = self.barrier.sequence();
-            }
-        }
+            claim_end
+        };
+        self.wait_strategy.wait(expected, &self.barrier);
+        assert!(self.barrier.sequence() >= expected);
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
         // cover the entire duration of the buffer writes, so we use a fence here before any of the
         // cursor loads.
@@ -76,13 +67,11 @@ where
         // prematurely visible, allowing overlapping immutable and mutable refs to be created.
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
-            self.wait_strategy.wait();
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
         // Finally, advance producer cursor to publish the writes upto the end of the claimed
         // sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Returns the count of [`MultiProducer`] associated with this producer's cursor.
@@ -139,7 +128,6 @@ where
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
-            free_slots: 0,
             wait_strategy: self.wait_strategy,
         })
     }
@@ -207,7 +195,6 @@ where
                         barrier: self.barrier,
                         buffer: self.buffer,
                         claim: Arc::new(claim),
-                        barrier_seq: self.barrier_seq,
                         wait_strategy: self.wait_strategy,
                     });
                 }
@@ -216,7 +203,6 @@ where
                     barrier: self.barrier,
                     buffer: self.buffer,
                     claim: Arc::new(claim),
-                    barrier_seq: self.barrier_seq,
                     wait_strategy: self.wait_strategy,
                 }))
             }
@@ -234,7 +220,6 @@ where
             barrier: self.barrier.clone(),
             buffer: Arc::clone(&self.buffer),
             claim: Arc::clone(&self.claim),
-            barrier_seq: self.barrier_seq,
             wait_strategy: self.wait_strategy.clone(),
         }
     }
@@ -248,7 +233,6 @@ pub struct ExactMultiProducer<E, W, const LEAD: bool, const BATCH: u32> {
     barrier: Barrier,
     buffer: Arc<RingBuffer<E>>,
     claim: Arc<Cursor>, // shared between all clones of this multi producer
-    barrier_seq: i64,
     wait_strategy: W,
 }
 
@@ -272,17 +256,13 @@ where
             current_claim = new_current;
             claim_end = new_current + BATCH as i64;
         }
-        if LEAD {
-            while lead_barrier_delta(self.buffer.len(), claim_end, self.barrier_seq) < 0 {
-                self.wait_strategy.wait();
-                self.barrier_seq = self.barrier.sequence();
-            }
+        let expected = if LEAD {
+            claim_end - self.buffer.len() as i64
         } else {
-            while claim_end > self.barrier_seq {
-                self.wait_strategy.wait();
-                self.barrier_seq = self.barrier.sequence();
-            }
-        }
+            claim_end
+        };
+        self.wait_strategy.wait(expected, &self.barrier);
+        assert!(self.barrier.sequence() >= expected);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that this sequence has been claimed by only one producer, so multiple
@@ -304,12 +284,10 @@ where
         }
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
-            self.wait_strategy.wait();
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
         assert_eq!(seq, claim_end);
         self.cursor.sequence.store(seq, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Returns the count of [`ExactMultiProducer`] associated with this producer's cursor.
@@ -348,7 +326,6 @@ where
             barrier: self.barrier,
             buffer: self.buffer,
             claim: Arc::new(claim),
-            barrier_seq: self.barrier_seq,
             wait_strategy: self.wait_strategy,
         })
     }
@@ -364,7 +341,6 @@ where
             barrier: self.barrier.clone(),
             buffer: Arc::clone(&self.buffer),
             claim: Arc::clone(&self.claim),
-            barrier_seq: self.barrier_seq,
             wait_strategy: self.wait_strategy.clone(),
         }
     }
@@ -375,7 +351,6 @@ pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>,
     pub(crate) barrier: Barrier,
     pub(crate) buffer: Arc<RingBuffer<E>>,
-    pub(crate) free_slots: i64,
     pub(crate) wait_strategy: W,
 }
 
@@ -395,16 +370,13 @@ where
         let size = size as i64;
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         // Wait until there are free slots to write events to.
-        while self.free_slots < size {
-            self.wait_strategy.wait();
-            let barrier_seq = self.barrier.sequence();
-            if LEAD {
-                let buf_len = self.buffer.len();
-                self.free_slots = lead_barrier_delta(buf_len, producer_seq, barrier_seq);
-            } else {
-                self.free_slots = barrier_seq - producer_seq;
-            }
-        }
+        let expected = if LEAD {
+            producer_seq + size - self.buffer.len() as i64
+        } else {
+            producer_seq + size
+        };
+        self.wait_strategy.wait(expected, &self.barrier);
+        assert!(self.barrier.sequence() >= expected);
         // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
         // duration of the writes.
         fence(Ordering::Acquire);
@@ -420,21 +392,17 @@ where
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == batch_end);
         }
-        self.free_slots -= size;
         // Move cursor upto the end of the written batch.
         self.cursor.sequence.store(batch_end, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = (producer_seq - self.buffer.len() as i64).max(START_SEQ);
         MultiProducer {
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
             claim: Arc::new(Cursor::new(producer_seq)),
-            barrier_seq,
             wait_strategy: self.wait_strategy,
         }
     }
@@ -478,7 +446,6 @@ where
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
-            free_slots: self.free_slots,
             wait_strategy: self.wait_strategy,
         })
     }
@@ -489,7 +456,6 @@ pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
     pub(crate) cursor: Arc<Cursor>,
     pub(crate) barrier: Barrier,
     pub(crate) buffer: Arc<RingBuffer<E>>,
-    pub(crate) free_slots: i64,
     pub(crate) wait_strategy: W,
 }
 
@@ -503,16 +469,13 @@ where
         F: FnMut(&mut E, i64, bool),
     {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        while self.free_slots < BATCH as i64 {
-            self.wait_strategy.wait();
-            let barrier_seq = self.barrier.sequence();
-            if LEAD {
-                let buf_len = self.buffer.len();
-                self.free_slots = lead_barrier_delta(buf_len, producer_seq, barrier_seq);
-            } else {
-                self.free_slots = barrier_seq - producer_seq;
-            }
-        }
+        let expected = if LEAD {
+            producer_seq + BATCH as i64 - self.buffer.len() as i64
+        } else {
+            producer_seq + BATCH as i64
+        };
+        self.wait_strategy.wait(expected, &self.barrier);
+        assert!(self.barrier.sequence() >= expected);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that there is only one producer accessing this section of the buffer, so
@@ -522,6 +485,7 @@ where
         //    this element while the mutable ref exists.
         // 3) The pointer is guaranteed to be inbounds of the ring buffer allocation by the checks
         //    on BATCH size made when creating this struct.
+        // todo: guaranteed not null & aligned hence pointer deref is fine
         let mut seq = producer_seq + 1;
         let mut pointer = self.buffer.get(seq);
         unsafe {
@@ -533,9 +497,7 @@ where
             write(&mut *pointer, seq, true);
         }
         assert_eq!(seq, producer_seq + BATCH as i64);
-        self.free_slots -= BATCH as i64;
         self.cursor.sequence.store(seq, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Converts this [`ExactProducer`] into a [`Producer`].
@@ -544,7 +506,6 @@ where
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
-            free_slots: self.free_slots,
             wait_strategy: self.wait_strategy,
         }
     }
@@ -573,16 +534,9 @@ where
         );
         let size = size as i64;
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let mut barrier_seq = self.barrier.sequence();
         // Wait until there are events to read.
-        while barrier_seq - consumer_seq < size {
-            assert!(
-                consumer_seq <= barrier_seq,
-                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
-            );
-            self.wait_strategy.wait();
-            barrier_seq = self.barrier.sequence();
-        }
+        self.wait_strategy.wait(consumer_seq + size, &self.barrier);
+        assert!(self.barrier.sequence() >= consumer_seq + size);
         // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
         // duration of the reads.
         fence(Ordering::Acquire);
@@ -601,7 +555,6 @@ where
         }
         // Move cursor up to barrier sequence.
         self.cursor.sequence.store(batch_end, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Specialised function which will always consume *all* available buffer elements when called.
@@ -610,15 +563,8 @@ where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let mut barrier_seq = self.barrier.sequence();
-        while barrier_seq - consumer_seq == 0 {
-            assert!(
-                consumer_seq <= barrier_seq,
-                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
-            );
-            self.wait_strategy.wait();
-            barrier_seq = self.barrier.sequence();
-        }
+        let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
+        assert!(barrier_seq >= consumer_seq + 1);
         fence(Ordering::Acquire);
         for seq in consumer_seq + 1..=barrier_seq {
             // SAFETY:
@@ -632,7 +578,6 @@ where
             read(event, seq, seq == barrier_seq);
         }
         self.cursor.sequence.store(barrier_seq, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Returns an [`ExactConsumer`] if successful, otherwise returns the consumer which called
@@ -679,6 +624,34 @@ where
     }
 }
 
+impl<E, W> Consumer<E, W>
+where
+    W: WaitStrategyTimeout,
+{
+    pub fn read_timeout<F>(&self, mut read: F) -> Result<(), Timeout>
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let barrier_seq = self.wait_strategy.wait_timeout(consumer_seq + 1, &self.barrier)?;
+        assert!(barrier_seq >= consumer_seq + 1);
+        fence(Ordering::Acquire);
+        for seq in consumer_seq + 1..=barrier_seq {
+            // SAFETY:
+            // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+            //    ensuring multiple mutable refs do not exist.
+            // 2) The Acquire-Release synchronisation ensures that the consumer cursor does not
+            //    visibly update its value until all the events are processed, which in turn ensures
+            //    that producers will not write here while the consumer is reading. This ensures
+            //    that no mutable ref to this element is created while this immutable ref exists.
+            let event: &E = unsafe { &*self.buffer.get(seq) };
+            read(event, seq, seq == barrier_seq);
+        }
+        self.cursor.sequence.store(barrier_seq, Ordering::Release);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct ExactConsumer<E, W, const BATCH: u32> {
     cursor: Arc<Cursor>,
@@ -697,15 +670,8 @@ where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let mut barrier_seq = self.barrier.sequence();
-        while barrier_seq - consumer_seq < BATCH as i64 {
-            assert!(
-                consumer_seq <= barrier_seq,
-                "consumer_seq ({consumer_seq}) > barrier_seq ({barrier_seq})"
-            );
-            self.wait_strategy.wait();
-            barrier_seq = self.barrier.sequence();
-        }
+        self.wait_strategy.wait(consumer_seq + BATCH as i64, &self.barrier);
+        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) The mutable pointer to the event is immediately converted to an immutable pointer,
@@ -728,7 +694,6 @@ where
         }
         assert_eq!(seq, consumer_seq + BATCH as i64);
         self.cursor.sequence.store(seq, Ordering::Release);
-        self.wait_strategy.finalise()
     }
 
     /// Converts this [`ExactConsumer`] into a [`Consumer`].
@@ -751,8 +716,6 @@ pub(crate) struct Cursor {
     sequence: crossbeam_utils::CachePadded<AtomicI64>,
 }
 
-const START_SEQ: i64 = -1;
-
 impl Cursor {
     pub(crate) const fn new(seq: i64) -> Self {
         Cursor {
@@ -766,22 +729,34 @@ impl Cursor {
     /// Create a cursor at the start of the sequence. All reads and writes begin on the _next_
     /// position in the sequence, so cursors start at `-1`, meaning reads and writes start at `0`.
     pub(crate) const fn start() -> Self {
-        Cursor::new(START_SEQ)
+        Cursor::new(-1)
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Barrier {
+#[repr(transparent)]
+pub struct Barrier(Barrier_);
+
+#[derive(Clone, Debug)]
+enum Barrier_ {
     One(Arc<Cursor>),
     Many(Box<[Arc<Cursor>]>),
 }
 
 impl Barrier {
+    pub(crate) fn one(cursor: Arc<Cursor>) -> Self {
+        Barrier(Barrier_::One(cursor))
+    }
+
+    pub(crate) fn many(cursors: Box<[Arc<Cursor>]>) -> Self {
+        Barrier(Barrier_::Many(cursors))
+    }
+
     #[inline]
-    fn sequence(&self) -> i64 {
-        match self {
-            Barrier::One(cursor) => cursor.sequence.load(Ordering::Relaxed),
-            Barrier::Many(cursors) => cursors.iter().fold(i64::MAX, |seq, cursor| {
+    pub(crate) fn sequence(&self) -> i64 {
+        match &self.0 {
+            Barrier_::One(cursor) => cursor.sequence.load(Ordering::Relaxed),
+            Barrier_::Many(cursors) => cursors.iter().fold(i64::MAX, |seq, cursor| {
                 seq.min(cursor.sequence.load(Ordering::Relaxed))
             }),
         }
@@ -791,47 +766,6 @@ impl Barrier {
 impl Drop for Barrier {
     // We need to break the Arc cycle of barriers. Just get rid of all the Arcs to guarantee this.
     fn drop(&mut self) {
-        match self {
-            Barrier::One(one) => *one = Arc::new(Cursor::new(0)),
-            Barrier::Many(many) => *many = Box::new([]),
-        }
-    }
-}
-
-/// Calculate the distance on the ring buffer from a producer provided sequence to its barrier.
-/// Positive return values represent available distance to the barrier. Zero or negative values
-/// represent no available write distance.
-///
-/// This calculation utilises the constraint that: `-1 <= barrier_seq <= producer_seq`, which is
-/// only true for lead producers. Callers must ensure that this holds.
-#[inline]
-fn lead_barrier_delta(buffer_size: usize, producer_seq: i64, barrier_seq: i64) -> i64 {
-    assert!(
-        -1 <= barrier_seq && barrier_seq <= producer_seq,
-        "Constraint error: -1 <= barrier_seq ({barrier_seq}) <= producer_seq ({producer_seq})"
-    );
-    buffer_size as i64 - (producer_seq - barrier_seq)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::{thread_rng, Rng};
-
-    #[test]
-    fn test_producer_barrier_delta() {
-        let mut rng = thread_rng();
-        // calculation should match buffer size - (producer sequence - barrier sequence)
-        let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 20), -4);
-
-        let same_seq = rng.gen_range(0..i64::MAX / 2);
-        assert_eq!(lead_barrier_delta(16, same_seq, same_seq), 16);
-
-        let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 12), 4);
-
-        let prod_seq = rng.gen_range(100..i64::MAX / 2);
-        assert_eq!(lead_barrier_delta(16, prod_seq, prod_seq - 16), 0);
+        self.0 = Barrier_::Many(Box::new([]));
     }
 }

@@ -227,7 +227,6 @@ where
             cursor: lead_cursor,
             barrier,
             buffer,
-            free_slots: 0,
             wait_strategy: (self.wait_factory)(),
         };
 
@@ -249,8 +248,8 @@ where
 
         assert!(!cursors.is_empty());
         match cursors.len() {
-            1 => Barrier::One(cursors.pop().unwrap()),
-            _ => Barrier::Many(cursors.into_boxed_slice()),
+            1 => Barrier::one(cursors.pop().unwrap()),
+            _ => Barrier::many(cursors.into_boxed_slice()),
         }
     }
 
@@ -278,16 +277,16 @@ where
             let cursor = get_cursor(id, &mut cursor_map);
 
             let barrier = match follows {
-                Follows::LeadProducer => Barrier::One(Arc::clone(lead_cursor)),
+                Follows::LeadProducer => Barrier::one(Arc::clone(lead_cursor)),
                 Follows::Handles(ids) if ids.len() == 1 => {
-                    Barrier::One(get_cursor(ids[0], &mut cursor_map))
+                    Barrier::one(get_cursor(ids[0], &mut cursor_map))
                 }
                 Follows::Handles(ids) => {
                     let follows_cursors = ids
                         .iter()
                         .map(|follow_id| get_cursor(*follow_id, &mut cursor_map))
                         .collect();
-                    Barrier::Many(follows_cursors)
+                    Barrier::many(follows_cursors)
                 }
             };
             // unwrap okay as this entry in handles_map is guaranteed to exist for this id
@@ -297,7 +296,6 @@ where
                         cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
-                        free_slots: 0,
                         wait_strategy: (self.wait_factory)(),
                     };
                     producers.insert(id, producer);
