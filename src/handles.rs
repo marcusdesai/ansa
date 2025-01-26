@@ -1,11 +1,9 @@
-// todo docs
-
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{TimedOut, WaitStrategy, WaitStrategyTimeout};
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
-// todo docs
+/// todo docs
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     cursor: Arc<Cursor>,
@@ -171,7 +169,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    // todo docs
+    /// todo docs
     pub fn batch_write<F>(&mut self, size: u32, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -339,7 +337,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: WaitStrategy,
 {
-    // todo docs
+    /// todo docs
     /// Works with Tree-Borrows but not Stacked-Borrows
     pub fn write_exact<F>(&mut self, mut write: F)
     where
@@ -393,7 +391,7 @@ where
     }
 }
 
-// todo docs
+/// todo docs
 #[derive(Debug)]
 pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>,
@@ -403,7 +401,7 @@ pub struct Producer<E, W, const LEAD: bool> {
 }
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
-    // todo docs
+    /// todo docs
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         MultiProducer {
@@ -463,7 +461,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    // todo docs
+    /// todo docs
     pub fn batch_write<F>(&mut self, size: u32, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -505,7 +503,7 @@ where
     }
 }
 
-// todo docs
+/// todo docs
 #[derive(Debug)]
 pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
     pub(crate) cursor: Arc<Cursor>,
@@ -544,7 +542,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: WaitStrategy,
 {
-    // todo docs
+    /// todo docs
     /// Works with Tree-Borrows but not Stacked-Borrows
     pub fn write_exact<F>(&mut self, mut write: F)
     where
@@ -687,7 +685,7 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
-        assert!(barrier_seq >= consumer_seq + 1);
+        assert!(barrier_seq > consumer_seq);
         fence(Ordering::Acquire);
         for seq in consumer_seq + 1..=barrier_seq {
             // SAFETY: see Consumer::batch_read
@@ -709,7 +707,7 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait_timeout(consumer_seq + 1, &self.barrier)?;
-        assert!(barrier_seq >= consumer_seq + 1);
+        assert!(barrier_seq > consumer_seq);
         fence(Ordering::Acquire);
         for seq in consumer_seq + 1..=barrier_seq {
             // SAFETY: see Consumer::batch_read

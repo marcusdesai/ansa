@@ -190,6 +190,8 @@ where
     /// Set the wait strategy to be used by all consumers and producers.
     ///
     /// For details of all provided wait strategies, see the module docs for [`wait`](crate::wait).
+    ///
+    /// todo examples
     pub fn wait_strategy<WF2, W2>(self, factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,

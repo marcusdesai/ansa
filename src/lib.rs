@@ -1,4 +1,5 @@
 //! MPMC queue implementation using the disruptor pattern
+//! todo
 
 mod builder;
 mod handles;
@@ -431,9 +432,7 @@ mod integration_tests {
             results.insert(id, join);
         }
 
-        producer_joins
-            .into_iter()
-            .for_each(|h| h.join().expect("done producer"));
+        producer_joins.into_iter().for_each(|h| h.join().expect("done producer"));
         let results_c0 = results.remove(&0).unwrap().join().expect("done c0");
         let results_c1 = results.remove(&1).unwrap().join().expect("done c1");
         let results_c2 = results.remove(&2).unwrap().join().expect("done c2");
