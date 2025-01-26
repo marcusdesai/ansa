@@ -4,17 +4,23 @@ use crate::handles::Barrier;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// todo docs
 pub trait WaitStrategy {
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64;
 }
 
-fn wait_generic(expected: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
-    let mut barrier_seq = barrier.sequence();
-    while barrier_seq < expected {
-        waiting();
-        barrier_seq = barrier.sequence()
+#[inline]
+fn wait_loop(expected: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
+    let test = || {
+        let barrier_seq = barrier.sequence();
+        (barrier_seq, barrier_seq >= expected)
+    };
+    loop {
+        if let (seq, true) = test() {
+            break seq;
+        }
+        waiting()
     }
-    barrier_seq
 }
 
 /// A Pure busy-spin strategy which offers the lowest wait latency at the cost of increased
@@ -23,8 +29,9 @@ fn wait_generic(expected: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> 
 pub struct WaitBusy;
 
 impl WaitStrategy for WaitBusy {
+    #[inline]
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_generic(expected, barrier, || ())
+        wait_loop(expected, barrier, || ())
     }
 }
 
@@ -34,20 +41,24 @@ impl WaitStrategy for WaitBusy {
 pub struct WaitBusyHint;
 
 impl WaitStrategy for WaitBusyHint {
+    #[inline]
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_generic(expected, barrier, std::hint::spin_loop)
+        wait_loop(expected, barrier, std::hint::spin_loop)
     }
 }
 
+/// todo docs
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitYield;
 
 impl WaitStrategy for WaitYield {
+    #[inline]
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_generic(expected, barrier, std::thread::yield_now)
+        wait_loop(expected, barrier, std::thread::yield_now)
     }
 }
 
+/// todo docs
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitSleep {
     duration: Duration,
@@ -63,11 +74,13 @@ impl WaitSleep {
 }
 
 impl WaitStrategy for WaitSleep {
+    #[inline]
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_generic(expected, barrier, || std::thread::sleep(self.duration))
+        wait_loop(expected, barrier, || std::thread::sleep(self.duration))
     }
 }
 
+/// todo docs
 #[derive(Clone, Debug)]
 pub struct WaitBlocking {
     pair: Arc<(Condvar, Mutex<Empty>)>,
@@ -101,9 +114,10 @@ impl WaitBlocking {
 }
 
 impl WaitStrategy for WaitBlocking {
+    #[inline]
     fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
         let (condvar, mutex) = &*self.pair;
-        let barrier_seq = wait_generic(expected, barrier, || {
+        let barrier_seq = wait_loop(expected, barrier, || {
             let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.duration);
         });
         condvar.notify_all();
@@ -111,17 +125,17 @@ impl WaitStrategy for WaitBlocking {
     }
 }
 
-#[derive(Clone, Debug)]
+/// todo docs
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitPhased<W> {
     spin_duration: Duration,
     yield_duration: Duration,
     fallback: W,
 }
 
-impl<W> WaitPhased<W>
-where
-    W: WaitStrategy,
-{
+impl<W: Copy> Copy for WaitPhased<W> {}
+
+impl<W> WaitPhased<W> {
     pub fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
         WaitPhased {
             spin_duration,
@@ -147,51 +161,107 @@ impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
     }
 }
 
-impl<W: Copy> Copy for WaitPhased<W> {}
-impl<W: PartialEq> PartialEq for WaitPhased<W> {
-    fn eq(&self, other: &Self) -> bool {
-        self.spin_duration == other.spin_duration
-            && self.yield_duration == other.yield_duration
-            && self.fallback == other.fallback
-    }
-}
-impl<W: Eq + PartialEq> Eq for WaitPhased<W> {}
-
-/// todo
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Timeout;
-
-/// todo
-pub trait WaitStrategyTimeout {
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, Timeout>;
-}
-
-fn wait_timeout_generic<F>(expected: i64, barrier: &Barrier, mut waiting: F) -> Result<i64, Timeout>
-where
-    F: FnMut() -> Result<(), Timeout>,
-{
-    let mut barrier_seq = barrier.sequence();
-    while barrier_seq < expected {
-        waiting()?;
-        barrier_seq = barrier.sequence()
-    }
-    Ok(barrier_seq)
-}
-
-/// todo
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct WaitTimeout {
-    duration: Duration,
-}
-
-impl WaitStrategyTimeout for WaitTimeout {
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, Timeout> {
+impl<W: WaitStrategyTimeout> WaitStrategyTimeout for WaitPhased<W> {
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
         let timer = Instant::now();
-        wait_timeout_generic(expected, barrier, || {
-            if timer.elapsed() > self.duration {
-                return Err(Timeout);
+        let mut barrier_seq = barrier.sequence();
+        while barrier_seq < expected {
+            barrier_seq = barrier.sequence();
+            match timer.elapsed() {
+                dur if dur < self.spin_duration => (),
+                dur if dur < self.yield_duration => std::thread::yield_now(),
+                _ => return self.fallback.wait_timeout(expected, barrier),
             }
-            Ok(())
+        }
+        Ok(barrier_seq)
+    }
+}
+
+/// Indicates that the waiting handle timed out.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TimedOut;
+
+/// todo docs
+pub trait WaitStrategyTimeout {
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut>;
+}
+
+#[inline]
+fn wait_loop_timeout(
+    expected: i64,
+    barrier: &Barrier,
+    duration: Duration,
+    mut waiting: impl FnMut(),
+) -> Result<i64, TimedOut> {
+    let test = || {
+        let barrier_seq = barrier.sequence();
+        (barrier_seq, barrier_seq >= expected)
+    };
+    let timer = Instant::now();
+    loop {
+        if let (seq, true) = test() {
+            break Ok(seq);
+        }
+        if timer.elapsed() > duration {
+            break Err(TimedOut);
+        }
+        waiting()
+    }
+}
+
+/// todo docs
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Timeout<W: WaitStrategy> {
+    duration: Duration,
+    strategy: W,
+}
+
+impl<W: Copy + WaitStrategy> Copy for Timeout<W> {}
+
+impl<W: WaitStrategy> Timeout<W> {
+    pub fn new(duration: Duration, strategy: W) -> Self {
+        Timeout { duration, strategy }
+    }
+}
+
+impl WaitStrategyTimeout for Timeout<WaitBusy> {
+    #[inline]
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(expected, barrier, self.duration, || ())
+    }
+}
+
+impl WaitStrategyTimeout for Timeout<WaitBusyHint> {
+    #[inline]
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(expected, barrier, self.duration, std::hint::spin_loop)
+    }
+}
+
+impl WaitStrategyTimeout for Timeout<WaitYield> {
+    #[inline]
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(expected, barrier, self.duration, std::thread::yield_now)
+    }
+}
+
+impl WaitStrategyTimeout for Timeout<WaitSleep> {
+    #[inline]
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(expected, barrier, self.duration, || {
+            std::thread::sleep(self.strategy.duration)
         })
+    }
+}
+
+impl WaitStrategyTimeout for Timeout<WaitBlocking> {
+    #[inline]
+    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        let (condvar, mutex) = &*self.strategy.pair;
+        let barrier_seq = wait_loop_timeout(expected, barrier, self.duration, || {
+            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.strategy.duration);
+        })?;
+        condvar.notify_all();
+        Ok(barrier_seq)
     }
 }

@@ -1,6 +1,6 @@
 use crate::handles::{Barrier, Consumer, Cursor, Producer};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::{WaitBlocking, WaitStrategy};
+use crate::wait::WaitBlocking;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -84,7 +84,6 @@ impl<F, E, WF, W> DisruptorBuilder<F, E, WF, W>
 where
     F: FnMut() -> E,
     WF: Fn() -> W,
-    W: WaitStrategy,
 {
     /// Add a handle to the disruptor.
     ///
@@ -194,7 +193,6 @@ where
     pub fn wait_strategy<WF2, W2>(self, factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,
-        W2: WaitStrategy,
     {
         DisruptorBuilder {
             buffer_size: self.buffer_size,
