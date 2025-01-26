@@ -23,8 +23,8 @@ fn wait_loop(expected: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64
     }
 }
 
-/// A Pure busy-spin strategy which offers the lowest wait latency at the cost of increased
-/// processor use.
+/// A Pure busy-spin strategy which offers the lowest possible wait latency at the cost of
+/// unrestrained processor use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitBusy;
 
@@ -35,8 +35,8 @@ impl WaitStrategy for WaitBusy {
     }
 }
 
-/// A busy-spin strategy which optimises processor use (see [`spin_loop`](std::hint::spin_loop) docs
-/// for details) at the cost of latency.
+/// A busy-spin strategy which optimises processor use (see the [`spin_loop`](std::hint::spin_loop)
+/// docs for details) at the cost of latency.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitBusyHint;
 
@@ -177,7 +177,7 @@ impl<W: WaitStrategyTimeout> WaitStrategyTimeout for WaitPhased<W> {
     }
 }
 
-/// Indicates that the waiting handle timed out.
+/// Indicates that the waiting handle has timed out.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TimedOut;
 
@@ -210,15 +210,24 @@ fn wait_loop_timeout(
 }
 
 /// todo docs
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Timeout<W: WaitStrategy> {
+#[derive(Debug, Eq, PartialEq)]
+pub struct Timeout<W> {
     duration: Duration,
     strategy: W,
 }
 
-impl<W: Copy + WaitStrategy> Copy for Timeout<W> {}
+impl<W: Clone> Clone for Timeout<W> {
+    fn clone(&self) -> Self {
+        Timeout {
+            duration: self.duration,
+            strategy: self.strategy.clone(),
+        }
+    }
+}
 
-impl<W: WaitStrategy> Timeout<W> {
+impl<W: Copy> Copy for Timeout<W> {}
+
+impl<W> Timeout<W> {
     pub fn new(duration: Duration, strategy: W) -> Self {
         Timeout { duration, strategy }
     }
