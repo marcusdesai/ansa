@@ -1,4 +1,6 @@
-//! todo Wait strategies ordered by best latency
+//! Provides strategies for handles waiting for sequences on the ring buffer.
+//!
+//! Also provided are three traits for implementing your own wait logic.
 
 use crate::handles::Barrier;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -6,15 +8,16 @@ use std::time::{Duration, Instant};
 
 /// Implement to provide logic which will run inside a wait loop.
 ///
-/// This trait is unsuitable when state needs to be held across loop iterations, since the
-/// [`Waiting::waiting`] method cannot observe outside of the loop. If state is required, implement
-/// [`WaitStrategy`] or [`TryWaitStrategy`] instead.
+/// This trait is unsuitable when state needs to be held across loop iterations, since
+/// [`waiting`](Waiting::waiting) cannot observe outside of the loop.
 ///
-/// If a type, `T`, implements [`Waiting`], then `T` will implement [`WaitStrategy`], and
-/// `Timeout<T>` will implement [`TryWaitStrategy`].
+/// If state or fallibility is required, implement [`WaitStrategy`] or [`TryWaitStrategy`] instead.
 ///
-/// As a consequence of the above blanket impls, do _not_ implement [`Waiting`] for a type if you
-/// want to provide your own implementations of [`WaitStrategy`] for `T`, or [`TryWaitStrategy`]
+/// If a type, `T`, implements `Waiting`, then `T` will implement `WaitStrategy`, and
+/// `Timeout<T>` will implement `TryWaitStrategy`.
+///
+/// As a consequence of the above blanket impls, do _not_ implement `Waiting` for a type if you
+/// want to provide your own implementations of `WaitStrategy` for `T`, or `TryWaitStrategy`
 /// for `Timeout<T>`.
 ///
 /// # Examples
@@ -45,11 +48,11 @@ pub trait Waiting {
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. A valid implementation must ensure
 /// that the following two conditions holds:
-/// 1) `wait` must only return once [`Barrier::sequence`] `>= desired_seq` is true.
-/// 2) `wait` must only return a value, `x`, such that `x <=` [`Barrier::sequence`].
+/// 1) `wait` may only return when `barrier sequence >= desired_seq` is true.
+/// 2) `wait` must return a value, `x`, such that `x <= barrier sequence`.
 ///
-/// If `wait` does not abide by these conditions, then reads and writes may overlap, causing
-/// Undefined Behaviour due to mutable aliasing.
+/// If `wait` does not abide by these conditions, then reads and writes to the ring buffer may
+/// overlap, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// # Examples
 /// ```
@@ -79,8 +82,8 @@ pub unsafe trait WaitStrategy {
     /// Call [`Barrier::sequence`] to views updates of the barrier position.
     ///
     /// The following two conditions must hold:
-    /// 1) Must only return once [`Barrier::sequence`] `>= desired_seq` is true.
-    /// 2) Must return a value, `x`, such that `x <=` [`Barrier::sequence`].
+    /// 1) May only return when `barrier sequence >= desired_seq` is true.
+    /// 2) Must return a value, `x`, such that `x <= barrier sequence`.
     ///
     /// The return value may be used by handles to read or write elements to the ring buffer, but
     /// this is not guaranteed.
@@ -109,11 +112,11 @@ where
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. A valid implementation
 /// must ensure that the following two conditions holds:
-/// 1) `try_wait` must only return once [`Barrier::sequence`] `>= desired_seq` is true.
-/// 2) `try_wait` must only successfully return a value, `x`, such that `x <=` [`Barrier::sequence`].
+/// 1) `try_wait` may only return when `barrier sequence >= desired_seq` is true.
+/// 2) `try_wait`, if successful, must return a value, `x`, such that `x <= barrier sequence`.
 ///
-/// If `try_wait` does not abide by these conditions, then reads and writes may overlap, causing
-/// Undefined Behaviour due to mutable aliasing.
+/// If `try_wait` does not abide by these conditions, then reads and writes to the ring buffer may
+/// overlap, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// Note that there are no conditions limiting when `try_wait` can return an error.
 ///
@@ -155,8 +158,8 @@ pub unsafe trait TryWaitStrategy {
     /// Call [`Barrier::sequence`] to views updates of the barrier position.
     ///
     /// The following two conditions must hold:
-    /// 1) Must only successfully return once [`Barrier::sequence`] `>= desired_seq` is true.
-    /// 2) Must return a value, `x`, such that `x <=` [`Barrier::sequence`].
+    /// 1) May only return when `barrier sequence >= desired_seq` is true.
+    /// 2) If successful, must return a value, `x`, such that `x <= barrier sequence`.
     ///
     /// No conditions are placed on returning errors.
     ///
@@ -198,7 +201,11 @@ fn wait_loop_timeout(
 
 /// Pure busy-wait.
 ///
+/// # Performance
+///
 /// Offers the lowest possible wait latency at the cost of unrestrained processor use.
+///
+/// Suitable when CPU resource use is of no concern.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitBusy;
 
@@ -209,9 +216,14 @@ impl Waiting for WaitBusy {
 
 /// Busy-wait and signal that a spin loop is occurring.
 ///
-/// The spin loop signal can optimise processor use with minimal cost to latency.
-///
 /// See: [`spin_loop`](std::hint::spin_loop) docs for further details.
+///
+/// # Performance
+///
+/// The spin loop signal can optimise processor use with minimal cost to latency, but should offer
+/// latencies similar to [`WaitBusy`].
+///
+/// Nonetheless, it is best used when CPU resource consumption is of little concern.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitBusyHint;
 
@@ -225,6 +237,11 @@ impl Waiting for WaitBusyHint {
 /// Busy-wait, but allow the current thread to yield to the OS.
 ///
 /// See: [`yield_now`](std::thread::yield_now) docs for further details.
+///
+/// # Performance
+///
+/// Like [`WaitBusy`], processor use is unrestrained, but [`WaitYield`] is more likely to cede CPU
+/// resources when those resources are contended by other threads.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitYield;
 
@@ -236,6 +253,13 @@ impl Waiting for WaitYield {
 }
 
 /// Busy-wait, but sleep the current thread on each iteration of the wait loop.
+///
+/// # Performance
+///
+/// Trades latency for CPU resource use, depending on the length of the sleep.
+///
+/// An important consideration is that the sleep cannot be interrupted, unlike with
+/// [`WaitBlocking`] which will wake when notified. Note also that spurious wakes can occur.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitSleep {
     duration: Duration,
@@ -260,6 +284,12 @@ impl Waiting for WaitSleep {
 ///
 /// Alternatively, will wake and check whether the barrier has moved after a given duration
 /// (defaulted to `200` microseconds).
+///
+/// # Performance
+///
+/// High latency but, in contrast to [`WaitSleep`], will wake when new sequences are made visible.
+///
+/// Configuring the wake duration allows trading latency for CPU resource use.
 #[derive(Clone, Debug)]
 pub struct WaitBlocking {
     pair: Arc<(Condvar, Mutex<Empty>)>,
@@ -274,6 +304,7 @@ static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
     LazyLock::new(|| Arc::new((Condvar::new(), Mutex::new(Empty))));
 
 impl WaitBlocking {
+    /// Construct an instance of [`WaitBlocking`] with the default wake duration (200 microseconds).
     #[allow(clippy::new_without_default)]
     #[inline]
     pub fn new() -> Self {
@@ -283,6 +314,7 @@ impl WaitBlocking {
         }
     }
 
+    /// Construct an instance of [`WaitBlocking`] with the given wake `duration`.
     #[inline]
     pub fn with_timeout(duration: Duration) -> Self {
         WaitBlocking {
@@ -320,7 +352,13 @@ unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
     }
 }
 
-/// todo docs
+/// Performs a phased back-off of strategies during the wait loop.
+///
+/// This strategy busy spins, then yields, and finally calls the fallback strategy.
+///
+/// # Performance
+///
+/// Best used when low latency is not a priority verses CPU resource use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitPhased<W> {
     spin_duration: Duration,
@@ -331,6 +369,10 @@ pub struct WaitPhased<W> {
 impl<W: Copy> Copy for WaitPhased<W> {}
 
 impl<W> WaitPhased<W> {
+    /// Construct a [`WaitPhased`] instance with the given fallback strategy.
+    ///
+    /// `spin_duration` sets the duration for which to busy-spin. `yield_duration` does the same
+    /// for yielding to the OS.
     pub fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
         WaitPhased {
             spin_duration,
@@ -382,12 +424,27 @@ unsafe impl<W: TryWaitStrategy> TryWaitStrategy for WaitPhased<W> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TimedOut;
 
-/// Wrapper struct for wait strategies which provides a timeout capability.
+/// Wrapper which provides timeout capabilities to strategies implementing `Waiting`.
 ///
 /// If a type, `T`, implements [`Waiting`], then `Timeout<T>` implements [`TryWaitStrategy`].
 ///
 /// This struct is not required for implementing [`TryWaitStrategy`], it is only a convenience
 /// for automating implementations of this trait.
+///
+/// # Examples
+/// ```
+/// use ansa::*;
+/// use ansa::wait::*;
+/// use std::time::Duration;
+///
+/// let wait_factory = || Timeout::new(Duration::from_millis(1), WaitBusy);
+///
+/// let _ = DisruptorBuilder::new(64, || 0)
+///     .wait_strategy(wait_factory)
+///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+///     .build()
+///     .unwrap();
+/// ```
 #[derive(Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
     duration: Duration,
@@ -406,6 +463,11 @@ impl<W: Clone> Clone for Timeout<W> {
 impl<W: Copy> Copy for Timeout<W> {}
 
 impl<W> Timeout<W> {
+    /// Construct a `Timeout` with the given strategy.
+    ///
+    /// `duration` sets the amount of time after which the strategy will time out. Timeout will not
+    /// occur before `duration` elapses, and will occur shortly after that point. Timings should
+    /// not be treated as exact.
     pub fn new(duration: Duration, strategy: W) -> Self {
         Timeout { duration, strategy }
     }
