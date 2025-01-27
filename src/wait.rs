@@ -6,14 +6,15 @@ use std::time::{Duration, Instant};
 
 /// todo docs
 pub trait WaitStrategy {
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64;
+    /// Wait for `barrier` sequence to reach `desired_seq`.
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
 
 #[inline]
-fn wait_loop(expected: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
+fn wait_loop(desired: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
     let test = || {
         let barrier_seq = barrier.sequence();
-        (barrier_seq, barrier_seq >= expected)
+        (barrier_seq, barrier_seq >= desired)
     };
     loop {
         if let (seq, true) = test() {
@@ -30,8 +31,8 @@ pub struct WaitBusy;
 
 impl WaitStrategy for WaitBusy {
     #[inline]
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_loop(expected, barrier, || ())
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+        wait_loop(desired_seq, barrier, || ())
     }
 }
 
@@ -42,8 +43,8 @@ pub struct WaitBusyHint;
 
 impl WaitStrategy for WaitBusyHint {
     #[inline]
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_loop(expected, barrier, std::hint::spin_loop)
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+        wait_loop(desired_seq, barrier, std::hint::spin_loop)
     }
 }
 
@@ -53,8 +54,8 @@ pub struct WaitYield;
 
 impl WaitStrategy for WaitYield {
     #[inline]
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_loop(expected, barrier, std::thread::yield_now)
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+        wait_loop(desired_seq, barrier, std::thread::yield_now)
     }
 }
 
@@ -75,8 +76,8 @@ impl WaitSleep {
 
 impl WaitStrategy for WaitSleep {
     #[inline]
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
-        wait_loop(expected, barrier, || std::thread::sleep(self.duration))
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+        wait_loop(desired_seq, barrier, || std::thread::sleep(self.duration))
     }
 }
 
@@ -115,9 +116,9 @@ impl WaitBlocking {
 
 impl WaitStrategy for WaitBlocking {
     #[inline]
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let (condvar, mutex) = &*self.pair;
-        let barrier_seq = wait_loop(expected, barrier, || {
+        let barrier_seq = wait_loop(desired_seq, barrier, || {
             let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.duration);
         });
         condvar.notify_all();
@@ -146,15 +147,15 @@ impl<W> WaitPhased<W> {
 }
 
 impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
-    fn wait(&self, expected: i64, barrier: &Barrier) -> i64 {
+    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let timer = Instant::now();
         let mut barrier_seq = barrier.sequence();
-        while barrier_seq < expected {
+        while barrier_seq < desired_seq {
             barrier_seq = barrier.sequence();
             match timer.elapsed() {
                 dur if dur < self.spin_duration => (),
                 dur if dur < self.yield_duration => std::thread::yield_now(),
-                _ => return self.fallback.wait(expected, barrier),
+                _ => return self.fallback.wait(desired_seq, barrier),
             }
         }
         barrier_seq
@@ -162,15 +163,15 @@ impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
 }
 
 impl<W: WaitStrategyTimeout> WaitStrategyTimeout for WaitPhased<W> {
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
         let timer = Instant::now();
         let mut barrier_seq = barrier.sequence();
-        while barrier_seq < expected {
+        while barrier_seq < desired_seq {
             barrier_seq = barrier.sequence();
             match timer.elapsed() {
                 dur if dur < self.spin_duration => (),
                 dur if dur < self.yield_duration => std::thread::yield_now(),
-                _ => return self.fallback.wait_timeout(expected, barrier),
+                _ => return self.fallback.wait_timeout(desired_seq, barrier),
             }
         }
         Ok(barrier_seq)
@@ -183,19 +184,20 @@ pub struct TimedOut;
 
 /// todo docs
 pub trait WaitStrategyTimeout {
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut>;
+    /// Wait for `barrier` sequence to reach `desired_seq` until timeout.
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut>;
 }
 
 #[inline]
 fn wait_loop_timeout(
-    expected: i64,
+    desired: i64,
     barrier: &Barrier,
     duration: Duration,
     mut waiting: impl FnMut(),
 ) -> Result<i64, TimedOut> {
     let test = || {
         let barrier_seq = barrier.sequence();
-        (barrier_seq, barrier_seq >= expected)
+        (barrier_seq, barrier_seq >= desired)
     };
     let timer = Instant::now();
     loop {
@@ -210,6 +212,7 @@ fn wait_loop_timeout(
 }
 
 /// todo docs
+/// doesn't need to be used for implementing timeouts
 #[derive(Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
     duration: Duration,
@@ -235,29 +238,29 @@ impl<W> Timeout<W> {
 
 impl WaitStrategyTimeout for Timeout<WaitBusy> {
     #[inline]
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
-        wait_loop_timeout(expected, barrier, self.duration, || ())
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(desired_seq, barrier, self.duration, || ())
     }
 }
 
 impl WaitStrategyTimeout for Timeout<WaitBusyHint> {
     #[inline]
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
-        wait_loop_timeout(expected, barrier, self.duration, std::hint::spin_loop)
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(desired_seq, barrier, self.duration, std::hint::spin_loop)
     }
 }
 
 impl WaitStrategyTimeout for Timeout<WaitYield> {
     #[inline]
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
-        wait_loop_timeout(expected, barrier, self.duration, std::thread::yield_now)
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(desired_seq, barrier, self.duration, std::thread::yield_now)
     }
 }
 
 impl WaitStrategyTimeout for Timeout<WaitSleep> {
     #[inline]
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
-        wait_loop_timeout(expected, barrier, self.duration, || {
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+        wait_loop_timeout(desired_seq, barrier, self.duration, || {
             std::thread::sleep(self.strategy.duration)
         })
     }
@@ -265,9 +268,9 @@ impl WaitStrategyTimeout for Timeout<WaitSleep> {
 
 impl WaitStrategyTimeout for Timeout<WaitBlocking> {
     #[inline]
-    fn wait_timeout(&self, expected: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+    fn wait_timeout(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
         let (condvar, mutex) = &*self.strategy.pair;
-        let barrier_seq = wait_loop_timeout(expected, barrier, self.duration, || {
+        let barrier_seq = wait_loop_timeout(desired_seq, barrier, self.duration, || {
             let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.strategy.duration);
         })?;
         condvar.notify_all();

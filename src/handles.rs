@@ -163,26 +163,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             }
         }
     }
-}
 
-impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
-where
-    W: WaitStrategy,
-{
-    /// todo docs
-    pub fn batch_write<F>(&mut self, size: u32, mut write: F)
-    where
-        F: FnMut(&mut E, i64, bool),
-    {
-        assert!(
-            (size as usize) <= self.buffer.len(),
-            "batch size ({size}) > buffer len ({})",
-            self.buffer.len()
-        );
-        let size = size as i64;
-        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
+    #[inline]
+    fn claim(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
+        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
         while let Err(new_current) = self.claim.sequence.compare_exchange(
             current_claim,
             claim_end,
@@ -192,14 +178,14 @@ where
             current_claim = new_current;
             claim_end = new_current + size;
         }
-        // Wait for the barrier to move past the end of the claim.
-        let expected = if LEAD {
-            claim_end - self.buffer.len() as i64
-        } else {
-            claim_end
-        };
-        self.wait_strategy.wait(expected, &self.barrier);
-        assert!(self.barrier.sequence() >= expected);
+        (current_claim, claim_end)
+    }
+
+    #[inline]
+    fn produce<F>(&mut self, current_claim: i64, claim_end: i64, mut write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
         // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
         // cover the entire duration of the buffer writes, so we use a fence here before any of the
         // cursor loads.
@@ -212,8 +198,6 @@ where
             // 2) The Acquire-Release memory barrier ensures this memory location will not be read
             //    while it is written to. This ensures that immutable refs will not be created for
             //    this element while the mutable ref exists.
-            // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-            //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == claim_end);
         }
@@ -228,6 +212,51 @@ where
         // Finally, advance producer cursor to publish the writes upto the end of the claimed
         // sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
+    }
+}
+
+impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
+where
+    W: WaitStrategy,
+{
+    /// todo docs
+    pub fn batch_write<F>(&mut self, size: u32, write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        assert!((size as usize) <= self.buffer.len());
+        let (current_claim, claim_end) = self.claim(size as i64);
+        let desired_seq = if LEAD {
+            claim_end - self.buffer.len() as i64
+        } else {
+            claim_end
+        };
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(current_claim, claim_end, write)
+    }
+}
+
+impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
+where
+    W: WaitStrategyTimeout,
+{
+    /// todo docs
+    pub fn batch_write_timeout<F>(&mut self, size: u32, write: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        assert!((size as usize) <= self.buffer.len());
+        let (current_claim, claim_end) = self.claim(size as i64);
+        let desired_seq = if LEAD {
+            claim_end - self.buffer.len() as i64
+        } else {
+            claim_end
+        };
+        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(current_claim, claim_end, write);
+        Ok(())
     }
 }
 
@@ -354,13 +383,13 @@ where
             current_claim = new_current;
             claim_end = new_current + BATCH as i64;
         }
-        let expected = if LEAD {
+        let desired_seq = if LEAD {
             claim_end - self.buffer.len() as i64
         } else {
             claim_end
         };
-        self.wait_strategy.wait(expected, &self.barrier);
-        assert!(self.barrier.sequence() >= expected);
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that this sequence has been claimed by only one producer, so multiple
@@ -368,9 +397,7 @@ where
         // 2) The Acquire-Release memory barrier ensures this memory location will not be read
         //    while it is written to. This ensures that immutable refs will not be created for
         //    this element while the mutable ref exists.
-        // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-        //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
-        // 4) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
+        // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = current_claim + 1;
         let mut pointer = self.buffer.get(seq);
@@ -386,7 +413,6 @@ where
         while cursor_seq != current_claim {
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
-        assert_eq!(seq, claim_end);
         self.cursor.sequence.store(seq, Ordering::Release);
     }
 }
@@ -455,37 +481,16 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
             wait_strategy: self.wait_strategy,
         })
     }
-}
 
-impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
-where
-    W: WaitStrategy,
-{
-    /// todo docs
-    pub fn batch_write<F>(&mut self, size: u32, mut write: F)
+    #[inline]
+    fn produce<F>(&mut self, producer_seq: i64, batch_end: i64, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(
-            (size as usize) <= self.buffer.len(),
-            "batch size ({size}) > buffer len ({})",
-            self.buffer.len()
-        );
-        let size = size as i64;
-        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        // Wait until there are free slots to write events to.
-        let expected = if LEAD {
-            producer_seq + size - self.buffer.len() as i64
-        } else {
-            producer_seq + size
-        };
-        self.wait_strategy.wait(expected, &self.barrier);
-        assert!(self.barrier.sequence() >= expected);
         // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
         // duration of the writes.
         fence(Ordering::Acquire);
         // Begin writing events to the buffer.
-        let batch_end = producer_seq + size;
         for seq in producer_seq + 1..=batch_end {
             // SAFETY:
             // 1) We know that there is only one producer accessing this section of the buffer, so
@@ -493,13 +498,58 @@ where
             // 2) The Acquire-Release memory barrier ensures this memory location will not be read
             //    while it is written to. This ensures that immutable refs will not be created for
             //    this element while the mutable ref exists.
-            // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-            //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == batch_end);
         }
         // Move cursor upto the end of the written batch.
         self.cursor.sequence.store(batch_end, Ordering::Release);
+    }
+}
+
+impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
+where
+    W: WaitStrategy,
+{
+    /// todo docs
+    pub fn batch_write<F>(&mut self, size: u32, write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        assert!((size as usize) <= self.buffer.len());
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = producer_seq + size as i64;
+        let desired_seq = if LEAD {
+            batch_end - self.buffer.len() as i64
+        } else {
+            batch_end
+        };
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(producer_seq, batch_end, write)
+    }
+}
+
+impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
+where
+    W: WaitStrategyTimeout,
+{
+    /// todo docs
+    pub fn batch_write_timeout<F>(&mut self, size: u32, write: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        assert!((size as usize) <= self.buffer.len());
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = producer_seq + size as i64;
+        let desired_seq = if LEAD {
+            batch_end - self.buffer.len() as i64
+        } else {
+            batch_end
+        };
+        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(producer_seq, batch_end, write);
+        Ok(())
     }
 }
 
@@ -549,13 +599,14 @@ where
         F: FnMut(&mut E, i64, bool),
     {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let expected = if LEAD {
-            producer_seq + BATCH as i64 - self.buffer.len() as i64
+        let batch_end = producer_seq + BATCH as i64;
+        let desired_seq = if LEAD {
+            batch_end - self.buffer.len() as i64
         } else {
-            producer_seq + BATCH as i64
+            batch_end
         };
-        self.wait_strategy.wait(expected, &self.barrier);
-        assert!(self.barrier.sequence() >= expected);
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that there is only one producer accessing this section of the buffer, so
@@ -563,9 +614,7 @@ where
         // 2) The Acquire-Release memory barrier ensures this memory location will not be read
         //    while it is written to. This ensures that immutable refs will not be created for
         //    this element while the mutable ref exists.
-        // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-        //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
-        // 4) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
+        // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = producer_seq + 1;
         let mut pointer = self.buffer.get(seq);
@@ -577,7 +626,6 @@ where
             }
             write(&mut *pointer, seq, true);
         }
-        assert_eq!(seq, producer_seq + BATCH as i64);
         self.cursor.sequence.store(seq, Ordering::Release);
     }
 }
@@ -633,6 +681,30 @@ impl<E, W> Consumer<E, W> {
             wait_strategy: self.wait_strategy,
         })
     }
+
+    #[inline]
+    fn consume<F>(&self, consumer_seq: i64, batch_end: i64, mut read: F)
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
+        // duration of the reads.
+        fence(Ordering::Acquire);
+        // Begin reading a batch of events from the buffer.
+        for seq in consumer_seq + 1..=batch_end {
+            // SAFETY:
+            // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+            //    ensuring multiple mutable refs are not created here.
+            // 2) The Acquire-Release synchronisation ensures the consumer cursor does not
+            //    visibly update its value until all events are processed. Hence, producers will
+            //    not write here while the consumer is reading, ensuring no mutable ref to this
+            //    element is created while this immutable ref exists.
+            let event: &E = unsafe { &*self.buffer.get(seq) };
+            read(event, seq, seq == batch_end);
+        }
+        // Move cursor up to sequence at end of batch.
+        self.cursor.sequence.store(batch_end, Ordering::Release);
+    }
 }
 
 impl<E, W> Consumer<E, W>
@@ -640,59 +712,29 @@ where
     W: WaitStrategy,
 {
     /// todo docs
-    pub fn batch_read<F>(&self, size: u32, mut read: F)
+    pub fn batch_read<F>(&self, size: u32, read: F)
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!(
-            (size as usize) <= self.buffer.len(),
-            "batch size ({size}) > buffer len ({})",
-            self.buffer.len()
-        );
-        let size = size as i64;
+        assert!((size as usize) <= self.buffer.len());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        // Wait until there are events to read.
-        self.wait_strategy.wait(consumer_seq + size, &self.barrier);
-        assert!(self.barrier.sequence() >= consumer_seq + size);
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
-        // duration of the reads.
-        fence(Ordering::Acquire);
-        // Begin reading a batch of events from the buffer.
-        let batch_end = consumer_seq + size;
-        for seq in consumer_seq + 1..=batch_end {
-            // SAFETY:
-            // 1) The mutable pointer to the event is immediately converted to an immutable ref,
-            //    ensuring multiple mutable refs do not exist.
-            // 2) The Acquire-Release synchronisation ensures that the consumer cursor does not
-            //    visibly update its value until all the events are processed, which in turn ensures
-            //    that producers will not write here while the consumer is reading. This ensures
-            //    that no mutable ref to this element is created while this immutable ref exists.
-            // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-            //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
-            let event: &E = unsafe { &*self.buffer.get(seq) };
-            read(event, seq, seq == batch_end);
-        }
-        // Move cursor up to barrier sequence.
-        self.cursor.sequence.store(batch_end, Ordering::Release);
+        let batch_end = consumer_seq + size as i64;
+        self.wait_strategy.wait(batch_end, &self.barrier);
+        assert!(self.barrier.sequence() >= batch_end);
+        self.consume(consumer_seq, batch_end, read)
     }
 
     /// Specialised function which will always consume *all* available buffer elements when called.
     ///
     /// See [`batch_read`](Consumer::batch_read) for further documentation.
-    pub fn read<F>(&self, mut read: F)
+    pub fn read<F>(&self, read: F)
     where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
         assert!(barrier_seq > consumer_seq);
-        fence(Ordering::Acquire);
-        for seq in consumer_seq + 1..=barrier_seq {
-            // SAFETY: see Consumer::batch_read
-            let event: &E = unsafe { &*self.buffer.get(seq) };
-            read(event, seq, seq == barrier_seq);
-        }
-        self.cursor.sequence.store(barrier_seq, Ordering::Release);
+        self.consume(consumer_seq, barrier_seq, read)
     }
 }
 
@@ -701,20 +743,28 @@ where
     W: WaitStrategyTimeout,
 {
     /// todo docs
-    pub fn read_timeout<F>(&self, mut read: F) -> Result<(), TimedOut>
+    pub fn batch_read_timeout<F>(&self, size: u32, read: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        assert!((size as usize) <= self.buffer.len());
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = consumer_seq + size as i64;
+        self.wait_strategy.wait_timeout(batch_end, &self.barrier)?;
+        assert!(self.barrier.sequence() >= batch_end);
+        self.consume(consumer_seq, batch_end, read);
+        Ok(())
+    }
+
+    /// todo docs
+    pub fn read_timeout<F>(&self, read: F) -> Result<(), TimedOut>
     where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait_timeout(consumer_seq + 1, &self.barrier)?;
         assert!(barrier_seq > consumer_seq);
-        fence(Ordering::Acquire);
-        for seq in consumer_seq + 1..=barrier_seq {
-            // SAFETY: see Consumer::batch_read
-            let event: &E = unsafe { &*self.buffer.get(seq) };
-            read(event, seq, seq == barrier_seq);
-        }
-        self.cursor.sequence.store(barrier_seq, Ordering::Release);
+        self.consume(consumer_seq, barrier_seq, read);
         Ok(())
     }
 }
@@ -789,7 +839,6 @@ where
             }
             read(&*pointer, seq, true);
         }
-        assert_eq!(seq, consumer_seq + BATCH as i64);
         self.cursor.sequence.store(seq, Ordering::Release);
     }
 }
@@ -819,7 +868,7 @@ impl Cursor {
     }
 
     /// Create a cursor at the start of the sequence. All reads and writes begin on the _next_
-    /// position in the sequence, so cursors start at `-1`, meaning reads and writes start at `0`.
+    /// position in the sequence, thus cursors start at `-1`, so that reads and writes start at `0`.
     pub(crate) const fn start() -> Self {
         Cursor::new(-1)
     }

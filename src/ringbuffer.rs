@@ -42,6 +42,9 @@ impl<E> RingBuffer<E> {
     /// accepted. The calculation: `sequence mod buffer_size` is used to find which index to return
     /// an element pointer from.
     ///
+    /// The returned pointer is guaranteed to be properly aligned and initialised, so dereferencing
+    /// can always be done safely.
+    ///
     /// # Safety
     /// Creating a reference from the pointer returned from this function is UB if mutable
     /// aliasing occurs as a result. Callers must satisfy both the following two conditions to
