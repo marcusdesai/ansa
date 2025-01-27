@@ -75,6 +75,29 @@ pub trait Waiting {
 ///     }
 /// }
 /// ```
+/// The following example shows only _some_ of the possible implementation mistakes that will
+/// cause UB.
+/// ```
+/// use ansa::{Barrier, wait::WaitStrategy};
+///
+/// struct BadWait;
+///
+/// unsafe impl WaitStrategy for BadWait {
+///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+///         let mut barrier_seq = barrier.sequence();
+///
+///         // VERY BAD: we've changed only one character from `<` to `>`,
+///         // but this is enough to make Undefined Behaviour possible
+///         while barrier_seq > desired_seq {
+///             barrier_seq = barrier.sequence();
+///         }
+///         // VERY BAD: we return a sequence unrelated to the barrier, leaving the
+///         // disruptor in an inconsistent, non-recoverable state, and almost certainly
+///         // causing UB as well.
+///         10
+///     }
+/// }
+/// ```
 pub unsafe trait WaitStrategy {
     /// Runs the wait loop.
     ///
@@ -146,6 +169,33 @@ where
 ///             iters += 1;
 ///         }
 ///         Ok(barrier_seq)
+///     }
+/// }
+/// ```
+/// The following example shows only _some_ of the possible implementation mistakes that will
+/// cause UB.
+/// ```
+/// use ansa::{Barrier, wait::TryWaitStrategy};
+///
+/// struct BadWait;
+///
+/// struct BadWaitError;
+///
+/// unsafe impl TryWaitStrategy for BadWait {
+///     type Error = BadWaitError;
+///
+///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
+///         let mut barrier_seq = barrier.sequence();
+///
+///         // VERY BAD: we've changed only one character from `<` to `>`,
+///         // but this is enough to make Undefined Behaviour possible
+///         while barrier_seq > desired_seq {
+///             barrier_seq = barrier.sequence();
+///         }
+///         // VERY BAD: we return a sequence unrelated to the barrier, leaving the
+///         // disruptor in an inconsistent, non-recoverable state, and almost certainly
+///         // causing UB as well.
+///         Ok(10)
 ///     }
 /// }
 /// ```
