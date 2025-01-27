@@ -1,6 +1,8 @@
 //! Provides strategies for handles waiting for sequences on the ring buffer.
 //!
 //! Also provided are three traits for implementing your own wait logic.
+//!
+//! todo: note on wait strategy sizes and how that relates to handle and cache sizes
 
 use crate::handles::Barrier;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};

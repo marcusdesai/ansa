@@ -90,18 +90,23 @@ where
     /// Each handle must be associated with a unique id, and must be either a consumer or producer.
     ///
     /// Every handle must describe how it relates to other handles by indicating which handles it
-    /// follows. In the disruptor pattern, the management of access to the underlying ring buffer
-    /// is organised by ordering handles according to which handles come before.
+    /// follows. In the disruptor pattern, management of ring buffer accesses works by ordering
+    /// handles according to a precedence, or "follows", relationship.
     ///
-    /// The handles of a disruptor must create a directed acyclic graph, where each handle follows
-    /// either the lead producer, or other handles. The "lead producer" is implicitly defined
-    /// simply by creating the ['DisruptorBuilder']. This lead serves as the root of the graph,
-    /// everything else must in some way follow it, and it will always be a producer.
+    /// Handle `A` follows handle `B` means that `B` accesses events published to the ring buffer
+    /// exclusively before `A`. See: [`Follows`] for more.
+    ///
+    /// These precedence relationships must form a directed acyclic graph, where handles follow the
+    /// lead producer or other handles. No loops are allowed.
+    ///
+    /// The "lead producer" is an automatically defined handle. It is always a producer, and it
+    /// serves as the root of the graph. Every other handle must follow the lead either directly or
+    /// indirectly.
     ///
     /// # Examples
     ///
-    /// Consumer handles do not need to necessarily follow one another, which allows for them to
-    /// overlap reads of the ring buffer.
+    /// Consumer handles do not necessarily need to follow one another, which allows for them to
+    /// read the ring buffer in parallel.
     /// ```
     /// use ansa::*;
     ///
@@ -109,14 +114,27 @@ where
     /// //    |
     /// //    ▼
     /// //    1
-    /// let _ = DisruptorBuilder::new(0, || 0)
+    /// let _ = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer);
+    ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
     /// ```
     /// This represents a fan-out from the lead producer to the following consumers `0` and `1`.
+    /// These consumers will both read all the events published by the lead producer, without
+    /// coordinating with each other.
     ///
-    /// But all producers must always follow or be followed by other handles, as there cannot be
-    /// overlapping writes of the buffer.
+    /// But, producer handles must always either follow or be followed by every other handle. If
+    /// this were not true, then overlapping writes to the buffer (read: mutable aliasing) could
+    /// occur.
+    ///
+    /// In more technical terms: it is possible to add consumer handles which are partially ordered
+    /// with respect to other consumer handles, but all handles (of any kind) must be totally
+    /// ordered with respect to all producer handles.
+    ///
+    /// For examples of invalid producer ordering, see: [`BuildError::UnorderedProducer`].
+    ///
+    /// Below is an example of a validly ordered producer in a graph.
     /// ```
     /// use ansa::*;
     ///
@@ -124,20 +142,20 @@ where
     /// //         |    |
     /// //         ▼    ▼
     /// //         1 ─► 3P ─► 4
-    /// let _ = DisruptorBuilder::new(0, || 0)
+    /// let _ = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(3, Handle::Producer, Follows::Handles(vec![1, 2])) // fan-in
-    ///     .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]));
+    ///     .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]))
+    ///     .build()
+    ///     .unwrap();
     /// ```
     ///
-    /// Another way of expressing this is that: it is possible to add consumer handles which are
-    /// partially ordered with respect to other consumer handles, but all handles (of any kind)
-    /// must be totally ordered with respect to all producer handles.
+    /// See: [`MultiProducer`](crate::handles::MultiProducer) for a means to parallelize writes.
     ///
     /// See: [`BuildError`], for full details on error states encountered when building the
-    /// disruptor. Such invalid states are most often caused by misconfigured calls to
+    /// disruptor. Such invalid states are most often caused by inappropriate calls to
     /// [`add_handle`](DisruptorBuilder::add_handle) or
     /// [`extend_handles`](DisruptorBuilder::extend_handles).
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
@@ -191,7 +209,19 @@ where
     ///
     /// For details of all provided wait strategies, see the module docs for [`wait`](crate::wait).
     ///
-    /// todo examples
+    /// # Examples
+    ///
+    /// ```
+    /// use ansa::*;
+    /// use ansa::wait::WaitSleep;
+    /// use std::time::Duration;
+    ///
+    /// let _ = DisruptorBuilder::new(32, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .wait_strategy(|| WaitSleep::new(Duration::from_nanos(500)))
+    ///     .build()
+    ///     .unwrap();
+    /// ```
     pub fn wait_strategy<WF2, W2>(self, factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
     where
         WF2: Fn() -> W2,
