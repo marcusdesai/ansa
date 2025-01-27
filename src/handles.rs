@@ -200,7 +200,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.len() as i64
@@ -222,7 +222,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.len() as i64
@@ -525,7 +525,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
@@ -548,7 +548,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
@@ -728,10 +728,7 @@ impl<E, W> Consumer<E, W> {
     where
         F: FnMut(&E, i64, bool),
     {
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
-        // duration of the reads.
         fence(Ordering::Acquire);
-        // Begin reading a batch of events from the buffer.
         for seq in consumer_seq + 1..=batch_end {
             // SAFETY:
             // 1) The mutable pointer to the event is immediately converted to an immutable ref,
@@ -755,7 +752,7 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.wait(batch_end, &self.barrier);
@@ -786,7 +783,7 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!((size as usize) <= self.buffer.len());
+        assert!(size as usize <= self.buffer.len());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.wait_timeout(batch_end, &self.barrier)?;
@@ -955,6 +952,7 @@ impl Barrier {
         Barrier(Barrier_::Many(cursors))
     }
 
+    /// The position of the barrier.
     #[inline]
     pub(crate) fn sequence(&self) -> i64 {
         match &self.0 {
