@@ -195,7 +195,8 @@ where
     ///        (1, Handle::Consumer, Follows::LeadProducer),
     ///        (2, Handle::Consumer, Follows::Handles(vec![0, 1]))
     ///    ])
-    ///    .build();
+    ///    .build()
+    ///    .unwrap();
     ///```
     pub fn extend_handles(self, iter: impl IntoIterator<Item = (u64, Handle, Follows)>) -> Self {
         let mut this = self;
@@ -580,8 +581,8 @@ fn visit(
 /// unordered with respect to `e`. Thus, to ensure that every element in the graph is totally
 /// ordered with respect to all producers, it must hold that all chains contain all producers.
 ///
-/// Another way of thinking about this is: it should not be possible to traverse the DAG without
-/// visiting all producers.
+/// Another way of thinking about this is: it should not be possible to traverse the DAG from the
+/// root to any single leaf node without visiting every producer.
 fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Result<(), BuildError> {
     let producer_ids: U64Set = handles_map
         .iter()

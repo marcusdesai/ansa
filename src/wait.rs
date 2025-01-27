@@ -88,14 +88,15 @@ pub trait Waiting {
 ///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
 ///         let mut barrier_seq = barrier.sequence();
 ///
-///         // VERY BAD: we've changed only one character from `<` to `>`,
-///         // but this is enough to make Undefined Behaviour possible
+///         // VERY BAD: we've changed only one character from `<` to `>`, but this makes
+///         // it possible for waiting to end before the barrier has advanced. Could cause
+///         // mutable aliasing, and thus UB.
 ///         while barrier_seq > desired_seq {
 ///             barrier_seq = barrier.sequence();
 ///         }
-///         // VERY BAD: we return a sequence unrelated to the barrier, leaving the
-///         // disruptor in an inconsistent, non-recoverable state, and almost certainly
-///         // causing UB as well.
+///         // VERY BAD: we return a sequence unrelated to the barrier, possibly leaving
+///         // the disruptor in an inconsistent, non-recoverable state if a handle uses
+///         // the value. Could cause mutable aliasing, and thus UB.
 ///         10
 ///     }
 /// }
@@ -189,14 +190,15 @@ where
 ///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
 ///         let mut barrier_seq = barrier.sequence();
 ///
-///         // VERY BAD: we've changed only one character from `<` to `>`,
-///         // but this is enough to make Undefined Behaviour possible
+///         // VERY BAD: we've changed only one character from `<` to `>`, but this makes
+///         // it possible for waiting to end before the barrier has advanced. Could cause
+///         // mutable aliasing, and thus UB.
 ///         while barrier_seq > desired_seq {
 ///             barrier_seq = barrier.sequence();
 ///         }
-///         // VERY BAD: we return a sequence unrelated to the barrier, leaving the
-///         // disruptor in an inconsistent, non-recoverable state, and almost certainly
-///         // causing UB as well.
+///         // VERY BAD: we return a sequence unrelated to the barrier, possibly leaving
+///         // the disruptor in an inconsistent, non-recoverable state if a handle uses
+///         // the value. Could cause mutable aliasing, and thus UB.
 ///         Ok(10)
 ///     }
 /// }
