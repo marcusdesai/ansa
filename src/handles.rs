@@ -165,52 +165,28 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     #[inline]
-    fn claim(&self, size: i64) -> (i64, i64) {
-        let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
-        let mut claim_end = current_claim + size;
-        // Claim a sequence. The 'claim' is used to coordinate the multi producer clones.
-        while let Err(new_current) = self.claim.sequence.compare_exchange(
-            current_claim,
-            claim_end,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            current_claim = new_current;
-            claim_end = new_current + size;
-        }
-        (current_claim, claim_end)
-    }
-
-    #[inline]
     fn produce<F>(&mut self, current_claim: i64, claim_end: i64, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier. This needs to
-        // cover the entire duration of the buffer writes, so we use a fence here before any of the
-        // cursor loads.
         fence(Ordering::Acquire);
-        // Begin writing events to the buffer.
         for seq in current_claim + 1..=claim_end {
             // SAFETY:
             // 1) We know that this sequence has been claimed by only one producer, so multiple
-            //    mutable refs to this element cannot exist.
-            // 2) The Acquire-Release memory barrier ensures this memory location will not be read
-            //    while it is written to. This ensures that immutable refs will not be created for
-            //    this element while the mutable ref exists.
+            //    mutable refs to this element will not be created.
+            // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
+            //    no reads of this data will be attempted.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == claim_end);
         }
-        // Wait for the cursor to catch up to start of claimed sequence. This ensures that writes
-        // later in the sequence are not made visible until all earlier writes by this multi
-        // producer or its clones are completed. Without this check, unfinished writes may become
-        // prematurely visible, allowing overlapping immutable and mutable refs to be created.
+        // Busy wait for the cursor to catch up to the start of claimed sequence, ensuring buffer
+        // writes are made visible in order. Without this check, unfinished writes before this
+        // claim may become prematurely visible, allowing reads to overlap ongoing writes.
         let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         while cursor_seq != current_claim {
             cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
         }
-        // Finally, advance producer cursor to publish the writes upto the end of the claimed
-        // sequence.
+        // Publish writes upto the end of the claimed sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
     }
 }
@@ -225,7 +201,7 @@ where
         F: FnMut(&mut E, i64, bool),
     {
         assert!((size as usize) <= self.buffer.len());
-        let (current_claim, claim_end) = self.claim(size as i64);
+        let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.len() as i64
         } else {
@@ -233,7 +209,7 @@ where
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
         assert!(self.barrier.sequence() >= desired_seq);
-        self.produce(current_claim, claim_end, write)
+        self.produce(current_claim, claim_end, write);
     }
 }
 
@@ -247,7 +223,7 @@ where
         F: FnMut(&mut E, i64, bool),
     {
         assert!((size as usize) <= self.buffer.len());
-        let (current_claim, claim_end) = self.claim(size as i64);
+        let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.len() as i64
         } else {
@@ -360,43 +336,18 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
             }
         }
     }
-}
 
-impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
-where
-    W: WaitStrategy,
-{
-    /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
-    pub fn write_exact<F>(&mut self, mut write: F)
+    #[inline]
+    fn produce<F>(&mut self, current_claim: i64, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
-        let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
-        let mut claim_end = current_claim + BATCH as i64;
-        while let Err(new_current) = self.claim.sequence.compare_exchange(
-            current_claim,
-            claim_end,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            current_claim = new_current;
-            claim_end = new_current + BATCH as i64;
-        }
-        let desired_seq = if LEAD {
-            claim_end - self.buffer.len() as i64
-        } else {
-            claim_end
-        };
-        self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that this sequence has been claimed by only one producer, so multiple
-        //    mutable refs to this element cannot exist.
-        // 2) The Acquire-Release memory barrier ensures this memory location will not be read
-        //    while it is written to. This ensures that immutable refs will not be created for
-        //    this element while the mutable ref exists.
+        //    mutable refs to this element will not be created.
+        // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
+        //    no reads of this data will be attempted.
         // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = current_claim + 1;
@@ -415,6 +366,69 @@ where
         }
         self.cursor.sequence.store(seq, Ordering::Release);
     }
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategy,
+{
+    /// todo docs
+    /// Works with Tree-Borrows but not Stacked-Borrows
+    pub fn write_exact<F>(&mut self, write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
+        let desired_seq = if LEAD {
+            claim_end - self.buffer.len() as i64
+        } else {
+            claim_end
+        };
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(current_claim, write);
+    }
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategyTimeout,
+{
+    /// todo docs
+    pub fn write_exact_timeout<F>(&mut self, write: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
+        let desired_seq = if LEAD {
+            claim_end - self.buffer.len() as i64
+        } else {
+            claim_end
+        };
+        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(current_claim, write);
+        Ok(())
+    }
+}
+
+/// Returns a claim for a range of sequences.
+///
+/// The claimed range is exclusive to a single multi producer clone.
+#[inline]
+fn claim(claim: &Cursor, size: i64) -> (i64, i64) {
+    let mut current_claim = claim.sequence.load(Ordering::Relaxed);
+    let mut claim_end = current_claim + size;
+    while let Err(new_current) = claim.sequence.compare_exchange(
+        current_claim,
+        claim_end,
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    ) {
+        current_claim = new_current;
+        claim_end = new_current + size;
+    }
+    (current_claim, claim_end)
 }
 
 /// todo docs
@@ -487,17 +501,13 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     where
         F: FnMut(&mut E, i64, bool),
     {
-        // Ensure synchronisation occurs by creating an Acquire-Release barrier for the entire
-        // duration of the writes.
         fence(Ordering::Acquire);
-        // Begin writing events to the buffer.
         for seq in producer_seq + 1..=batch_end {
             // SAFETY:
             // 1) We know that there is only one producer accessing this section of the buffer, so
             //    multiple mutable refs cannot exist.
-            // 2) The Acquire-Release memory barrier ensures this memory location will not be read
-            //    while it is written to. This ensures that immutable refs will not be created for
-            //    this element while the mutable ref exists.
+            // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
+            //    no reads of this data will be attempted.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == batch_end);
         }
@@ -525,7 +535,7 @@ where
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
         assert!(self.barrier.sequence() >= desired_seq);
-        self.produce(producer_seq, batch_end, write)
+        self.produce(producer_seq, batch_end, write);
     }
 }
 
@@ -586,34 +596,18 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
             wait_strategy: self.wait_strategy,
         })
     }
-}
 
-impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
-where
-    W: WaitStrategy,
-{
-    /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
-    pub fn write_exact<F>(&mut self, mut write: F)
+    #[inline]
+    fn produce<F>(&mut self, producer_seq: i64, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
-        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let batch_end = producer_seq + BATCH as i64;
-        let desired_seq = if LEAD {
-            batch_end - self.buffer.len() as i64
-        } else {
-            batch_end
-        };
-        self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) We know that there is only one producer accessing this section of the buffer, so
         //    multiple mutable refs cannot exist.
-        // 2) The Acquire-Release memory barrier ensures this memory location will not be read
-        //    while it is written to. This ensures that immutable refs will not be created for
-        //    this element while the mutable ref exists.
+        // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
+        //    no reads of this data will be attempted.
         // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = producer_seq + 1;
@@ -627,6 +621,53 @@ where
             write(&mut *pointer, seq, true);
         }
         self.cursor.sequence.store(seq, Ordering::Release);
+    }
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategy,
+{
+    /// todo docs
+    /// Works with Tree-Borrows but not Stacked-Borrows
+    pub fn write_exact<F>(&mut self, write: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = producer_seq + BATCH as i64;
+        let desired_seq = if LEAD {
+            batch_end - self.buffer.len() as i64
+        } else {
+            batch_end
+        };
+        self.wait_strategy.wait(desired_seq, &self.barrier);
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(producer_seq, write);
+    }
+}
+
+impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
+where
+    W: WaitStrategyTimeout,
+{
+    /// todo docs
+    /// Works with Tree-Borrows but not Stacked-Borrows
+    pub fn write_exact_timeout<F>(&mut self, write: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = producer_seq + BATCH as i64;
+        let desired_seq = if LEAD {
+            batch_end - self.buffer.len() as i64
+        } else {
+            batch_end
+        };
+        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        assert!(self.barrier.sequence() >= desired_seq);
+        self.produce(producer_seq, write);
+        Ok(())
     }
 }
 
@@ -695,10 +736,8 @@ impl<E, W> Consumer<E, W> {
             // SAFETY:
             // 1) The mutable pointer to the event is immediately converted to an immutable ref,
             //    ensuring multiple mutable refs are not created here.
-            // 2) The Acquire-Release synchronisation ensures the consumer cursor does not
-            //    visibly update its value until all events are processed. Hence, producers will
-            //    not write here while the consumer is reading, ensuring no mutable ref to this
-            //    element is created while this immutable ref exists.
+            // 2) The Acquire-Release barrier ensures that following producers will not attempt
+            //    writes to this sequence.
             let event: &E = unsafe { &*self.buffer.get(seq) };
             read(event, seq, seq == batch_end);
         }
@@ -802,32 +841,19 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
             wait_strategy: self.wait_strategy,
         })
     }
-}
 
-impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
-where
-    W: WaitStrategy,
-{
-    /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
-    pub fn read_exact<F>(&self, mut read: F)
+    #[inline]
+    fn consume<F>(&self, consumer_seq: i64, mut read: F)
     where
         F: FnMut(&E, i64, bool),
     {
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        self.wait_strategy.wait(consumer_seq + BATCH as i64, &self.barrier);
-        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
         fence(Ordering::Acquire);
         // SAFETY:
         // 1) The mutable pointer to the event is immediately converted to an immutable pointer,
         //    ensuring multiple mutable refs cannot be created here.
-        // 2) The Acquire-Release synchronisation ensures that the consumer cursor does not visibly
-        //    update its value until all the events are processed, which in turn ensures that
-        //    producers will not write here while the consumer is reading. This ensures that no
-        //    mutable ref to this element is created while this immutable ref exists.
-        // 3) The pointer being dereferenced is guaranteed to point at correctly initialised
-        //    and aligned memory, because the ring buffer is pre-allocated and pre-populated.
-        // 4) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
+        // 2) The Acquire-Release barrier ensures that following producers will not attempt
+        //    writes to this sequence.
+        // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = consumer_seq + 1;
         let mut pointer = self.buffer.get(seq) as *const E;
@@ -840,6 +866,41 @@ where
             read(&*pointer, seq, true);
         }
         self.cursor.sequence.store(seq, Ordering::Release);
+    }
+}
+
+impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
+where
+    W: WaitStrategy,
+{
+    /// todo docs
+    /// Works with Tree-Borrows but not Stacked-Borrows
+    pub fn read_exact<F>(&self, read: F)
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        self.wait_strategy.wait(consumer_seq + BATCH as i64, &self.barrier);
+        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
+        self.consume(consumer_seq, read);
+    }
+}
+
+impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
+where
+    W: WaitStrategyTimeout,
+{
+    /// todo docs
+    /// Works with Tree-Borrows but not Stacked-Borrows
+    pub fn read_exact_timeout<F>(&self, read: F) -> Result<(), TimedOut>
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        self.wait_strategy.wait_timeout(consumer_seq + BATCH as i64, &self.barrier)?;
+        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
+        self.consume(consumer_seq, read);
+        Ok(())
     }
 }
 
