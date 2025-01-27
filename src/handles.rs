@@ -1,5 +1,5 @@
 use crate::ringbuffer::RingBuffer;
-use crate::wait::{TimedOut, WaitStrategy, WaitStrategyTimeout};
+use crate::wait::{TryWaitStrategy, WaitStrategy};
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -215,10 +215,10 @@ where
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
-    pub fn batch_write_timeout<F>(&mut self, size: u32, write: F) -> Result<(), TimedOut>
+    pub fn try_batch_write<F>(&mut self, size: u32, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -229,7 +229,7 @@ where
         } else {
             claim_end
         };
-        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
         assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, claim_end, write);
         Ok(())
@@ -392,10 +392,10 @@ where
 
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
-    pub fn write_exact_timeout<F>(&mut self, write: F) -> Result<(), TimedOut>
+    pub fn try_write_exact<F>(&mut self, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -405,7 +405,7 @@ where
         } else {
             claim_end
         };
-        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
         assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, write);
         Ok(())
@@ -541,10 +541,10 @@ where
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
-    pub fn batch_write_timeout<F>(&mut self, size: u32, write: F) -> Result<(), TimedOut>
+    pub fn try_batch_write<F>(&mut self, size: u32, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -556,7 +556,7 @@ where
         } else {
             batch_end
         };
-        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
         assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, batch_end, write);
         Ok(())
@@ -649,11 +649,11 @@ where
 
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
     /// Works with Tree-Borrows but not Stacked-Borrows
-    pub fn write_exact_timeout<F>(&mut self, write: F) -> Result<(), TimedOut>
+    pub fn try_write_exact<F>(&mut self, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -664,7 +664,7 @@ where
         } else {
             batch_end
         };
-        self.wait_strategy.wait_timeout(desired_seq, &self.barrier)?;
+        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
         assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, write);
         Ok(())
@@ -776,29 +776,29 @@ where
 
 impl<E, W> Consumer<E, W>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
-    pub fn batch_read_timeout<F>(&self, size: u32, read: F) -> Result<(), TimedOut>
+    pub fn try_batch_read<F>(&self, size: u32, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),
     {
         assert!(size as usize <= self.buffer.len());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
-        self.wait_strategy.wait_timeout(batch_end, &self.barrier)?;
+        self.wait_strategy.try_wait(batch_end, &self.barrier)?;
         assert!(self.barrier.sequence() >= batch_end);
         self.consume(consumer_seq, batch_end, read);
         Ok(())
     }
 
     /// todo docs
-    pub fn read_timeout<F>(&self, read: F) -> Result<(), TimedOut>
+    pub fn try_read<F>(&self, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = self.wait_strategy.wait_timeout(consumer_seq + 1, &self.barrier)?;
+        let barrier_seq = self.wait_strategy.try_wait(consumer_seq + 1, &self.barrier)?;
         assert!(barrier_seq > consumer_seq);
         self.consume(consumer_seq, barrier_seq, read);
         Ok(())
@@ -885,16 +885,16 @@ where
 
 impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
-    W: WaitStrategyTimeout,
+    W: TryWaitStrategy,
 {
     /// todo docs
     /// Works with Tree-Borrows but not Stacked-Borrows
-    pub fn read_exact_timeout<F>(&self, read: F) -> Result<(), TimedOut>
+    pub fn try_read_exact<F>(&self, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        self.wait_strategy.wait_timeout(consumer_seq + BATCH as i64, &self.barrier)?;
+        self.wait_strategy.try_wait(consumer_seq + BATCH as i64, &self.barrier)?;
         assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
         self.consume(consumer_seq, read);
         Ok(())
@@ -954,7 +954,7 @@ impl Barrier {
 
     /// The position of the barrier.
     #[inline]
-    pub(crate) fn sequence(&self) -> i64 {
+    pub fn sequence(&self) -> i64 {
         match &self.0 {
             Barrier_::One(cursor) => cursor.sequence.load(Ordering::Relaxed),
             Barrier_::Many(cursors) => cursors.iter().fold(i64::MAX, |seq, cursor| {
