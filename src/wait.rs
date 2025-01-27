@@ -6,15 +6,16 @@ use std::time::{Duration, Instant};
 
 /// Implement to provide logic which will run inside a wait loop.
 ///
-/// This trait is unsuitable when state needs to be held across loop iteration, since the
-/// [`Waiting::waiting`] method cannot observe outside the loop. If state is required, Implement
+/// This trait is unsuitable when state needs to be held across loop iterations, since the
+/// [`Waiting::waiting`] method cannot observe outside of the loop. If state is required, implement
 /// [`WaitStrategy`] or [`TryWaitStrategy`] instead.
 ///
 /// If a type, `T`, implements [`Waiting`], then `T` will implement [`WaitStrategy`], and
 /// `Timeout<T>` will implement [`TryWaitStrategy`].
 ///
 /// As a consequence of the above blanket impls, do _not_ implement [`Waiting`] for a type if you
-/// want to provide your own implementations of [`WaitStrategy`] or [`TryWaitStrategy`].
+/// want to provide your own implementations of [`WaitStrategy`] for `T`, or [`TryWaitStrategy`]
+/// for `Timeout<T>`.
 ///
 /// # Examples
 /// ```
@@ -33,22 +34,31 @@ pub trait Waiting {
     fn waiting(&self);
 }
 
-/// todo docs
-/// Implement if you want control over the loop.
+/// Implement to provide a wait loop which runs as a handle waits for a sequence.
 ///
-/// must return final barrier sequence
-/// must wait until barrier sequence >= `desired_seq`
+/// If a wait strategy does not require either control over loop behaviour, or carrying state
+/// across loop iterations, then prefer implementing [`Waiting`], which provides a safe interface.
 ///
-/// todo: does this need to be unsafe, since it's so easy to cause undefined behaviour with it?
+/// # Safety
+///
+/// This trait is unsafe as there is no guard against invalid implementations of
+/// [`WaitStrategy::wait`] which may cause Undefined Behaviour. A valid implementation must ensure
+/// that the following two conditions holds:
+/// 1) [`WaitStrategy::wait`] must only return once [`Barrier::sequence`] `>= desired_seq` is true.
+/// 2) [`WaitStrategy::wait`] must only return a value, `x`, such that `x <=` [`Barrier::sequence`].
+///
+/// If [`WaitStrategy::wait`] does not abide by these conditions, then reads and writes may
+/// overlap, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// # Examples
 /// ```
 /// use ansa::{Barrier, wait::WaitStrategy};
 ///
-/// /// Counts and prints iterations of the wait loop.
+/// /// Prints the count of wait loop iterations after waiting.
 /// struct CountIters;
 ///
-/// impl WaitStrategy for CountIters {
+/// // SAFETY: only returns once barrier_seq >= desired_seq, with barrier_seq itself
+/// unsafe impl WaitStrategy for CountIters {
 ///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
 ///         let mut counter = 0;
 ///         let mut barrier_seq = barrier.sequence();
@@ -61,12 +71,22 @@ pub trait Waiting {
 ///     }
 /// }
 /// ```
-pub trait WaitStrategy {
-    /// Wait for `barrier` sequence to reach `desired_seq`.
+pub unsafe trait WaitStrategy {
+    /// Runs the wait loop.
+    ///
+    /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
+    /// Call [`Barrier::sequence`] to views updates of the barrier position.
+    ///
+    /// The following two conditions must hold:
+    /// 1) Must only return once [`Barrier::sequence`] `>= desired_seq` is true.
+    /// 2) Must return a value, `x`, such that `x <=` [`Barrier::sequence`].
+    ///
+    /// The return value may be used by handles to read or write elements to the ring buffer, but
+    /// this is not guaranteed.
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
 
-impl<W> WaitStrategy for W
+unsafe impl<W> WaitStrategy for W
 where
     W: Waiting,
 {
@@ -76,12 +96,74 @@ where
     }
 }
 
+/// Implement to provide a fallible wait loop which runs as a handle waits for a sequence.
+///
+/// todo docs
+/// Implement if you want control over the loop and to break out of the wait loop with an error.
+///
+/// # Examples
+/// ```
+/// use ansa::{Barrier, wait::TryWaitStrategy};
+///
+/// /// waits until `max` iterations of the wait loop
+/// struct MaxIters {
+///     max_iters: usize
+/// }
+///
+/// struct MaxItersError;
+///
+/// unsafe impl TryWaitStrategy for MaxIters {
+///     type Error = MaxItersError;
+///
+///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
+///         let mut iters = 0;
+///         let mut barrier_seq = barrier.sequence();
+///         while barrier_seq < desired_seq {
+///             if iters >= self.max_iters {
+///                 return Err(MaxItersError)
+///             }
+///             barrier_seq = barrier.sequence();
+///             iters += 1;
+///         }
+///         Ok(barrier_seq)
+///     }
+/// }
+/// ```
+pub unsafe trait TryWaitStrategy {
+    type Error;
+
+    /// Runs the fallible wait loop.
+    ///
+    /// Wait for `barrier` sequence to reach `desired_seq`, or error.
+    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
+}
+
 #[inline]
 fn wait_loop(desired: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
     loop {
         let barrier_seq = barrier.sequence();
         if barrier_seq >= desired {
             break barrier_seq;
+        }
+        waiting()
+    }
+}
+
+#[inline]
+fn wait_loop_timeout(
+    desired: i64,
+    barrier: &Barrier,
+    duration: Duration,
+    mut waiting: impl FnMut(),
+) -> Result<i64, TimedOut> {
+    let timer = Instant::now();
+    loop {
+        let barrier_seq = barrier.sequence();
+        if barrier_seq >= desired {
+            break Ok(barrier_seq);
+        }
+        if timer.elapsed() > duration {
+            break Err(TimedOut);
         }
         waiting()
     }
@@ -160,7 +242,7 @@ pub struct WaitBlocking {
 #[derive(Copy, Clone, Debug)]
 struct Empty;
 
-// All handles share the same condvar
+// All instances of WaitBlocking share the same (condvar, mutex) pair
 static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
     LazyLock::new(|| Arc::new((Condvar::new(), Mutex::new(Empty))));
 
@@ -183,7 +265,7 @@ impl WaitBlocking {
     }
 }
 
-impl WaitStrategy for WaitBlocking {
+unsafe impl WaitStrategy for WaitBlocking {
     #[inline]
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let (condvar, mutex) = &*self.pair;
@@ -195,7 +277,7 @@ impl WaitStrategy for WaitBlocking {
     }
 }
 
-impl TryWaitStrategy for Timeout<WaitBlocking> {
+unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
     type Error = TimedOut;
 
     #[inline]
@@ -229,7 +311,7 @@ impl<W> WaitPhased<W> {
     }
 }
 
-impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
+unsafe impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let timer = Instant::now();
         loop {
@@ -246,7 +328,7 @@ impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
     }
 }
 
-impl<W: TryWaitStrategy> TryWaitStrategy for WaitPhased<W> {
+unsafe impl<W: TryWaitStrategy> TryWaitStrategy for WaitPhased<W> {
     type Error = W::Error;
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
@@ -265,67 +347,9 @@ impl<W: TryWaitStrategy> TryWaitStrategy for WaitPhased<W> {
     }
 }
 
-/// todo docs
-/// Implement if you want control over the loop and to break out of the wait loop with an error.
-///
-/// # Examples
-/// ```
-/// use ansa::{Barrier, wait::TryWaitStrategy};
-///
-/// /// waits until `max` iterations of the wait loop
-/// struct MaxWait {
-///     max_iters: usize
-/// }
-///
-/// struct MaxItersError;
-///
-/// impl TryWaitStrategy for MaxWait {
-///     type Error = MaxItersError;
-///
-///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
-///         let mut iters = 0;
-///         let mut barrier_seq = barrier.sequence();
-///         while barrier_seq < desired_seq {
-///             if iters >= self.max_iters {
-///                 return Err(MaxItersError)
-///             }
-///             barrier_seq = barrier.sequence();
-///             iters += 1;
-///         }
-///         Ok(barrier_seq)
-///     }
-/// }
-/// ```
-pub trait TryWaitStrategy {
-    type Error;
-
-    /// Wait for `barrier` sequence to reach `desired_seq`, or error.
-    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
-}
-
 /// Indicates that the waiting handle has timed out.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TimedOut;
-
-#[inline]
-fn wait_loop_timeout(
-    desired: i64,
-    barrier: &Barrier,
-    duration: Duration,
-    mut waiting: impl FnMut(),
-) -> Result<i64, TimedOut> {
-    let timer = Instant::now();
-    loop {
-        let barrier_seq = barrier.sequence();
-        if barrier_seq >= desired {
-            break Ok(barrier_seq);
-        }
-        if timer.elapsed() > duration {
-            break Err(TimedOut);
-        }
-        waiting()
-    }
-}
 
 /// Wrapper struct for wait strategies which provides a timeout capability.
 ///
@@ -356,13 +380,13 @@ impl<W> Timeout<W> {
     }
 }
 
-impl<W> TryWaitStrategy for Timeout<W>
+unsafe impl<W> TryWaitStrategy for Timeout<W>
 where
     W: Waiting,
 {
     type Error = TimedOut;
 
-    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
+    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         wait_loop_timeout(desired_seq, barrier, self.duration, || {
             self.strategy.waiting()
         })
