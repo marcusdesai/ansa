@@ -93,8 +93,8 @@ where
     /// follows. In the disruptor pattern, management of ring buffer accesses works by ordering
     /// handles according to a precedence, or "follows", relationship.
     ///
-    /// Handle `A` follows handle `B` means that `B` accesses events published to the ring buffer
-    /// exclusively before `A`. See: [`Follows`] for more.
+    /// If handle `A` follows handle `B`, then `B` accesses events on the ring buffer exclusively
+    /// before `A`. See: [`Follows`] for more.
     ///
     /// These precedence relationships must form a directed acyclic graph, where handles follow the
     /// lead producer or other handles. No loops are allowed.
@@ -106,7 +106,7 @@ where
     /// # Examples
     ///
     /// Consumer handles do not necessarily need to follow one another, which allows for them to
-    /// read the ring buffer in parallel.
+    /// read the ring buffer concurrently.
     /// ```
     /// use ansa::*;
     ///
@@ -125,8 +125,8 @@ where
     /// coordinating with each other.
     ///
     /// But, producer handles must always either follow or be followed by every other handle. If
-    /// this were not true, then overlapping writes to the buffer (read: mutable aliasing) could
-    /// occur.
+    /// this restriction was not in place, then overlapping writes to the buffer (read: mutable
+    /// aliasing) would be possible.
     ///
     /// In more technical terms: it is possible to add consumer handles which are partially ordered
     /// with respect to other consumer handles, but all handles (of any kind) must be totally
@@ -152,7 +152,7 @@ where
     ///     .unwrap();
     /// ```
     ///
-    /// See: [`MultiProducer`](crate::handles::MultiProducer) for a means to parallelize writes.
+    /// See: [`MultiProducer`](crate::handles::MultiProducer) for one means to parallelize writes.
     ///
     /// See: [`BuildError`], for full details on error states encountered when building the
     /// disruptor. Such invalid states are most often caused by inappropriate calls to
@@ -168,9 +168,9 @@ where
             Follows::LeadProducer => {
                 self.follows_lead.insert(id);
             }
-            Follows::Handles(cs) => cs.iter().for_each(|c| {
+            Follows::Handles(ids) => ids.iter().for_each(|follow_id| {
                 self.followed_by
-                    .entry(*c)
+                    .entry(*follow_id)
                     .and_modify(|vec| vec.push(id))
                     .or_insert_with(|| vec![id]);
             }),

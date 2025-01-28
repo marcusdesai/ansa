@@ -412,7 +412,8 @@ unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
 ///
 /// # Performance
 ///
-/// Best used when low latency is not a priority verses CPU resource use.
+/// Highly dependent on the fallback strategy, but best used when low latency is not a priority
+/// verses CPU resource use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitPhased<W> {
     spin_duration: Duration,
@@ -520,8 +521,8 @@ impl<W> Timeout<W> {
     /// Construct a `Timeout` with the given strategy.
     ///
     /// `duration` sets the amount of time after which the strategy will time out. Timeout will not
-    /// occur before `duration` elapses, and will occur shortly after that point. Timings should
-    /// not be treated as exact.
+    /// occur before `duration` elapses, but may not occur immediately after that point either.
+    /// Timings should not be treated as exact.
     pub fn new(duration: Duration, strategy: W) -> Self {
         Timeout { duration, strategy }
     }
