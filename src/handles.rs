@@ -175,7 +175,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             // 1) We know that this sequence has been claimed by only one producer, so multiple
             //    mutable refs to this element will not be created.
             // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
-            //    no reads of this data will be attempted.
+            //    no other accesses of this data will be attempted.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == claim_end);
         }
@@ -344,7 +344,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
         // 1) We know that this sequence has been claimed by only one producer, so multiple
         //    mutable refs to this element will not be created.
         // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
-        //    no reads of this data will be attempted.
+        //    no other accesses of this data will be attempted.
         // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = current_claim + 1;
@@ -427,6 +427,7 @@ fn claim(claim: &Cursor, size: i64) -> (i64, i64) {
 }
 
 /// todo docs
+/// Writes events to the disruptor.
 #[derive(Debug)]
 pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>,
@@ -502,7 +503,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
             // 1) We know that there is only one producer accessing this section of the buffer, so
             //    multiple mutable refs cannot exist.
             // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
-            //    no reads of this data will be attempted.
+            //    no other accesses of this data will be attempted.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == batch_end);
         }
@@ -602,7 +603,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
         // 1) We know that there is only one producer accessing this section of the buffer, so
         //    multiple mutable refs cannot exist.
         // 2) Exclusive access to this sequence is ensured by the Acquire-Release barrier, so
-        //    no reads of this data will be attempted.
+        //    no other accesses of this data will be attempted.
         // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
         //    checks on BATCH size made when creating this struct.
         let mut seq = producer_seq + 1;
@@ -666,6 +667,10 @@ where
     }
 }
 
+/// Reads events from the disruptor.
+///
+/// A `Consumer` has only read access to events on the ring buffer, but as a consequence, multiple
+/// `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -742,7 +747,48 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// todo docs
+    /// Read a batch of elements from the buffer with the given `size`.
+    ///
+    /// Strictly, `size` must be less than the size of the ring buffer, but practically it must be
+    /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
+    /// waiting for the entire buffer to become available.
+    ///
+    /// `read` is a callback which takes the following parameters:\
+    /// `read(event: &E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is the event being read from the buffer.
+    /// - `sequence` is the sequence number at which this event is read.
+    /// - `batch_end` indicates whether this event is the last in the requested batch.
+    ///
+    /// The logic of this method, as provided by `ansa`, is guaranteed not to panic. Please report
+    /// an issue if this method panics due to the library implementation.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use ansa::*;
+    ///
+    /// let event = 0i64;
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || event)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let consumer = handles.take_consumer(0).unwrap();
+    ///
+    /// fn read(event: &i64, sequence: i64, batch_end: bool) {
+    ///     // do something
+    /// }
+    ///
+    /// consumer.batch_read(8, read);
+    ///
+    /// // or using a closure
+    /// consumer.batch_read(8, |event, seq, end| {
+    ///     // do something
+    /// });
+    /// ```
+    /// The above is contrived and meant only to show straightforwardly how the API can be used.
+    /// For more representative usage examples, see the top level [`ansa`](crate) docs.
     pub fn batch_read<F>(&self, size: u32, read: F)
     where
         F: FnMut(&E, i64, bool),

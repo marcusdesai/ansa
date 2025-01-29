@@ -1,5 +1,12 @@
 //! MPMC queue implementation using the disruptor pattern
 //! todo
+//!
+//! to mention:
+//! - no panics
+//! - sequence limit (i64::MAX)
+//! - Basics of how the disruptor works
+//! - traffic jam analogy
+//!
 
 mod builder;
 mod handles;

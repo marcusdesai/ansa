@@ -1,4 +1,4 @@
-//! Provides strategies for handles waiting for sequences on the ring buffer.
+//! Provides strategies used by handles when waiting for sequences on the ring buffer.
 //!
 //! Also provided are three traits for implementing your own wait logic.
 //!
@@ -29,15 +29,15 @@
 //! strategies are zero-sized. These sizes are also unlikely to change, but this is also **not**
 //! guaranteed.
 //!
-//! | Strategy                       | size |
-//! |--------------------------------|------|
-//! | [`WaitBusy`]                   | 0    |
-//! | [`WaitBusyHint`]               | 0    |
-//! | [`WaitYield`]                  | 0    |
-//! | [`WaitSleep`]                  | 8    |
-//! | [`WaitBlocking`]               | 16   |
-//! | [`WaitPhased<W>`](WaitPhased)  | 16   |
-//! | [`Timeout<W>`](Timeout)        | 8    |
+//! | Strategy                      | size |
+//! |-------------------------------|------|
+//! | [`WaitBusy`]                  | 0    |
+//! | [`WaitBusyHint`]              | 0    |
+//! | [`WaitYield`]                 | 0    |
+//! | [`WaitSleep`]                 | 8    |
+//! | [`WaitBlocking`]              | 16   |
+//! | [`WaitPhased<W>`](WaitPhased) | 16   |
+//! | [`Timeout<W>`](Timeout)       | 8    |
 //!
 //! Both [`WaitPhased`] and [`Timeout`] can be considerably larger. For example:
 //! ```
@@ -47,9 +47,9 @@
 //! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
 //! ```
 //!
-//! By the by, this concern is exactly the reason for limiting the provided strategies to wait
-//! durations of `u64::MAX` nanoseconds, rather than the full length of time `Duration` can
-//! represent. It is to keep their sizes small.
+//! By the by, various provided strategies are limited to wait durations of `u64::MAX` nanoseconds
+//! in order to keep them small. Using [`Duration`] instead would double the minimum size of the
+//! relevant strategies, and would be wasteful, as wait durations are likely to be short.
 //! ```
 //! use std::time::Duration;
 //!
@@ -104,10 +104,10 @@ pub trait Waiting {
 /// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. A valid implementation must ensure
 /// that the following two conditions holds:
 /// 1) `wait` may only return when `barrier sequence >= desired_seq` is true.
-/// 2) `wait` must return a value, `x`, such that `x <= barrier sequence`.
+/// 2) `wait` must return the last read `barrier sequence`.
 ///
-/// If `wait` does not abide by these conditions, then reads and writes to the ring buffer may
-/// overlap, causing Undefined Behaviour due to mutable aliasing.
+/// If `wait` does not abide by these conditions, then writes to the ring buffer may overlap with
+/// other accesses, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// # Examples
 /// ```
@@ -130,6 +130,7 @@ pub trait Waiting {
 ///     }
 /// }
 /// ```
+///
 /// The following example shows only _some_ of the possible implementation mistakes that will
 /// cause UB.
 /// ```
@@ -137,6 +138,7 @@ pub trait Waiting {
 ///
 /// struct BadWait;
 ///
+/// // ** NOT SAFE **
 /// unsafe impl WaitStrategy for BadWait {
 ///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
 ///         let mut barrier_seq = barrier.sequence();
@@ -162,7 +164,7 @@ pub unsafe trait WaitStrategy {
     ///
     /// The following two conditions must hold:
     /// 1) May only return when `barrier sequence >= desired_seq` is true.
-    /// 2) Must return a value, `x`, such that `x <= barrier sequence`.
+    /// 2) Must return the last read `barrier sequence`.
     ///
     /// The return value may be used by handles to determine which buffer elements to access, but
     /// this is not guaranteed.
@@ -192,10 +194,10 @@ where
 /// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. A valid implementation
 /// must ensure that the following two conditions holds:
 /// 1) `try_wait` may only return when `barrier sequence >= desired_seq` is true.
-/// 2) `try_wait`, if successful, must return a value, `x`, such that `x <= barrier sequence`.
+/// 2) `try_wait`, if successful, must return the last read `barrier sequence`.
 ///
-/// If `try_wait` does not abide by these conditions, then reads and writes to the ring buffer may
-/// overlap, causing Undefined Behaviour due to mutable aliasing.
+/// If `try_wait` does not abide by these conditions, then writes to the ring buffer may overlap
+/// with other accesses, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// Note that there are no conditions limiting when `try_wait` can return an error.
 ///
@@ -210,7 +212,7 @@ where
 ///
 /// struct MaxItersError;
 ///
-/// // SAFETY: try_wait returns once barrier_seq >= desired_seq, with barrier_seq itself
+/// // SAFETY: only successful if barrier_seq >= desired_seq; returns barrier_seq
 /// unsafe impl TryWaitStrategy for MaxIters {
 ///     type Error = MaxItersError;
 ///
@@ -228,6 +230,27 @@ where
 ///     }
 /// }
 /// ```
+/// Implementing a no wait strategy is also possible.
+/// ```
+/// use ansa::{Barrier, wait::TryWaitStrategy};
+///
+/// struct NoWait;
+///
+/// struct NoWaitError;
+///
+/// // SAFETY: only successful if barrier_seq >= desired_seq; returns barrier_seq
+/// unsafe impl TryWaitStrategy for NoWait {
+///     type Error = NoWaitError;
+///
+///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
+///         match barrier.sequence() {
+///             barrier_seq if barrier_seq < desired_seq => Err(NoWaitError),
+///             barrier_seq => Ok(barrier_seq),
+///         }
+///     }
+/// }
+/// ```
+///
 /// The following example shows only _some_ of the possible implementation mistakes that will
 /// cause UB.
 /// ```
@@ -235,10 +258,9 @@ where
 ///
 /// struct BadWait;
 ///
-/// struct BadWaitError;
-///
+/// // ** NOT SAFE **
 /// unsafe impl TryWaitStrategy for BadWait {
-///     type Error = BadWaitError;
+///     type Error = ();
 ///
 ///     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
 ///         let mut barrier_seq = barrier.sequence();
@@ -266,7 +288,7 @@ pub unsafe trait TryWaitStrategy {
     ///
     /// The following two conditions must hold:
     /// 1) May only return when `barrier sequence >= desired_seq` is true.
-    /// 2) If successful, must return a value, `x`, such that `x <= barrier sequence`.
+    /// 2) If successful, must return the last read `barrier sequence`.
     ///
     /// No conditions are placed on returning errors.
     ///
