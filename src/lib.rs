@@ -6,6 +6,9 @@
 //! - sequence limit (i64::MAX)
 //! - Basics of how the disruptor works
 //! - traffic jam analogy
+//! - features
+//! - examples
+//! - terminology (ring buffer, handle, etc...)
 //!
 
 mod builder;

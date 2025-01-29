@@ -47,9 +47,9 @@
 //! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
 //! ```
 //!
-//! By the by, various provided strategies are limited to wait durations of `u64::MAX` nanoseconds
-//! in order to keep them small. Using [`Duration`] instead would double the minimum size of the
-//! relevant strategies, and would be wasteful, as wait durations are likely to be short.
+//! By the by, various provided strategies are limited to wait durations of `u64::MAX` nanoseconds,
+//! which is done in order to keep them small. Using [`Duration`] instead would double the minimum
+//! size of the relevant strategies, which would be wasteful as wait durations are likely to be short.
 //! ```
 //! use std::time::Duration;
 //!

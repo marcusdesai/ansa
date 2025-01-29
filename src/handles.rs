@@ -671,6 +671,15 @@ where
 ///
 /// A `Consumer` has only read access to events on the ring buffer, but as a consequence, multiple
 /// `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
+///
+/// `Consumer` provides fallible or non-fallible methods depending on which traits are implemented
+/// by its wait strategy, `W`.
+/// - If `W` implements [`TryWaitStrategy`], then fallible methods are provided.
+/// - If `W` implements [`WaitStrategy`], then non-fallible methods are provided.
+///
+/// For example:
+/// - `Consumer<_, Timeout<WaitBusy>>` provides `try_batch_read` and `try_read`.
+/// - Whereas `Consumer<_, WaitBusy>` provides `batch_read` and `read`.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -683,7 +692,7 @@ impl<E, W> Consumer<E, W> {
     /// Returns an [`ExactConsumer`] if successful, otherwise returns the consumer which called
     /// this method.
     ///
-    /// Three conditions must be met to create an [`ExactConsumer`]:
+    /// Three conditions must be met to create an `ExactConsumer`:
     /// 1) `BATCH` must not be zero.
     /// 2) The buffer size associated with this consumer must be divisible by `BATCH`.
     /// 3) This consumer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
@@ -751,7 +760,7 @@ where
     ///
     /// Strictly, `size` must be less than the size of the ring buffer, but practically it must be
     /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
-    /// waiting for the entire buffer to become available.
+    /// waiting for large portions of the buffer to become available.
     ///
     /// `read` is a callback which takes the following parameters:\
     /// `read(event: &E, sequence: i64, batch_end: bool)`
@@ -787,8 +796,8 @@ where
     ///     // do something
     /// });
     /// ```
-    /// The above is contrived and meant only to show straightforwardly how the API can be used.
-    /// For more representative usage examples, see the top level [`ansa`](crate) docs.
+    /// The code above is contrived and meant only to show straightforwardly how the API can be
+    /// used. For more representative usage examples, see the top level [`ansa`](crate) docs.
     pub fn batch_read<F>(&self, size: u32, read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -802,6 +811,8 @@ where
     }
 
     /// Specialised function which will always consume *all* available buffer elements when called.
+    ///
+    /// Can flexibly read as many events as are available to consume.
     ///
     /// See [`batch_read`](Consumer::batch_read) for further documentation.
     pub fn read<F>(&self, read: F)
