@@ -26,21 +26,30 @@
 //! | [`ExactMultiProducer`](crate::handles::ExactMultiProducer) | 40   |
 //!
 //! And here are the minimum sizes of the provided strategies, again assuming nested wait
-//! strategies are zero-sized. These sizes are also unlikely to change, but again, this is **not**
+//! strategies are zero-sized. These sizes are also unlikely to change, but this is also **not**
 //! guaranteed.
 //!
 //! | Strategy                       | size |
 //! |--------------------------------|------|
-//! | [`WaitBusy`](WaitBusy)         | 0    |
-//! | [`WaitBusyHint`](WaitBusyHint) | 0    |
-//! | [`WaitYield`](WaitYield)       | 0    |
-//! | [`WaitSleep`](WaitSleep)       | 8    |
-//! | [`WaitBlocking`](WaitBlocking) | 16   |
+//! | [`WaitBusy`]                   | 0    |
+//! | [`WaitBusyHint`]               | 0    |
+//! | [`WaitYield`]                  | 0    |
+//! | [`WaitSleep`]                  | 8    |
+//! | [`WaitBlocking`]               | 16   |
 //! | [`WaitPhased<W>`](WaitPhased)  | 16   |
 //! | [`Timeout<W>`](Timeout)        | 8    |
 //!
-//! Note that, the provided strategies are limited to wait durations of `u64::MAX` nanoseconds in
-//! order to keep their sizes small.
+//! Both [`WaitPhased`] and [`Timeout`] can be considerably larger. For example:
+//! ```
+//! use ansa::wait::*;
+//!
+//! assert_eq!(size_of::<WaitPhased<WaitBlocking>>(), 32);
+//! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
+//! ```
+//!
+//! By the by, this concern is exactly the reason for limiting the provided strategies to wait
+//! durations of `u64::MAX` nanoseconds, rather than the full length of time `Duration` can
+//! represent. It is to keep their sizes small.
 //! ```
 //! use std::time::Duration;
 //!
@@ -618,21 +627,5 @@ where
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let duration = Duration::from_nanos(self.duration);
         wait_loop_timeout(desired_seq, barrier, duration, || self.strategy.waiting())
-    }
-}
-
-#[cfg(test)]
-mod blah {
-    use super::*;
-
-    #[test]
-    fn test() {
-        println!("{}", size_of::<WaitBusy>());
-        println!("{}", size_of::<WaitBusyHint>());
-        println!("{}", size_of::<WaitYield>());
-        println!("{}", size_of::<WaitSleep>());
-        println!("{}", size_of::<WaitBlocking>());
-        println!("{}", size_of::<WaitPhased<WaitBusy>>());
-        println!("{}", size_of::<Timeout<WaitBusy>>());
     }
 }
