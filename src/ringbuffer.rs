@@ -23,14 +23,15 @@ impl<E> RingBuffer<E> {
     /// Create a [`RingBuffer`]. Uses a boxed slice for storage, ensuring data is held contiguously
     /// in memory.
     ///
-    /// `size` must be a non-zero power of two.
+    /// `size` must be a non-zero power of two. Error flagging for invalid sizes is handled at a
+    /// higher level in the API, so callers must uphold this constraint.
     pub(crate) fn new<F>(size: usize, mut factory: F) -> Self
     where
         F: FnMut() -> E,
     {
         assert!(
             size > 0 && (size & (size - 1)) == 0,
-            "size: {size} not power of 2"
+            "size must be non-zero power of 2; found: {size}"
         );
         let slots: Box<[UnsafeCell<E>]> = (0..size).map(|_| UnsafeCell::new(factory())).collect();
         RingBuffer { slots }
@@ -87,6 +88,9 @@ fn mod_m_po2(n: i64, m: i64) -> i64 {
 mod tests {
     use super::*;
     use rand::{thread_rng, Rng};
+
+    // This test is relatively unnecessary, but it serves as a guard, incase a typographic error in
+    // `mod_m_po2` slips through without being noticed.
     #[test]
     #[cfg_attr(miri, ignore)] // miri works on this code but is slow, and its check are unnecessary
     fn validate_mod_m_square() {

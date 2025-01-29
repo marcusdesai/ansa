@@ -762,12 +762,16 @@ where
     /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
     /// waiting for large portions of the buffer to become available.
     ///
-    /// `read` is a callback which takes the following parameters:\
+    /// `read` is a callback with the signature:
     /// `read(event: &E, sequence: i64, batch_end: bool)`
     ///
     /// - `event` is the event being read from the buffer.
     /// - `sequence` is the sequence number at which this event is read.
     /// - `batch_end` indicates whether this event is the last in the requested batch.
+    ///
+    /// The logic in `read` should not panic, as doing so will cause the `Consumer` to stop and
+    /// become unrecoverable. If any handle in the disruptor permanently stops, the entire
+    /// disruptor will eventually permanently stall.
     ///
     /// The logic of this method, as provided by `ansa`, is guaranteed not to panic. Please report
     /// an issue if this method panics due to the library implementation.
