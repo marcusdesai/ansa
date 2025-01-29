@@ -2,7 +2,51 @@
 //!
 //! Also provided are three traits for implementing your own wait logic.
 //!
-//! todo: note on wait strategy sizes and how that relates to handle and cache sizes
+//! # Performance
+//!
+//! Each strategy provides a tradeoff between latency and CPU use, but this is not the only aspect
+//! to consider when optimizing performance. The size of the strategy is also an important factor.
+//!
+//! Each handle struct includes its own instance of the wait strategy used by a single disruptor.
+//! Hence, the size of the strategy can have an effect on performance if, for example, its size
+//! means the handle may no longer fit in a single cache line.
+//!
+//! Cache lines are commonly `32`, `64`, or `128` bytes. With `64` bytes being the most common.
+//!
+//! Presently, when the wait strategy is zero-sized, each handle has the following size (in bytes).
+//! It is very likely that these sizes will remain the same, but it is **not** guaranteed.
+//!
+//! | Handle                                                     | size |
+//! |------------------------------------------------------------|------|
+//! | [`Consumer`](crate::handles::Consumer)                     | 32   |
+//! | [`ExactConsumer`](crate::handles::ExactConsumer)           | 32   |
+//! | [`Producer`](crate::handles::Producer)                     | 32   |
+//! | [`ExactProducer`](crate::handles::ExactProducer)           | 32   |
+//! | [`MultiProducer`](crate::handles::MultiProducer)           | 40   |
+//! | [`ExactMultiProducer`](crate::handles::ExactMultiProducer) | 40   |
+//!
+//! And here are the minimum sizes of the provided strategies, again assuming nested wait
+//! strategies are zero-sized. These sizes are also unlikely to change, but again, this is **not**
+//! guaranteed.
+//!
+//! | Strategy                       | size |
+//! |--------------------------------|------|
+//! | [`WaitBusy`](WaitBusy)         | 0    |
+//! | [`WaitBusyHint`](WaitBusyHint) | 0    |
+//! | [`WaitYield`](WaitYield)       | 0    |
+//! | [`WaitSleep`](WaitSleep)       | 8    |
+//! | [`WaitBlocking`](WaitBlocking) | 16   |
+//! | [`WaitPhased<W>`](WaitPhased)  | 16   |
+//! | [`Timeout<W>`](Timeout)        | 8    |
+//!
+//! Note that, the provided strategies are limited to wait durations of `u64::MAX` nanoseconds in
+//! order to keep their sizes small.
+//! ```
+//! use std::time::Duration;
+//!
+//! assert_eq!(size_of::<Duration>(), 16);
+//! assert_eq!(size_of::<u64>(), 8);
+//! ```
 
 use crate::handles::Barrier;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
@@ -111,7 +155,7 @@ pub unsafe trait WaitStrategy {
     /// 1) May only return when `barrier sequence >= desired_seq` is true.
     /// 2) Must return a value, `x`, such that `x <= barrier sequence`.
     ///
-    /// The return value may be used by handles to read or write elements to the ring buffer, but
+    /// The return value may be used by handles to determine which buffer elements to access, but
     /// this is not guaranteed.
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
@@ -308,6 +352,8 @@ impl Waiting for WaitYield {
 
 /// Busy-wait, but sleep the current thread on each iteration of the wait loop.
 ///
+/// The duration of the sleep is limited to `u64::MAX` nanoseconds.
+///
 /// # Performance
 ///
 /// Trades latency for CPU resource use, depending on the length of the sleep.
@@ -316,21 +362,25 @@ impl Waiting for WaitYield {
 /// [`WaitBlocking`] which will wake when notified. Note also that spurious wakes can occur.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitSleep {
-    duration: Duration,
+    duration: u64,
 }
 
 impl WaitSleep {
-    /// Construct a [`WaitSleep`] strategy which will sleep for the given [`Duration`].
+    /// Construct a [`WaitSleep`] strategy which will sleep for the given `duration`.
+    ///
+    /// `duration` will be truncated to `u64::MAX` nanoseconds.
     #[inline]
     pub fn new(duration: Duration) -> Self {
-        WaitSleep { duration }
+        WaitSleep {
+            duration: duration.as_nanos() as u64,
+        }
     }
 }
 
 impl Waiting for WaitSleep {
     #[inline]
     fn waiting(&self) {
-        std::thread::sleep(self.duration)
+        std::thread::sleep(Duration::from_nanos(self.duration))
     }
 }
 
@@ -338,6 +388,8 @@ impl Waiting for WaitSleep {
 ///
 /// Alternatively, will wake and check whether the barrier has moved after a given duration
 /// (defaulted to `200` microseconds).
+///
+/// The blocking duration is limited to `u64::MAX` nanoseconds.
 ///
 /// # Performance
 ///
@@ -347,7 +399,7 @@ impl Waiting for WaitSleep {
 #[derive(Clone, Debug)]
 pub struct WaitBlocking {
     pair: Arc<(Condvar, Mutex<Empty>)>,
-    duration: Duration,
+    duration: u64,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -364,16 +416,18 @@ impl WaitBlocking {
     pub fn new() -> Self {
         WaitBlocking {
             pair: Arc::clone(&BLOCK_VAR),
-            duration: Duration::from_micros(200),
+            duration: 200_000, // 200 micros in nanos
         }
     }
 
     /// Construct an instance of [`WaitBlocking`] with the given wake `duration`.
+    ///
+    /// `duration` will be truncated to `u64::MAX` nanoseconds.
     #[inline]
-    pub fn with_timeout(duration: Duration) -> Self {
+    pub fn wake_after(duration: Duration) -> Self {
         WaitBlocking {
             pair: Arc::clone(&BLOCK_VAR),
-            duration,
+            duration: duration.as_nanos() as u64,
         }
     }
 }
@@ -383,8 +437,9 @@ unsafe impl WaitStrategy for WaitBlocking {
     #[inline]
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let (condvar, mutex) = &*self.pair;
+        let block_duration = Duration::from_nanos(self.duration);
         let barrier_seq = wait_loop(desired_seq, barrier, || {
-            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.duration);
+            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), block_duration);
         });
         condvar.notify_all();
         barrier_seq
@@ -398,8 +453,10 @@ unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
     #[inline]
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
         let (condvar, mutex) = &*self.strategy.pair;
-        let barrier_seq = wait_loop_timeout(desired_seq, barrier, self.duration, || {
-            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), self.strategy.duration);
+        let block_duration = Duration::from_nanos(self.strategy.duration);
+        let timeout_duration = Duration::from_nanos(self.duration);
+        let barrier_seq = wait_loop_timeout(desired_seq, barrier, timeout_duration, || {
+            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), block_duration);
         })?;
         condvar.notify_all();
         Ok(barrier_seq)
@@ -410,14 +467,16 @@ unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
 ///
 /// This strategy busy spins, then yields, and finally calls the fallback strategy.
 ///
+/// Both durations for spinning and yielding are limited to `u64::MAX` nanoseconds.
+///
 /// # Performance
 ///
 /// Highly dependent on the fallback strategy, but best used when low latency is not a priority
 /// verses CPU resource use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitPhased<W> {
-    spin_duration: Duration,
-    yield_duration: Duration,
+    spin_duration: u64,
+    yield_duration: u64,
     fallback: W,
 }
 
@@ -428,27 +487,36 @@ impl<W> WaitPhased<W> {
     ///
     /// `spin_duration` sets the duration for which to busy-spin. `yield_duration` does the same
     /// for yielding to the OS.
+    ///
+    /// `spin_duration` and `yield_duration` are truncated to `u64::MAX` nanoseconds.
     pub fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
+        let spin_nanos = spin_duration.as_nanos() as u64;
+        let yield_nanos = (spin_duration + yield_duration).as_nanos() as u64;
         WaitPhased {
-            spin_duration,
-            yield_duration: spin_duration + yield_duration,
+            spin_duration: spin_nanos,
+            yield_duration: yield_nanos,
             fallback,
         }
     }
 }
 
 // SAFETY: wait only returns once barrier_seq >= desired_seq, with barrier_seq itself
-unsafe impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
+unsafe impl<W> WaitStrategy for WaitPhased<W>
+where
+    W: WaitStrategy,
+{
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let timer = Instant::now();
+        let spin_dur = Duration::from_nanos(self.spin_duration);
+        let yield_dur = Duration::from_nanos(self.yield_duration);
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
                 break barrier_seq;
             }
             match timer.elapsed() {
-                dur if dur < self.spin_duration => (),
-                dur if dur < self.yield_duration => std::thread::yield_now(),
+                dur if dur < spin_dur => (),
+                dur if dur < yield_dur => std::thread::yield_now(),
                 _ => return self.fallback.wait(desired_seq, barrier),
             }
         }
@@ -456,19 +524,24 @@ unsafe impl<W: WaitStrategy> WaitStrategy for WaitPhased<W> {
 }
 
 // SAFETY: try_wait only returns once barrier_seq >= desired_seq, with barrier_seq itself
-unsafe impl<W: TryWaitStrategy> TryWaitStrategy for WaitPhased<W> {
+unsafe impl<W> TryWaitStrategy for WaitPhased<W>
+where
+    W: TryWaitStrategy,
+{
     type Error = W::Error;
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let timer = Instant::now();
+        let spin_dur = Duration::from_nanos(self.spin_duration);
+        let yield_dur = Duration::from_nanos(self.yield_duration);
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
                 break Ok(barrier_seq);
             }
             match timer.elapsed() {
-                dur if dur < self.spin_duration => (),
-                dur if dur < self.yield_duration => std::thread::yield_now(),
+                dur if dur < spin_dur => (),
+                dur if dur < yield_dur => std::thread::yield_now(),
                 _ => return self.fallback.try_wait(desired_seq, barrier),
             }
         }
@@ -486,6 +559,8 @@ pub struct TimedOut;
 /// This struct is not required for implementing [`TryWaitStrategy`], it is only a convenience
 /// for automating implementations of this trait.
 ///
+/// The length of the timeout is limited to `u64::MAX` nanoseconds.
+///
 /// # Examples
 /// ```
 /// use ansa::*;
@@ -502,7 +577,7 @@ pub struct TimedOut;
 /// ```
 #[derive(Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
-    duration: Duration,
+    duration: u64,
     strategy: W,
 }
 
@@ -523,8 +598,13 @@ impl<W> Timeout<W> {
     /// `duration` sets the amount of time after which the strategy will time out. Timeout will not
     /// occur before `duration` elapses, but may not occur immediately after that point either.
     /// Timings should not be treated as exact.
+    ///
+    /// `duration` will be truncated to `u64::MAX` nanoseconds.
     pub fn new(duration: Duration, strategy: W) -> Self {
-        Timeout { duration, strategy }
+        Timeout {
+            duration: duration.as_nanos() as u64,
+            strategy,
+        }
     }
 }
 
@@ -536,8 +616,23 @@ where
     type Error = TimedOut;
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
-        wait_loop_timeout(desired_seq, barrier, self.duration, || {
-            self.strategy.waiting()
-        })
+        let duration = Duration::from_nanos(self.duration);
+        wait_loop_timeout(desired_seq, barrier, duration, || self.strategy.waiting())
+    }
+}
+
+#[cfg(test)]
+mod blah {
+    use super::*;
+
+    #[test]
+    fn test() {
+        println!("{}", size_of::<WaitBusy>());
+        println!("{}", size_of::<WaitBusyHint>());
+        println!("{}", size_of::<WaitYield>());
+        println!("{}", size_of::<WaitSleep>());
+        println!("{}", size_of::<WaitBlocking>());
+        println!("{}", size_of::<WaitPhased<WaitBusy>>());
+        println!("{}", size_of::<Timeout<WaitBusy>>());
     }
 }

@@ -154,10 +154,10 @@ where
     ///
     /// See: [`MultiProducer`](crate::handles::MultiProducer) for one means to parallelize writes.
     ///
-    /// See: [`BuildError`], for full details on error states encountered when building the
-    /// disruptor. Such invalid states are most often caused by inappropriate calls to
+    /// See: [`BuildError`] for full details on error states encountered when building the
+    /// disruptor. Such errors are often caused by calls to
     /// [`add_handle`](DisruptorBuilder::add_handle) or
-    /// [`extend_handles`](DisruptorBuilder::extend_handles).
+    /// [`extend_handles`](DisruptorBuilder::extend_handles) making the graph malformed.
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);

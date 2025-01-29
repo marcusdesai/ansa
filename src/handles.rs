@@ -182,10 +182,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         // Busy wait for the cursor to catch up to the start of claimed sequence, ensuring buffer
         // writes are made visible in order. Without this check, unfinished writes before this
         // claim may become prematurely visible, allowing reads to overlap ongoing writes.
-        let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
-        while cursor_seq != current_claim {
-            cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
-        }
+        while self.cursor.sequence.load(Ordering::Acquire) != current_claim {}
         // Publish writes upto the end of the claimed sequence.
         self.cursor.sequence.store(claim_end, Ordering::Release);
     }
@@ -360,10 +357,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
             }
             write(&mut *pointer, seq, true);
         }
-        let mut cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
-        while cursor_seq != current_claim {
-            cursor_seq = self.cursor.sequence.load(Ordering::Acquire);
-        }
+        while self.cursor.sequence.load(Ordering::Acquire) != current_claim {}
         self.cursor.sequence.store(seq, Ordering::Release);
     }
 }
@@ -374,6 +368,7 @@ where
 {
     /// todo docs
     /// Works with Tree-Borrows but not Stacked-Borrows
+    /// busy waits when waiting for earlier claim to complete
     pub fn write_exact<F>(&mut self, write: F)
     where
         F: FnMut(&mut E, i64, bool),
