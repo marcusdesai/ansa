@@ -13,14 +13,14 @@ use std::sync::Arc;
 /// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
 /// is called.
 #[derive(Debug)]
-pub struct DisruptorBuilder<F, E, WF, W> {
+pub struct DisruptorBuilder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
     buffer_size: usize,
     /// Factory function for populating the buffer with elements. Wrapped in an option only to
     /// facilitate moving the value out of the builder while the builder is still in use.
     element_factory: Option<F>,
     /// Factory function for building instances of the wait strategy, defaults to WaitBlocking.
-    wait_factory: WF,
+    wait_strategy: W,
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
     /// indicates that the consumer with id `3` is followed by the consumers with ids `5` and `7`.
     followed_by: U64Map<Vec<u64>>,
@@ -33,11 +33,10 @@ pub struct DisruptorBuilder<F, E, WF, W> {
     /// Tracks whether ids have been reused.
     overlapping_ids: U64Set,
     element_type: PhantomData<E>,
-    wait_type: PhantomData<W>,
 }
 
 // separate impl block for `new` so that a default type for wait factory can be provided
-impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
+impl<F, E> DisruptorBuilder<F, E, WaitBlocking> {
     /// Returns a new [`DisruptorBuilder`].
     ///
     /// `size` must be a non-zero power of 2.
@@ -58,6 +57,7 @@ impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
     ///     counter += 1;
     ///     ret
     /// };
+    ///
     /// let builder = DisruptorBuilder::new(64, factory);
     /// ```
     pub fn new(size: usize, element_factory: F) -> Self
@@ -68,22 +68,21 @@ impl<F, E> DisruptorBuilder<F, E, fn() -> WaitBlocking, WaitBlocking> {
         DisruptorBuilder {
             buffer_size: size,
             element_factory: Some(element_factory),
-            wait_factory: WaitBlocking::new,
+            wait_strategy: WaitBlocking::new(),
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
             handles_map: U64Map::default(),
             overlapping_ids: U64Set::default(),
             element_type: PhantomData,
-            wait_type: PhantomData,
         }
     }
 }
 
-impl<F, E, WF, W> DisruptorBuilder<F, E, WF, W>
+impl<F, E, W> DisruptorBuilder<F, E, W>
 where
     F: FnMut() -> E,
-    WF: Fn() -> W,
+    W: Clone,
 {
     /// Add a handle to the disruptor.
     ///
@@ -219,25 +218,24 @@ where
     ///
     /// let _ = DisruptorBuilder::new(32, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .wait_strategy(|| WaitSleep::new(Duration::from_nanos(500)))
+    ///     .wait_strategy(WaitSleep::new(Duration::from_nanos(500)))
     ///     .build()
     ///     .unwrap();
     /// ```
-    pub fn wait_strategy<WF2, W2>(self, factory: WF2) -> DisruptorBuilder<F, E, WF2, W2>
+    pub fn wait_strategy<W2>(self, strategy: W2) -> DisruptorBuilder<F, E, W2>
     where
-        WF2: Fn() -> W2,
+        W2: Clone,
     {
         DisruptorBuilder {
             buffer_size: self.buffer_size,
             element_factory: self.element_factory,
-            wait_factory: factory,
+            wait_strategy: strategy,
             followed_by: self.followed_by,
             follows: self.follows,
             follows_lead: self.follows_lead,
             handles_map: self.handles_map,
             overlapping_ids: self.overlapping_ids,
             element_type: PhantomData,
-            wait_type: PhantomData,
         }
     }
 
@@ -258,7 +256,7 @@ where
             cursor: lead_cursor,
             barrier,
             buffer,
-            wait_strategy: (self.wait_factory)(),
+            wait_strategy: self.wait_strategy.clone(),
         };
 
         Ok(DisruptorHandles {
@@ -327,7 +325,7 @@ where
                         cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
-                        wait_strategy: (self.wait_factory)(),
+                        wait_strategy: self.wait_strategy.clone(),
                     };
                     producers.insert(id, producer);
                 }
@@ -336,7 +334,7 @@ where
                         cursor,
                         barrier,
                         buffer: Arc::clone(buffer),
-                        wait_strategy: (self.wait_factory)(),
+                        wait_strategy: self.wait_strategy.clone(),
                     };
                     consumers.insert(id, consumer);
                 }

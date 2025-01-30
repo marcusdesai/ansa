@@ -91,7 +91,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// Three conditions must be met to create an [`ExactMultiProducer`]:
     /// 1) `BATCH` must not be zero.
-    /// 2) The buffer size associated with this producer must be divisible by `BATCH`.
+    /// 2) The ring buffer size associated with this producer must be divisible by `BATCH`.
     /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
     ///    that sequence values start at `-1`.
     ///
@@ -454,7 +454,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     ///
     /// Three conditions must be met to create an [`ExactProducer`]:
     /// 1) `BATCH` must not be zero.
-    /// 2) The buffer size associated with this producer must be divisible by `BATCH`.
+    /// 2) The ring buffer size associated with this producer must be divisible by `BATCH`.
     /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
     ///    that sequence values start at `-1`.
     ///
@@ -672,14 +672,10 @@ where
 /// A `Consumer` has only read access to events on the ring buffer, but as a consequence, multiple
 /// `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
 ///
-/// `Consumer` provides fallible or non-fallible methods depending on which traits are implemented
+/// `Consumer` provides fallible and non-fallible methods depending on which traits are implemented
 /// by its wait strategy, `W`.
 /// - If `W` implements [`TryWaitStrategy`], then fallible methods are provided.
 /// - If `W` implements [`WaitStrategy`], then non-fallible methods are provided.
-///
-/// For example:
-/// - `Consumer<_, Timeout<WaitBusy>>` provides `try_batch_read` and `try_read`.
-/// - Whereas `Consumer<_, WaitBusy>` provides `batch_read` and `read`.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -694,7 +690,7 @@ impl<E, W> Consumer<E, W> {
     ///
     /// Three conditions must be met to create an `ExactConsumer`:
     /// 1) `BATCH` must not be zero.
-    /// 2) The buffer size associated with this consumer must be divisible by `BATCH`.
+    /// 2) The ring buffer size associated with this consumer must be divisible by `BATCH`.
     /// 3) This consumer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
     ///    that sequence values start at `-1`.
     ///
@@ -756,7 +752,9 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// Read a batch of elements from the buffer with the given `size`.
+    /// Read a batch of elements from the buffer.
+    ///
+    /// Waits until at least batch `size` number of elements are available,
     ///
     /// Strictly, `size` must be less than the size of the ring buffer, but practically it must be
     /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
@@ -771,7 +769,7 @@ where
     ///
     /// The logic in `read` should not panic, as doing so will cause the `Consumer` to stop and
     /// become unrecoverable. If any handle in the disruptor permanently stops, the entire
-    /// disruptor will eventually permanently stall.
+    /// disruptor may eventually permanently stall.
     ///
     /// The logic of this method, as provided by `ansa`, is guaranteed not to panic. Please report
     /// an issue if this method panics due to the library implementation.
@@ -816,7 +814,8 @@ where
 
     /// Specialised function which will always consume *all* available buffer elements when called.
     ///
-    /// Can flexibly read as many events as are available to consume.
+    /// Can flexibly read as many events as are available to consume. Waits until there is at least
+    /// one event to consume.
     ///
     /// See [`batch_read`](Consumer::batch_read) for further documentation.
     pub fn read<F>(&self, read: F)
@@ -1024,5 +1023,23 @@ impl Drop for Barrier {
     // We need to break the Arc cycle of barriers. Just get rid of all the Arcs to guarantee this.
     fn drop(&mut self) {
         self.0 = Barrier_::Many(Box::new([]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wait::WaitBusy;
+
+    // Check that sizes don't accidentally change. If size change is found and intended, just
+    // change the values in this test.
+    #[test]
+    fn sizes() {
+        assert_eq!(size_of::<Consumer<u8, WaitBusy>>(), 32);
+        assert_eq!(size_of::<ExactConsumer<u8, WaitBusy, 8>>(), 32);
+        assert_eq!(size_of::<Producer<u8, WaitBusy, true>>(), 32);
+        assert_eq!(size_of::<ExactProducer<u8, WaitBusy, true, 8>>(), 32);
+        assert_eq!(size_of::<MultiProducer<u8, WaitBusy, true>>(), 40);
+        assert_eq!(size_of::<ExactMultiProducer<u8, WaitBusy, true, 8>>(), 40);
     }
 }

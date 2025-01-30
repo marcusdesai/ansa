@@ -58,7 +58,7 @@
 //! ```
 
 use crate::handles::Barrier;
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Implement to provide logic which will run inside a wait loop.
@@ -436,17 +436,13 @@ pub struct WaitBlocking {
 #[derive(Copy, Clone, Debug)]
 struct Empty;
 
-// All instances of WaitBlocking share the same (condvar, mutex) pair
-static BLOCK_VAR: LazyLock<Arc<(Condvar, Mutex<Empty>)>> =
-    LazyLock::new(|| Arc::new((Condvar::new(), Mutex::new(Empty))));
-
 impl WaitBlocking {
     /// Construct an instance of [`WaitBlocking`] with the default wake duration (200 microseconds).
     #[allow(clippy::new_without_default)]
     #[inline]
     pub fn new() -> Self {
         WaitBlocking {
-            pair: Arc::clone(&BLOCK_VAR),
+            pair: Arc::new((Condvar::new(), Mutex::new(Empty))),
             duration: 200_000, // 200 micros in nanos
         }
     }
@@ -457,7 +453,7 @@ impl WaitBlocking {
     #[inline]
     pub fn wake_after(duration: Duration) -> Self {
         WaitBlocking {
-            pair: Arc::clone(&BLOCK_VAR),
+            pair: Arc::new((Condvar::new(), Mutex::new(Empty))),
             duration: duration.as_nanos() as u64,
         }
     }
@@ -649,5 +645,23 @@ where
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let duration = Duration::from_nanos(self.duration);
         wait_loop_timeout(desired_seq, barrier, duration, || self.strategy.waiting())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Check that sizes don't accidentally change. If size change is found and intended, just
+    // change the values in this test.
+    #[test]
+    fn sizes() {
+        assert_eq!(size_of::<WaitBusy>(), 0);
+        assert_eq!(size_of::<WaitBusyHint>(), 0);
+        assert_eq!(size_of::<WaitYield>(), 0);
+        assert_eq!(size_of::<WaitSleep>(), 8);
+        assert_eq!(size_of::<WaitBlocking>(), 16);
+        assert_eq!(size_of::<WaitPhased<WaitBusy>>(), 16);
+        assert_eq!(size_of::<Timeout<WaitBusy>>(), 8);
     }
 }

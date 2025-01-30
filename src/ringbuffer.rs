@@ -6,9 +6,13 @@ use std::cell::UnsafeCell;
 
 /// A circular buffer of elements allocated on the heap. The buffer cannot be resized once created,
 /// and its size must be a power of 2.
+///
+/// `mask` contains `(size - 1)`, which is half of what's needed to calculate a modulus with a
+/// power of 2 number.
 #[derive(Debug)]
 pub(crate) struct RingBuffer<E> {
     slots: Box<[UnsafeCell<E>]>,
+    mask: i64,
 }
 
 // SAFETY: `RingBuffer` provides an API that does not, by itself, guarantee safe references to a
@@ -34,7 +38,10 @@ impl<E> RingBuffer<E> {
             "size must be non-zero power of 2; found: {size}"
         );
         let slots: Box<[UnsafeCell<E>]> = (0..size).map(|_| UnsafeCell::new(factory())).collect();
-        RingBuffer { slots }
+        RingBuffer {
+            slots,
+            mask: size as i64 - 1,
+        }
     }
 
     /// Returns a mutable pointer to a single element of the ring buffer.
@@ -61,8 +68,10 @@ impl<E> RingBuffer<E> {
     #[inline]
     pub(crate) fn get(&self, sequence: i64) -> *mut E {
         assert!(sequence >= 0, "sequence must be >= 0; found: {sequence}");
-        // sequence may be greater than buffer size, so mod to bring it inbounds
-        let index = mod_m_po2(sequence, self.slots.len() as i64);
+        // sequence may be greater than buffer size, so mod to bring it inbounds. Since size is a
+        // power of 2, the calculation is: `sequence & (size - 1)`, and we've already calculated
+        // `(size - 1)`
+        let index = sequence & self.mask;
         // SAFETY: index will be inbounds after mod
         let cell = unsafe { self.slots.get_unchecked(index as usize) };
         cell.get()
@@ -71,39 +80,5 @@ impl<E> RingBuffer<E> {
     #[inline]
     pub(crate) const fn len(&self) -> usize {
         self.slots.len()
-    }
-}
-
-/// Return `n mod m` where `m` must be a positive non-zero power of two.
-#[inline]
-fn mod_m_po2(n: i64, m: i64) -> i64 {
-    assert!(
-        m > 0 && (m & (m - 1)) == 0,
-        "modulus must be a positive non-zero power of 2; found: {m}"
-    );
-    n & (m - 1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::{thread_rng, Rng};
-
-    // This test is relatively unnecessary, but it serves as a guard, incase a typographic error in
-    // `mod_m_po2` slips through without being noticed.
-    #[test]
-    #[cfg_attr(miri, ignore)] // miri works on this code but is slow, and its check are unnecessary
-    fn validate_mod_m_square() {
-        // mod_m_square should exhibit the same behaviour as core rust i64 mod
-        let mut rng = thread_rng();
-        for size in (1..=32).map(|i| 2_i64.pow(i)) {
-            // abs because mod_m_square is not expected to handle negative numbers
-            let to_test = (0..10000).map(|_| rng.gen::<i64>().abs());
-            for n in to_test {
-                let result = mod_m_po2(n, size);
-                let valid = n % size;
-                assert_eq!(result, valid)
-            }
-        }
     }
 }

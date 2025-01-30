@@ -10,6 +10,9 @@
 //! - examples
 //! - terminology (ring buffer, handle, etc...)
 //!
+//! A disruptor is made up of:
+//! - A ring buffer (also called a circular buffer)
+//!
 
 mod builder;
 mod handles;
@@ -28,45 +31,81 @@ mod integration_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    fn simple_disruptor<W: Clone>(wait: W) -> DisruptorHandles<i64, W> {
+        DisruptorBuilder::new(64, || 0i64)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .wait_strategy(wait)
+            .build()
+            .unwrap()
+    }
+
+    macro_rules! run_handles_simple {
+        ($handles:expr, $batch:expr, $write:expr) => {
+            let num_of_events = 320;
+            let mut result = vec![0i64; num_of_events];
+            std::thread::scope(|s| {
+                s.spawn(move || {
+                    for _ in 0..num_of_events / $batch as usize {
+                        ($write)()
+                    }
+                });
+                let out = &mut result;
+                let consumer = $handles.take_consumer(0).unwrap();
+                s.spawn(move || {
+                    for _ in 0..num_of_events / 20 {
+                        consumer.batch_read(20, |i, seq, _| out[seq as usize] = *i)
+                    }
+                });
+            });
+            let expected: Vec<_> = (0..320).collect();
+            assert_eq!(result, expected);
+        };
+    }
+
     #[test]
     fn test_single_producer() {
-        let mut handles = DisruptorBuilder::new(64, || 0i64)
-            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .wait_strategy(|| {
-                WaitPhased::new(Duration::from_millis(1), Duration::new(1, 0), WaitBusyHint)
-            })
-            .build()
-            .unwrap();
-
-        let num_of_events = 200;
-        let mut result = vec![0i64; num_of_events];
-
-        std::thread::scope(|s| {
-            let mut producer = handles.take_lead().unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    producer.batch_write(20, |i, seq, _| {
-                        counter += 1;
-                        *i = seq;
-                    })
-                }
-            });
-            let out = &mut result;
-            let consumer = handles.take_consumer(0).unwrap();
-            s.spawn(move || {
-                let mut counter = 0;
-                while counter < num_of_events {
-                    consumer.batch_read(20, |i, seq, _| {
-                        counter += 1;
-                        out[seq as usize] = *i;
-                    })
-                }
-            });
+        const BATCH: u32 = 16;
+        let mut handles = simple_disruptor(WaitBusy);
+        let mut producer = handles.take_lead().unwrap();
+        run_handles_simple!(handles, BATCH, || {
+            producer.batch_write(BATCH, |i, seq, _| *i = seq)
         });
+    }
 
-        let expected: Vec<_> = (0..200).collect();
-        assert_eq!(result, expected);
+    #[test]
+    fn test_single_exact_producer() {
+        const BATCH: u32 = 16;
+        let mut handles = simple_disruptor(WaitBusy);
+        let mut producer = handles.take_lead().unwrap().into_exact::<BATCH>().unwrap();
+        run_handles_simple!(handles, BATCH, || {
+            producer.write_exact(|i, seq, _| *i = seq)
+        });
+    }
+
+    #[test]
+    fn test_single_multi_producer() {
+        const BATCH: u32 = 16;
+        let mut handles = simple_disruptor(WaitBusy);
+        let mut producer = handles.take_lead().unwrap();
+        run_handles_simple!(handles, BATCH, || {
+            producer.batch_write(BATCH, |i, seq, _| *i = seq)
+        });
+    }
+
+    #[test]
+    fn test_single_exact_multi_producer() {
+        const BATCH: u32 = 16;
+        let mut handles = simple_disruptor(WaitBusy);
+        let mut producer = handles
+            .take_lead()
+            .unwrap()
+            .into_multi()
+            .into_exact::<BATCH>()
+            .unwrap()
+            .unwrap();
+        run_handles_simple!(handles, BATCH, || {
+            producer.write_exact(|i, seq, _| *i = seq)
+        });
     }
 
     #[test]
@@ -74,7 +113,7 @@ mod integration_tests {
         let size = 512;
         let mut handles = DisruptorBuilder::new(size, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .wait_strategy(|| WaitBusy)
+            .wait_strategy(WaitBusy)
             .build()
             .unwrap();
 
@@ -137,7 +176,7 @@ mod integration_tests {
             .add_handle(1, Handle::Consumer, Follows::LeadProducer)
             .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
             .add_handle(3, Handle::Consumer, Follows::Handles(vec![1, 2]))
-            .wait_strategy(|| WaitYield)
+            .wait_strategy(WaitYield)
             .build()
             .unwrap();
 
@@ -248,7 +287,7 @@ mod integration_tests {
         let mut handles = DisruptorBuilder::new(32, || 0i64)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
-            .wait_strategy(WaitBlocking::new)
+            .wait_strategy(WaitBlocking::new())
             .build()
             .unwrap();
 
@@ -396,7 +435,7 @@ mod integration_tests {
             .add_handle(2, Handle::Consumer, Follows::LeadProducer)
             .add_handle(3, Handle::Producer, Follows::Handles(vec![0, 1, 2]))
             .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]))
-            .wait_strategy(|| WaitBusy)
+            .wait_strategy(WaitBusy)
             .build()
             .unwrap();
 
@@ -468,7 +507,7 @@ mod integration_tests {
         let mut handles = DisruptorBuilder::new(128, Event::default)
             .add_handle(0, Handle::Producer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
-            .wait_strategy(|| WaitBusy)
+            .wait_strategy(WaitBusy)
             .build()
             .unwrap();
 
@@ -595,4 +634,44 @@ mod integration_tests {
         assert_eq!(last_i, (num_of_events - 1) * 2);
         assert!(is_times_2);
     }
+
+    // #[test]
+    // fn test_exact_multi_producer() {
+    //     let mut handles = simple_disruptor(Timeout::new(Duration::from_millis(1), WaitBusy));
+    //
+    //     let num_of_events = 320;
+    //     let mut result = vec![0i64; num_of_events];
+    //
+    //     let join_result = std::thread::scope(|s| {
+    //         let mut producer =
+    //             handles.take_lead().unwrap().into_multi().into_exact::<16>().unwrap().unwrap();
+    //         let p_join = s.spawn(move || {
+    //             for _ in 0..num_of_events / 16 {
+    //                 producer.try_write_exact(|i, seq, _| *i = seq).expect("w")
+    //             }
+    //         });
+    //
+    //         let out = &mut result;
+    //         let consumer = handles.take_consumer(0).unwrap();
+    //         let c_join = s.spawn(move || {
+    //             for _ in 0..num_of_events / 20 {
+    //                 consumer.try_batch_read(20, |i, seq, _| out[seq as usize] = *i).expect("q")
+    //             }
+    //         });
+    //
+    //         if let err @ Err(_) = p_join.join() {
+    //             return err;
+    //         }
+    //         if let err @ Err(_) = c_join.join() {
+    //             return err;
+    //         }
+    //         Ok(())
+    //     });
+    //
+    //     assert!(join_result.is_ok());
+    //     join_result.expect("blah");
+    //
+    //     let expected: Vec<_> = (0..num_of_events as i64).collect();
+    //     assert_eq!(result, expected);
+    // }
 }
