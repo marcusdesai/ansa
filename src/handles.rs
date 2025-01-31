@@ -3,7 +3,16 @@ use crate::wait::{TryWaitStrategy, WaitStrategy};
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
-/// todo docs
+/// Writes events to the disruptor.
+///
+/// A `MultiProducer` has mutable access to events on the ring buffer, and as a consequence,
+/// `MultiProducer`s cannot run concurrently to any other handles.
+///
+/// But, `MultiProducer`s can be cloned and may run concurrently with their clones. Clones of this
+/// `MultiProducer` share this producer's cursor.
+///
+/// # Examples
+///
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     cursor: Arc<Cursor>,
@@ -31,8 +40,9 @@ where
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// Returns the count of [`MultiProducer`] associated with this cursor.
     ///
-    /// Care should be taken when performing actions based upon this number, as any thread which
-    /// holds an associated [`MultiProducer`] may clone it at any time, thereby changing the count.
+    /// **Important:** Care should be taken when performing actions based upon this number, as any
+    /// thread which holds an associated [`MultiProducer`] may clone it at any time, thereby
+    /// changing the count.
     ///
     /// # Examples
     /// ```
@@ -55,17 +65,20 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         Arc::strong_count(&self.claim)
     }
 
-    /// todo docs
+    /// Returns the current sequence value for this producer's cursor.
+    ///
+    /// **Important:** The cursor for a `MultiProducer` is shared by all of its clones. Any of
+    /// these clones could alter this value at any time if they are writing to the buffer.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
-    /// Return a [`Producer`] if exactly one [`MultiProducer`] exists for this cursor.
+    /// Return a [`Producer`] if exactly one `MultiProducer` exists for this cursor.
     ///
-    /// Otherwise, return `None` and drops this [`MultiProducer`].
+    /// Otherwise, return `None` and drops this producer.
     ///
-    /// If this function is called when only one [`MultiProducer`] exists, then it is guaranteed to
-    /// return a [`Producer`].
+    /// If this function is called when only one `MultiProducer` exists, then it is guaranteed to
+    /// return a `Producer`.
     ///
     /// # Examples
     /// ```
@@ -96,9 +109,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`.
     ///
     /// If `BATCH` is invalid, returns the calling producer.
     ///
@@ -288,12 +299,36 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
         Arc::strong_count(&self.claim)
     }
 
-    /// todo docs
+    /// Returns the current sequence value for this producer's cursor.
+    ///
+    /// **Important:** The cursor for a `ExactMultiProducer` is shared by all of its clones. Any of
+    /// these clones could alter this value at any time if they are writing to the buffer.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
-    /// todo docs
+    /// Return a [`MultiProducer`] if exactly one [`ExactMultiProducer`] exists for this cursor.
+    ///
+    /// Otherwise, return `None` and drops this producer.
+    ///
+    /// If this function is called when only one [`ExactMultiProducer`] exists, then it is
+    /// guaranteed to return a [`MultiProducer`].
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let mut handles = DisruptorBuilder::new(128, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let multi = handles.take_lead().unwrap().into_exact_multi::<32>().unwrap();
+    /// let multi_clone = multi.clone();
+    ///
+    /// assert!(matches!(multi.into_multi(), None));
+    /// assert!(matches!(multi_clone.into_multi(), Some(MultiProducer { .. })));
+    /// ```
     pub fn into_multi(self) -> Option<MultiProducer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|claim| MultiProducer {
             cursor: self.cursor,
@@ -310,9 +345,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     /// Valid `NEW_BATCH` values must meet the following conditions:
     /// 1) `NEW_BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `NEW_BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `NEW_BATCH` value trivially meets condition three before this handle's cursor moves.
+    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`.
     ///
     /// If `NEW_BATCH` is invalid, returns the calling producer.
     ///
@@ -404,13 +437,24 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     }
 }
 
+macro_rules! aliasing_model_validity {
+    () => {
+        "# Aliasing Model Validity\n\n\
+        When checked with [miri](https://github.com/rust-lang/miri), this function is _valid_ \
+        under the Tree-Borrows aliasing model, but _invalid_ under Stacked-Borrows.\n\n\
+        If a future rust aliasing model declares this function invalid, then its signature will be \
+        kept as-is, but its implementation will be changed to satisfy the aliasing model. This may \
+        pessimize the function, but its API and semantics are guaranteed to remain unchanged."
+    };
+}
+
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH>
 where
     W: WaitStrategy,
 {
     /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
     /// busy waits when waiting for earlier claim to complete
+    #[doc = aliasing_model_validity!()]
     pub fn write_exact<F>(&mut self, write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -432,6 +476,7 @@ where
     W: TryWaitStrategy,
 {
     /// todo docs
+    #[doc = aliasing_model_validity!()]
     pub fn try_write_exact<F>(&mut self, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
@@ -468,8 +513,10 @@ fn claim(claim: &Cursor, size: i64) -> (i64, i64) {
     (current_claim, claim_end)
 }
 
-/// todo docs
 /// Writes events to the disruptor.
+///
+/// A `Producer` has mutable access to events on the ring buffer, and as a consequence, `Producer`s
+/// cannot run concurrently to any other handles.
 #[derive(Debug)]
 pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>,
@@ -479,7 +526,7 @@ pub struct Producer<E, W, const LEAD: bool> {
 }
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
-    /// todo docs
+    /// Returns the current sequence value for this producer's cursor.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
@@ -503,9 +550,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`.
     ///
     /// # Examples
     /// ```
@@ -549,9 +594,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`.
     ///
     /// # Examples
     /// ```
@@ -661,7 +704,7 @@ pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
 }
 
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> {
-    /// todo docs
+    /// Returns the current sequence value for this producer's cursor.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
@@ -722,7 +765,7 @@ where
     W: WaitStrategy,
 {
     /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
+    #[doc = aliasing_model_validity!()]
     pub fn write_exact<F>(&mut self, write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -745,7 +788,7 @@ where
     W: TryWaitStrategy,
 {
     /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
+    #[doc = aliasing_model_validity!()]
     pub fn try_write_exact<F>(&mut self, write: F) -> Result<(), W::Error>
     where
         F: FnMut(&mut E, i64, bool),
@@ -766,13 +809,8 @@ where
 
 /// Reads events from the disruptor.
 ///
-/// A `Consumer` has only read access to events on the ring buffer, but as a consequence, multiple
-/// `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
-///
-/// `Consumer` provides fallible and non-fallible methods depending on which traits are implemented
-/// by its wait strategy, `W`.
-/// - If `W` implements [`TryWaitStrategy`], then fallible methods are provided.
-/// - If `W` implements [`WaitStrategy`], then non-fallible methods are provided.
+/// A `Consumer` has only immutable access to events on the ring buffer, but as a consequence,
+/// multiple `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -782,7 +820,7 @@ pub struct Consumer<E, W> {
 }
 
 impl<E, W> Consumer<E, W> {
-    /// todo docs
+    /// Returns the current sequence value for this consumer's cursor.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
@@ -794,9 +832,7 @@ impl<E, W> Consumer<E, W> {
     /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`.
     ///
     /// # Examples
     /// ```
@@ -853,9 +889,9 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// Read a batch of elements from the buffer.
+    /// Read a batch of events from the buffer.
     ///
-    /// Waits until at least batch `size` number of elements are available,
+    /// Waits until at least batch `size` number of events are available,
     ///
     /// Strictly, `size` must be less than the size of the ring buffer, but practically it must be
     /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
@@ -864,9 +900,9 @@ where
     /// `read` is a callback with the signature:
     /// `read(event: &E, sequence: i64, batch_end: bool)`
     ///
-    /// - `event` is the event being read from the buffer.
-    /// - `sequence` is the sequence number at which this event is read.
-    /// - `batch_end` indicates whether this event is the last in the requested batch.
+    /// - `event` is the buffer element being read.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     ///
     /// The logic in `read` should not panic, as doing so will cause the `Consumer` to stop and
     /// become unrecoverable. If any handle in the disruptor permanently stops, the entire
@@ -896,8 +932,7 @@ where
     ///     // do something
     /// });
     /// ```
-    /// The code above is contrived and meant only to show straightforwardly how the API can be
-    /// used. For more representative usage examples, see the top level [`ansa`](crate) docs.
+    /// This example is contrived, see the top level [`ansa`](crate) docs for representative uses.
     pub fn batch_read<F>(&self, size: u32, read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -968,7 +1003,7 @@ pub struct ExactConsumer<E, W, const BATCH: u32> {
 }
 
 impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
-    /// todo docs
+    /// Returns the current sequence value for this consumer's cursor.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
@@ -990,10 +1025,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
     /// Valid `NEW_BATCH` values must meet the following conditions:
     /// 1) `NEW_BATCH` must not be zero.
     /// 2) Buffer size must be divisible by `NEW_BATCH`.
-    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`. Sequences start at `-1`.
-    ///
-    /// Note: any `NEW_BATCH` value trivially meets condition three before this handle's cursor
-    /// moves.
+    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`.
     ///
     /// # Examples
     /// ```
@@ -1058,7 +1090,7 @@ where
     W: WaitStrategy,
 {
     /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
+    #[doc = aliasing_model_validity!()]
     pub fn read_exact<F>(&self, read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -1075,7 +1107,7 @@ where
     W: TryWaitStrategy,
 {
     /// todo docs
-    /// Works with Tree-Borrows but not Stacked-Borrows
+    #[doc = aliasing_model_validity!()]
     pub fn try_read_exact<F>(&self, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),

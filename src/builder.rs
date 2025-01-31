@@ -86,7 +86,8 @@ where
 {
     /// Add a handle to the disruptor.
     ///
-    /// Each handle must be associated with a unique id, and must be either a consumer or producer.
+    /// Each handle must be associated with a unique `id`, and must be either a consumer or
+    /// producer.
     ///
     /// Every handle must describe how it relates to other handles by indicating which handles it
     /// follows. In the disruptor pattern, management of ring buffer accesses works by ordering
@@ -102,7 +103,7 @@ where
     /// serves as the root of the graph. Every other handle must follow the lead either directly or
     /// indirectly.
     ///
-    /// # Examples
+    /// # Ordering Handles
     ///
     /// Consumer handles do not necessarily need to follow one another, which allows for them to
     /// read the ring buffer concurrently.
