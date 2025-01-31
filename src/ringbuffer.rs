@@ -78,7 +78,7 @@ impl<E> RingBuffer<E> {
     }
 
     #[inline]
-    pub(crate) const fn len(&self) -> usize {
+    pub(crate) const fn size(&self) -> usize {
         self.slots.len()
     }
 }

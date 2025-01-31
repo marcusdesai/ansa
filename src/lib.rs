@@ -39,7 +39,7 @@ mod integration_tests {
             .unwrap()
     }
 
-    macro_rules! run_handles_simple {
+    macro_rules! run_lead_and_consumer {
         ($handles:expr, $batch:expr, $write:expr) => {
             let num_of_events = 320;
             let mut result = vec![0i64; num_of_events];
@@ -63,47 +63,41 @@ mod integration_tests {
     }
 
     #[test]
-    fn test_single_producer() {
+    fn test_lead_producer() {
         const BATCH: u32 = 16;
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap();
-        run_handles_simple!(handles, BATCH, || {
+        run_lead_and_consumer!(handles, BATCH, || {
             producer.batch_write(BATCH, |i, seq, _| *i = seq)
         });
     }
 
     #[test]
-    fn test_single_exact_producer() {
+    fn test_lead_exact_producer() {
         const BATCH: u32 = 16;
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap().into_exact::<BATCH>().unwrap();
-        run_handles_simple!(handles, BATCH, || {
+        run_lead_and_consumer!(handles, BATCH, || {
             producer.write_exact(|i, seq, _| *i = seq)
         });
     }
 
     #[test]
-    fn test_single_multi_producer() {
+    fn test_lead_multi_producer() {
         const BATCH: u32 = 16;
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap();
-        run_handles_simple!(handles, BATCH, || {
+        run_lead_and_consumer!(handles, BATCH, || {
             producer.batch_write(BATCH, |i, seq, _| *i = seq)
         });
     }
 
     #[test]
-    fn test_single_exact_multi_producer() {
+    fn test_lead_exact_multi_producer() {
         const BATCH: u32 = 16;
         let mut handles = simple_disruptor(WaitBusy);
-        let mut producer = handles
-            .take_lead()
-            .unwrap()
-            .into_multi()
-            .into_exact::<BATCH>()
-            .unwrap()
-            .unwrap();
-        run_handles_simple!(handles, BATCH, || {
+        let mut producer = handles.take_lead().unwrap().into_exact_multi::<BATCH>().unwrap();
+        run_lead_and_consumer!(handles, BATCH, || {
             producer.write_exact(|i, seq, _| *i = seq)
         });
     }
@@ -111,11 +105,7 @@ mod integration_tests {
     #[test]
     fn test_multi_producer() {
         let size = 512;
-        let mut handles = DisruptorBuilder::new(size, || 0i64)
-            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .wait_strategy(WaitBusy)
-            .build()
-            .unwrap();
+        let mut handles = simple_disruptor(WaitBusy);
 
         let multi_1 = handles.take_lead().unwrap().into_multi();
         let multi_2 = multi_1.clone();

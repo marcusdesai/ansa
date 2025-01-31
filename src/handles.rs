@@ -29,7 +29,7 @@ where
 }
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
-    /// Returns the count of [`MultiProducer`] associated with this producer's cursor.
+    /// Returns the count of [`MultiProducer`] associated with this cursor.
     ///
     /// Care should be taken when performing actions based upon this number, as any thread which
     /// holds an associated [`MultiProducer`] may clone it at any time, thereby changing the count.
@@ -55,14 +55,17 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         Arc::strong_count(&self.claim)
     }
 
-    /// Return a [`Producer`] if there exists only one [`MultiProducer`] associated with
-    /// this producer cursor.
+    /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Return a [`Producer`] if exactly one [`MultiProducer`] exists for this cursor.
     ///
-    /// Otherwise, return `None` and drop this [`MultiProducer`].
+    /// Otherwise, return `None` and drops this [`MultiProducer`].
     ///
     /// If this function is called when only one [`MultiProducer`] exists, then it is guaranteed to
-    /// return a [`Producer`]. Note that independent [`MultiProducer`]s, which do not share a
-    /// cursor, will not affect calls to this method.
+    /// return a [`Producer`].
     ///
     /// # Examples
     /// ```
@@ -87,25 +90,20 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         })
     }
 
-    /// Attempts to create an [`ExactMultiProducer`] from this [`MultiProducer`].
+    /// Returns an [`ExactMultiProducer`] if `BATCH` is valid and exactly one [`MultiProducer`]
+    /// exists for this cursor.
     ///
-    /// Three conditions must be met to create an [`ExactMultiProducer`]:
+    /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
-    /// 2) The ring buffer size associated with this producer must be divisible by `BATCH`.
-    /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
-    ///    that sequence values start at `-1`.
+    /// 2) Buffer size must be divisible by `BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
     ///
-    /// Note that, before this producer writes any data to the buffer (i.e., moves its cursor),
-    /// the third condition is trivially met by any `BATCH` value.
+    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
     ///
-    /// If any of these conditions are _not_ met, returns `Err(`[`MultiProducer`]`)`.
+    /// If `BATCH` is invalid, returns the calling producer.
     ///
-    /// If these conditions are met, but more than one [`MultiProducer`] exists for this producer
-    /// cursor, returns `Ok(None)`, and consumes the calling producer. This behaviour ensures
-    /// exact and non-exact multi producers won't exist for the same cursor. If allowed, then exact
-    /// producers would lose the guarantee to not perform out-of-bounds ring buffer accesses.
-    ///
-    /// Otherwise, returns `Ok(Some(`[`ExactMultiProducer`]`))`.
+    /// If `BATCH` is valid, but more than one [`MultiProducer`] exists for this cursor, returns
+    /// `Ok(None)` and the caller is dropped.
     ///
     /// # Examples
     /// ```
@@ -135,7 +133,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     pub fn into_exact<const BATCH: u32>(
         self,
     ) -> Result<Option<ExactMultiProducer<E, W, LEAD, BATCH>>, Self> {
-        if BATCH == 0 || self.buffer.len() % BATCH as usize != 0 {
+        if BATCH == 0 || self.buffer.size() % BATCH as usize != 0 {
             return Err(self);
         }
         match Arc::into_inner(self.claim) {
@@ -197,10 +195,10 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
-            claim_end - self.buffer.len() as i64
+            claim_end - self.buffer.size() as i64
         } else {
             claim_end
         };
@@ -219,10 +217,10 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
-            claim_end - self.buffer.len() as i64
+            claim_end - self.buffer.size() as i64
         } else {
             claim_end
         };
@@ -291,6 +289,11 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     }
 
     /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// todo docs
     pub fn into_multi(self) -> Option<MultiProducer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|claim| MultiProducer {
             cursor: self.cursor,
@@ -301,18 +304,57 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
         })
     }
 
-    /// See docs for [`MultiProducer::into_exact`].
-    pub fn into_exact<const NEW: u32>(
+    /// Returns a new [`ExactMultiProducer`] if `NEW_BATCH` is valid and exactly one
+    /// [`ExactMultiProducer`] exists for this cursor.
+    ///
+    /// Valid `NEW_BATCH` values must meet the following conditions:
+    /// 1) `NEW_BATCH` must not be zero.
+    /// 2) Buffer size must be divisible by `NEW_BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`. Sequences start at `-1`.
+    ///
+    /// Note: any `NEW_BATCH` value trivially meets condition three before this handle's cursor moves.
+    ///
+    /// If `NEW_BATCH` is invalid, returns the calling producer.
+    ///
+    /// If `NEW_BATCH` is valid, but more than one [`ExactMultiProducer`] exists for this cursor,
+    /// returns `Ok(None)` and the caller is dropped.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let exact_multi = handles.take_lead().unwrap().into_exact_multi::<16>().unwrap();
+    /// let exact_multi_2 = exact_multi.clone();
+    ///
+    /// // two multi producers exist for this cursor, but the invalid BATCH value means
+    /// // neither will be consumed in this call
+    /// let result = exact_multi.into_exact::<10>();
+    /// assert!(matches!(result, Err(ExactMultiProducer { .. })));
+    ///
+    /// // BATCH meets the required conditions, but there are two producers for this cursor
+    /// let result = result.unwrap_err().into_exact::<16>();
+    /// assert!(matches!(result, Ok(None)));
+    ///
+    /// let result = exact_multi_2.into_exact::<16>();
+    /// assert!(matches!(result, Ok(Some(ExactMultiProducer { .. }))));
+    /// ```
+    pub fn into_exact<const NEW_BATCH: u32>(
         self,
-    ) -> Result<Option<ExactMultiProducer<E, W, LEAD, NEW>>, Self> {
-        if NEW == 0 || self.buffer.len() % NEW as usize != 0 {
+    ) -> Result<Option<ExactMultiProducer<E, W, LEAD, NEW_BATCH>>, Self> {
+        if NEW_BATCH == 0 || self.buffer.size() % NEW_BATCH as usize != 0 {
             return Err(self);
         }
         match Arc::into_inner(self.claim) {
             None => Ok(None),
             Some(claim) => {
                 let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-                if sequence % NEW as i64 != 0 {
+                if sequence % NEW_BATCH as i64 != 0 {
                     // There is at most one producer associated with this cursor, so a new shared
                     // claim can be made without issue.
                     return Err(ExactMultiProducer {
@@ -375,7 +417,7 @@ where
     {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
-            claim_end - self.buffer.len() as i64
+            claim_end - self.buffer.size() as i64
         } else {
             claim_end
         };
@@ -396,7 +438,7 @@ where
     {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
-            claim_end - self.buffer.len() as i64
+            claim_end - self.buffer.size() as i64
         } else {
             claim_end
         };
@@ -438,6 +480,11 @@ pub struct Producer<E, W, const LEAD: bool> {
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Converts this `Producer` into a [`MultiProducer`].
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         MultiProducer {
@@ -449,17 +496,62 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
         }
     }
 
-    /// Returns an [`ExactProducer`] if successful, otherwise returns the producer which called
-    /// this method.
+    /// Returns an [`ExactMultiProducer`] if `BATCH` is valid.
     ///
-    /// Three conditions must be met to create an [`ExactProducer`]:
+    /// Otherwise, returns the calling producer.
+    ///
+    /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
-    /// 2) The ring buffer size associated with this producer must be divisible by `BATCH`.
-    /// 3) This producer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
-    ///    that sequence values start at `-1`.
+    /// 2) Buffer size must be divisible by `BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
     ///
-    /// Note that, before this producer writes any data to the buffer (i.e., moves its cursor),
-    /// the third condition is trivially met by any `BATCH` value.
+    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let producer = handles.take_lead().unwrap();
+    ///
+    /// let result = producer.into_exact_multi::<10>();
+    /// assert!(matches!(result, Err(Producer { .. })));
+    ///
+    /// let result = result.unwrap_err().into_exact_multi::<16>();
+    ///
+    /// assert!(matches!(result, Ok(ExactMultiProducer { .. })));
+    /// ```
+    pub fn into_exact_multi<const BATCH: u32>(
+        self,
+    ) -> Result<ExactMultiProducer<E, W, LEAD, BATCH>, Self> {
+        let producer_seq = self.cursor.sequence.load(Ordering::Relaxed) + 1;
+        if invalid_batch_size(BATCH, self.buffer.size(), producer_seq) {
+            return Err(self);
+        }
+        Ok(ExactMultiProducer {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            claim: Arc::new(Cursor::new(producer_seq)),
+            wait_strategy: self.wait_strategy,
+        })
+    }
+
+    /// Returns an [`ExactProducer`] if `BATCH` is valid.
+    ///
+    /// Otherwise, returns the calling producer.
+    ///
+    /// Valid `BATCH` values must meet the following conditions:
+    /// 1) `BATCH` must not be zero.
+    /// 2) Buffer size must be divisible by `BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
+    ///
+    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
     ///
     /// # Examples
     /// ```
@@ -481,7 +573,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     pub fn into_exact<const BATCH: u32>(self) -> Result<ExactProducer<E, W, LEAD, BATCH>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-        if invalid_batch_size(BATCH, self.buffer.len(), sequence) {
+        if invalid_batch_size(BATCH, self.buffer.size(), sequence) {
             return Err(self);
         }
         Ok(ExactProducer {
@@ -521,11 +613,11 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
-            batch_end - self.buffer.len() as i64
+            batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
@@ -544,11 +636,11 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
-            batch_end - self.buffer.len() as i64
+            batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
@@ -569,6 +661,11 @@ pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
 }
 
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> {
+    /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
     /// Converts this [`ExactProducer`] into a [`Producer`].
     pub fn into_producer(self) -> Producer<E, W, LEAD> {
         Producer {
@@ -582,7 +679,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
     /// See docs for [`Producer::into_exact`].
     pub fn into_exact<const NEW: u32>(self) -> Result<ExactProducer<E, W, LEAD, NEW>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-        if invalid_batch_size(NEW, self.buffer.len(), sequence) {
+        if invalid_batch_size(NEW, self.buffer.size(), sequence) {
             return Err(self);
         }
         Ok(ExactProducer {
@@ -633,7 +730,7 @@ where
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
         let desired_seq = if LEAD {
-            batch_end - self.buffer.len() as i64
+            batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
@@ -656,7 +753,7 @@ where
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
         let desired_seq = if LEAD {
-            batch_end - self.buffer.len() as i64
+            batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
@@ -685,17 +782,21 @@ pub struct Consumer<E, W> {
 }
 
 impl<E, W> Consumer<E, W> {
-    /// Returns an [`ExactConsumer`] if successful, otherwise returns the consumer which called
-    /// this method.
+    /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Returns an [`ExactConsumer`] if `BATCH` is valid.
     ///
-    /// Three conditions must be met to create an `ExactConsumer`:
+    /// Otherwise, returns the calling consumer.
+    ///
+    /// Valid `BATCH` values must meet the following conditions:
     /// 1) `BATCH` must not be zero.
-    /// 2) The ring buffer size associated with this consumer must be divisible by `BATCH`.
-    /// 3) This consumer cursor's sequence value + 1 must be divisible by `BATCH`. Bear in mind
-    ///    that sequence values start at `-1`.
+    /// 2) Buffer size must be divisible by `BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`. Sequences start at `-1`.
     ///
-    /// Note that, before this consumer reads any data from the buffer (i.e., moves its cursor),
-    /// the third condition is trivially met by any `BATCH` value.
+    /// Note: any `BATCH` value trivially meets condition three before this handle's cursor moves.
     ///
     /// # Examples
     /// ```
@@ -717,7 +818,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     pub fn into_exact<const BATCH: u32>(self) -> Result<ExactConsumer<E, W, BATCH>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-        if invalid_batch_size(BATCH, self.buffer.len(), sequence) {
+        if invalid_batch_size(BATCH, self.buffer.size(), sequence) {
             return Err(self);
         }
         Ok(ExactConsumer {
@@ -771,9 +872,6 @@ where
     /// become unrecoverable. If any handle in the disruptor permanently stops, the entire
     /// disruptor may eventually permanently stall.
     ///
-    /// The logic of this method, as provided by `ansa`, is guaranteed not to panic. Please report
-    /// an issue if this method panics due to the library implementation.
-    ///
     /// # Examples
     /// ```no_run
     /// use ansa::*;
@@ -804,7 +902,7 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.wait(batch_end, &self.barrier);
@@ -838,7 +936,7 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.len());
+        assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.try_wait(batch_end, &self.barrier)?;
@@ -870,6 +968,11 @@ pub struct ExactConsumer<E, W, const BATCH: u32> {
 }
 
 impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
+    /// todo docs
+    pub fn sequence(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
     /// Converts this [`ExactConsumer`] into a [`Consumer`].
     pub fn into_consumer(self) -> Consumer<E, W> {
         Consumer {
@@ -880,10 +983,39 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
         }
     }
 
-    /// See docs for [`Consumer::into_exact`].
-    pub fn into_exact<const NEW: u32>(self) -> Result<ExactConsumer<E, W, NEW>, Self> {
+    /// Returns a new [`ExactConsumer`] if `NEW_BATCH` is valid.
+    ///
+    /// Otherwise, returns the calling consumer.
+    ///
+    /// Valid `NEW_BATCH` values must meet the following conditions:
+    /// 1) `NEW_BATCH` must not be zero.
+    /// 2) Buffer size must be divisible by `NEW_BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `NEW_BATCH`. Sequences start at `-1`.
+    ///
+    /// Note: any `NEW_BATCH` value trivially meets condition three before this handle's cursor
+    /// moves.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let consumer = handles.take_consumer(0).unwrap().into_exact::<8>().unwrap();
+    ///
+    /// let result = consumer.into_exact::<10>();
+    /// assert!(matches!(result, Err(ExactConsumer { .. })));
+    ///
+    /// let result = result.unwrap_err().into_exact::<16>();
+    /// assert!(matches!(result, Ok(ExactConsumer { .. })));
+    /// ```
+    pub fn into_exact<const NEW_BATCH: u32>(self) -> Result<ExactConsumer<E, W, NEW_BATCH>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
-        if invalid_batch_size(NEW, self.buffer.len(), sequence) {
+        if invalid_batch_size(NEW_BATCH, self.buffer.size(), sequence) {
             return Err(self);
         }
         Ok(ExactConsumer {
