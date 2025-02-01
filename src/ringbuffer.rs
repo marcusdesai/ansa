@@ -11,7 +11,7 @@ use std::cell::UnsafeCell;
 /// power of 2 number.
 #[derive(Debug)]
 pub(crate) struct RingBuffer<E> {
-    slots: Box<[UnsafeCell<E>]>,
+    buf: Box<[UnsafeCell<E>]>,
     mask: i64,
 }
 
@@ -37,11 +37,9 @@ impl<E> RingBuffer<E> {
             size > 0 && (size & (size - 1)) == 0,
             "size must be non-zero power of 2; found: {size}"
         );
-        let slots: Box<[UnsafeCell<E>]> = (0..size).map(|_| UnsafeCell::new(factory())).collect();
-        RingBuffer {
-            slots,
-            mask: size as i64 - 1,
-        }
+        let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
+        let mask = size as i64 - 1;
+        RingBuffer { buf, mask }
     }
 
     /// Returns a mutable pointer to a single element of the ring buffer.
@@ -63,8 +61,10 @@ impl<E> RingBuffer<E> {
     /// It is not enough for conflicting mutable and immutable references to not be used, they must
     /// not exist, as it is Undefined Behaviour for mutable aliasing to merely occur. Note that any
     /// number of immutable references can exist simultaneously, so long as no mutable ref exists
-    /// during the lifetimes of those immutable refs. Also note that the aliasing rules do not
-    /// apply to pointers, so it is permitted for multiple mutable pointers to exist simultaneously.
+    /// during the lifetimes of those immutable refs.
+    ///
+    /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
+    /// mutable pointers to exist simultaneously.
     #[inline]
     pub(crate) fn get(&self, sequence: i64) -> *mut E {
         assert!(sequence >= 0, "sequence must be >= 0; found: {sequence}");
@@ -73,12 +73,12 @@ impl<E> RingBuffer<E> {
         // `(size - 1)`
         let index = sequence & self.mask;
         // SAFETY: index will be inbounds after mod
-        let cell = unsafe { self.slots.get_unchecked(index as usize) };
+        let cell = unsafe { self.buf.get_unchecked(index as usize) };
         cell.get()
     }
 
     #[inline]
     pub(crate) const fn size(&self) -> usize {
-        self.slots.len()
+        self.buf.len()
     }
 }

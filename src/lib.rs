@@ -136,7 +136,7 @@ mod integration_tests {
                 sync_barrier.wait();
                 let mut counter = 0;
                 while counter != publish_amount * 3 {
-                    consumer.read(|i, seq, _| {
+                    consumer.read_any(|i, seq, _| {
                         counter += 1;
                         out[seq as usize] = *i;
                     })
@@ -201,7 +201,7 @@ mod integration_tests {
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_0.read(|event, _, _| {
+                    consumer_0.read_any(|event, _, _| {
                         out.push(*event);
                         should_continue = !event.consumer_break;
                     });
@@ -227,7 +227,7 @@ mod integration_tests {
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_2.read(|event, _, _| {
+                    consumer_2.read_any(|event, _, _| {
                         c2_counter.fetch_add(1, Ordering::Relaxed);
                         should_continue = !event.consumer_break;
                     })
@@ -305,7 +305,7 @@ mod integration_tests {
         let join_c0 = std::thread::spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_0.read(|_, seq, _| {
+                consumer_0.read_any(|_, seq, _| {
                     c0_out.fetch_add(1, Ordering::Relaxed);
                     should_continue = seq < num_of_events - 1;
                 });

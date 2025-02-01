@@ -4,17 +4,18 @@
 //!
 //! # Performance
 //!
-//! Each strategy provides a tradeoff between latency and CPU use, but this is not the only aspect
-//! to consider when optimizing performance. The size of the strategy is also an important factor.
+//! Each strategy provides a tradeoff between latency and CPU use, as detailed in their separate
+//! docs, but this is not the only aspect to consider when optimizing performance. The size of the
+//! strategy is also an important factor.
 //!
 //! Each handle struct includes its own instance of the wait strategy used by a single disruptor.
-//! Hence, the size of the strategy can have an effect on performance if, for example, its size
-//! means the handle may no longer fit in a single cache line.
+//! Hence, the size of the strategy can have an effect on performance if, for example, that
+//! additional size means the handle may no longer fit in a single cache line.
 //!
 //! Cache lines are commonly `32`, `64`, or `128` bytes. With `64` bytes being the most common.
 //!
-//! Presently, when the wait strategy is zero-sized, each handle has the following size (in bytes).
-//! It is very likely that these sizes will remain the same, but it is **not** guaranteed.
+//! When the wait strategy is zero-sized, each handle has the following size (in bytes). If these
+//! sizes are altered, it will only be done in a major version change.
 //!
 //! | Handle                                                     | size |
 //! |------------------------------------------------------------|------|
@@ -26,8 +27,8 @@
 //! | [`ExactMultiProducer`](crate::handles::ExactMultiProducer) | 40   |
 //!
 //! And here are the minimum sizes of the provided strategies, again assuming nested wait
-//! strategies are zero-sized. These sizes are also unlikely to change, but this is also **not**
-//! guaranteed.
+//! strategies are zero-sized. These sizes are also unlikely to change, and may do so only in a
+//! major version change.
 //!
 //! | Strategy                      | size |
 //! |-------------------------------|------|
@@ -47,9 +48,9 @@
 //! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
 //! ```
 //!
-//! By the by, various provided strategies are limited to wait durations of `u64::MAX` nanoseconds,
-//! which is done in order to keep them small. Using [`Duration`] instead would double the minimum
-//! size of the relevant strategies, which would be wasteful as wait durations are likely to be short.
+//! Various provided strategies are limited to wait durations of `u64::MAX` nanoseconds, which is
+//! done in order to keep them small. Storing a [`Duration`] instead would double the minimum size
+//! of these strategies.
 //! ```
 //! use std::time::Duration;
 //!
@@ -101,8 +102,8 @@ pub trait Waiting {
 /// # Safety
 ///
 /// This trait is unsafe as there is no guard against invalid implementations of
-/// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. A valid implementation must ensure
-/// that the following two conditions holds:
+/// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. Valid implementations must satisfy
+/// the following conditions:
 /// 1) `wait` may only return when `barrier sequence >= desired_seq` is true.
 /// 2) `wait` must return the last read `barrier sequence`.
 ///
@@ -160,9 +161,9 @@ pub unsafe trait WaitStrategy {
     /// Runs the wait loop.
     ///
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
-    /// Call [`Barrier::sequence`] to views updates of the barrier position.
+    /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
-    /// The following two conditions must hold:
+    /// Implementations must satisfy the following conditions:
     /// 1) May only return when `barrier sequence >= desired_seq` is true.
     /// 2) Must return the last read `barrier sequence`.
     ///
@@ -191,8 +192,8 @@ where
 /// # Safety
 ///
 /// This trait is unsafe as there is no guard against invalid implementations of
-/// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. A valid implementation
-/// must ensure that the following two conditions holds:
+/// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. Valid implementations must
+/// satisfy the following conditions:
 /// 1) `try_wait` may only return when `barrier sequence >= desired_seq` is true.
 /// 2) `try_wait`, if successful, must return the last read `barrier sequence`.
 ///
@@ -230,6 +231,7 @@ where
 ///     }
 /// }
 /// ```
+///
 /// Implementing a no wait strategy is also possible.
 /// ```
 /// use ansa::{Barrier, wait::TryWaitStrategy};
@@ -284,9 +286,9 @@ pub unsafe trait TryWaitStrategy {
     /// Runs the fallible wait loop.
     ///
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
-    /// Call [`Barrier::sequence`] to views updates of the barrier position.
+    /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
-    /// The following two conditions must hold:
+    /// Implementations must satisfy the following conditions:
     /// 1) May only return when `barrier sequence >= desired_seq` is true.
     /// 2) If successful, must return the last read `barrier sequence`.
     ///
@@ -594,27 +596,18 @@ pub struct TimedOut;
 /// use ansa::wait::*;
 /// use std::time::Duration;
 ///
-/// let wait_factory = || Timeout::new(Duration::from_millis(1), WaitBusy);
+/// let strategy = Timeout::new(Duration::from_millis(1), WaitBusy);
 ///
 /// let _ = DisruptorBuilder::new(64, || 0)
-///     .wait_strategy(wait_factory)
+///     .wait_strategy(strategy)
 ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
 ///     .build()
 ///     .unwrap();
 /// ```
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
     duration: u64,
     strategy: W,
-}
-
-impl<W: Clone> Clone for Timeout<W> {
-    fn clone(&self) -> Self {
-        Timeout {
-            duration: self.duration,
-            strategy: self.strategy.clone(),
-        }
-    }
 }
 
 impl<W: Copy> Copy for Timeout<W> {}

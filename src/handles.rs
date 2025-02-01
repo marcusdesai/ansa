@@ -9,10 +9,26 @@ use std::sync::Arc;
 /// `MultiProducer`s cannot run concurrently to any other handles.
 ///
 /// But, `MultiProducer`s can be cloned and may run concurrently with their clones. Clones of this
-/// `MultiProducer` share this producer's cursor.
+/// `MultiProducer` share only this producer's cursor.
 ///
 /// # Examples
+/// ```
+/// use ansa::*;
 ///
+/// let mut handles = DisruptorBuilder::new(64, || 0)
+///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
+///     .build()
+///     .unwrap();
+///
+/// // lead and trailing are separate handles with separate cursors
+/// let lead = handles.take_lead().unwrap().into_multi();
+/// let trailing = handles.take_producer(0).unwrap().into_multi();
+///
+/// let lead_clone = lead.clone();
+///
+/// assert_eq!(lead.count(), 2);
+/// assert_eq!(trailing.count(), 1);
+/// ```
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     cursor: Arc<Cursor>,
@@ -38,7 +54,7 @@ where
 }
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
-    /// Returns the count of [`MultiProducer`] associated with this cursor.
+    /// Returns the count of [`MultiProducer`]s associated with this cursor.
     ///
     /// **Important:** Care should be taken when performing actions based upon this number, as any
     /// thread which holds an associated [`MultiProducer`] may clone it at any time, thereby
@@ -68,9 +84,14 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// Returns the current sequence value for this producer's cursor.
     ///
     /// **Important:** The cursor for a `MultiProducer` is shared by all of its clones. Any of
-    /// these clones could alter this value at any time if they are writing to the buffer.
+    /// these clones could alter this value at any time, if they are writing to the buffer.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
     }
 
     /// Return a [`Producer`] if exactly one `MultiProducer` exists for this cursor.
@@ -270,7 +291,7 @@ where
 }
 
 impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BATCH> {
-    /// Returns the count of [`ExactMultiProducer`] associated with this producer's cursor.
+    /// Returns the count of [`ExactMultiProducer`]s associated with this producer's cursor.
     ///
     /// Care should be taken when performing actions based upon this number, as any thread which
     /// holds an associated [`ExactMultiProducer`] may clone it at any time, thereby changing the
@@ -302,17 +323,22 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     /// Returns the current sequence value for this producer's cursor.
     ///
     /// **Important:** The cursor for a `ExactMultiProducer` is shared by all of its clones. Any of
-    /// these clones could alter this value at any time if they are writing to the buffer.
+    /// these clones could alter this value at any time, if they are writing to the buffer.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
     }
 
     /// Return a [`MultiProducer`] if exactly one [`ExactMultiProducer`] exists for this cursor.
     ///
     /// Otherwise, return `None` and drops this producer.
     ///
-    /// If this function is called when only one [`ExactMultiProducer`] exists, then it is
-    /// guaranteed to return a [`MultiProducer`].
+    /// If this function is called when only one `ExactMultiProducer` exists, then it is
+    /// guaranteed to return a `MultiProducer`.
     ///
     /// # Examples
     /// ```
@@ -340,7 +366,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     }
 
     /// Returns a new [`ExactMultiProducer`] if `NEW_BATCH` is valid and exactly one
-    /// [`ExactMultiProducer`] exists for this cursor.
+    /// `ExactMultiProducer` exists for this cursor.
     ///
     /// Valid `NEW_BATCH` values must meet the following conditions:
     /// 1) `NEW_BATCH` must not be zero.
@@ -349,7 +375,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     ///
     /// If `NEW_BATCH` is invalid, returns the calling producer.
     ///
-    /// If `NEW_BATCH` is valid, but more than one [`ExactMultiProducer`] exists for this cursor,
+    /// If `NEW_BATCH` is valid, but more than one `ExactMultiProducer` exists for this cursor,
     /// returns `Ok(None)` and the caller is dropped.
     ///
     /// # Examples
@@ -531,6 +557,11 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
+    }
+
     /// Converts this `Producer` into a [`MultiProducer`].
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -709,6 +740,11 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
+    }
+
     /// Converts this [`ExactProducer`] into a [`Producer`].
     pub fn into_producer(self) -> Producer<E, W, LEAD> {
         Producer {
@@ -719,7 +755,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
         }
     }
 
-    /// See docs for [`Producer::into_exact`].
+    /// todo docs
     pub fn into_exact<const NEW: u32>(self) -> Result<ExactProducer<E, W, LEAD, NEW>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
         if invalid_batch_size(NEW, self.buffer.size(), sequence) {
@@ -825,6 +861,11 @@ impl<E, W> Consumer<E, W> {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
+    }
+
     /// Returns an [`ExactConsumer`] if `BATCH` is valid.
     ///
     /// Otherwise, returns the calling consumer.
@@ -891,28 +932,27 @@ where
 {
     /// Read a batch of events from the buffer.
     ///
-    /// Waits until at least batch `size` number of events are available,
+    /// Waits until at least batch `size` number of events are available.
     ///
-    /// Strictly, `size` must be less than the size of the ring buffer, but practically it must be
-    /// smaller than that. Very large batch sizes will cause handles to bunch up and stall while
-    /// waiting for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that. `size`s close to the buffer size will likely cause handles to bunch up and stall
+    /// while waiting for large portions of the buffer to become available.
     ///
     /// `read` is a callback with the signature:
-    /// `read(event: &E, sequence: i64, batch_end: bool)`
+    /// > `read(event: &E, sequence: i64, batch_end: bool)`
     ///
     /// - `event` is the buffer element being read.
     /// - `sequence` is the position of this event in the sequence.
     /// - `batch_end` indicates whether this is the last event in the requested batch.
     ///
-    /// The logic in `read` should not panic, as doing so will cause the `Consumer` to stop and
-    /// become unrecoverable. If any handle in the disruptor permanently stops, the entire
-    /// disruptor may eventually permanently stall.
+    /// `read` should not panic. Handles which permanently halt while disruptor operations are
+    /// ongoing may eventually cause the entire disruptor to permanently stall.
     ///
     /// # Examples
     /// ```no_run
     /// use ansa::*;
     ///
-    /// let event = 0i64;
+    /// let event = 0u32;
     ///
     /// let mut handles = DisruptorBuilder::new(64, || event)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -921,18 +961,11 @@ where
     ///
     /// let consumer = handles.take_consumer(0).unwrap();
     ///
-    /// fn read(event: &i64, sequence: i64, batch_end: bool) {
-    ///     // do something
-    /// }
-    ///
-    /// consumer.batch_read(8, read);
-    ///
-    /// // or using a closure
-    /// consumer.batch_read(8, |event, seq, end| {
+    /// // in some thread
+    /// consumer.batch_read(8, |event: &u32, seq: i64, end: bool| {
     ///     // do something
     /// });
     /// ```
-    /// This example is contrived, see the top level [`ansa`](crate) docs for representative uses.
     pub fn batch_read<F>(&self, size: u32, read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -945,13 +978,39 @@ where
         self.consume(consumer_seq, batch_end, read)
     }
 
-    /// Specialised function which will always consume *all* available buffer elements when called.
+    /// Read events from the buffer.
     ///
-    /// Can flexibly read as many events as are available to consume. Waits until there is at least
-    /// one event to consume.
+    /// Waits until any number of events are available.
     ///
-    /// See [`batch_read`](Consumer::batch_read) for further documentation.
-    pub fn read<F>(&self, read: F)
+    /// Effectively acts like [`batch_read`](Consumer::batch_read), but with a dynamic batch size.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is the buffer element being read.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the batch.
+    ///
+    /// `read` should not panic. Handles which permanently halt while disruptor operations are
+    /// ongoing may eventually cause the entire disruptor to permanently stall.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use ansa::*;
+    ///
+    /// let event = 0u32;
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || event)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let consumer = handles.take_consumer(0).unwrap();
+    ///
+    /// // in some thread
+    /// consumer.read_any(|event: &u32, seq: i64, end: bool| { /* do something */ })
+    /// ```
+    pub fn read_any<F>(&self, read: F)
     where
         F: FnMut(&E, i64, bool),
     {
@@ -966,8 +1025,23 @@ impl<E, W> Consumer<E, W>
 where
     W: TryWaitStrategy,
 {
-    /// todo docs
-    pub fn try_batch_read<F>(&self, size: u32, read: F) -> Result<(), W::Error>
+    /// Read a batch of events from the buffer if successful.
+    ///
+    /// Otherwise, returns the error specified by the wait strategy.
+    ///
+    /// Waits until at least batch `size` number of events are available or until an error occurs.
+    ///
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that. `size`s close to the buffer size will likely cause handles to bunch up and stall
+    /// while waiting for large portions of the buffer to become available.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is the buffer element being read.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    pub fn try_batch_read<F, R>(&self, size: u32, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),
     {
@@ -981,7 +1055,7 @@ where
     }
 
     /// todo docs
-    pub fn try_read<F>(&self, read: F) -> Result<(), W::Error>
+    pub fn try_read_any<F>(&self, read: F) -> Result<(), W::Error>
     where
         F: FnMut(&E, i64, bool),
     {
@@ -1006,6 +1080,11 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
     /// Returns the current sequence value for this consumer's cursor.
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
+    }
+
+    /// Returns the size of the ring buffer.
+    pub fn batch_size(&self) -> usize {
+        self.buffer.size()
     }
 
     /// Converts this [`ExactConsumer`] into a [`Consumer`].

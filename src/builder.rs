@@ -16,9 +16,9 @@ use std::sync::Arc;
 pub struct DisruptorBuilder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
     buffer_size: usize,
-    /// Factory function for populating the buffer with elements. Wrapped in an option only to
+    /// Factory function for populating the buffer with events. Wrapped in an option only to
     /// facilitate moving the value out of the builder while the builder is still in use.
-    element_factory: Option<F>,
+    event_factory: Option<F>,
     /// Factory function for building instances of the wait strategy, defaults to WaitBlocking.
     wait_strategy: W,
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
@@ -35,13 +35,14 @@ pub struct DisruptorBuilder<F, E, W> {
     element_type: PhantomData<E>,
 }
 
-// separate impl block for `new` so that a default type for wait factory can be provided
 impl<F, E> DisruptorBuilder<F, E, WaitBlocking> {
     /// Returns a new [`DisruptorBuilder`].
     ///
     /// `size` must be a non-zero power of 2.
     ///
-    /// The default wait factory returns instances of: [`WaitBlocking`].
+    /// `event_factory` is used to populate the buffer.
+    ///
+    /// The default wait strategy is [`WaitBlocking`].
     ///
     /// # Examples
     /// ```
@@ -60,14 +61,14 @@ impl<F, E> DisruptorBuilder<F, E, WaitBlocking> {
     ///
     /// let builder = DisruptorBuilder::new(64, factory);
     /// ```
-    pub fn new(size: usize, element_factory: F) -> Self
+    pub fn new(size: usize, event_factory: F) -> Self
     where
         E: Sync,
         F: FnMut() -> E,
     {
         DisruptorBuilder {
             buffer_size: size,
-            element_factory: Some(element_factory),
+            event_factory: Some(event_factory),
             wait_strategy: WaitBlocking::new(),
             followed_by: U64Map::default(),
             follows: U64Map::default(),
@@ -229,7 +230,7 @@ where
     {
         DisruptorBuilder {
             buffer_size: self.buffer_size,
-            element_factory: self.element_factory,
+            event_factory: self.event_factory,
             wait_strategy: strategy,
             followed_by: self.followed_by,
             follows: self.follows,
@@ -247,7 +248,7 @@ where
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
         // unwrap okay as this value will always be inhabited as per construction of the builder
-        let element_factory = self.element_factory.take().unwrap();
+        let element_factory = self.event_factory.take().unwrap();
         let buffer = Arc::new(RingBuffer::new(self.buffer_size, element_factory));
         let lead_cursor = Arc::new(Cursor::start());
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
