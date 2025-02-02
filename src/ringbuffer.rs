@@ -33,7 +33,7 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut() -> E,
     {
-        assert!(
+        debug_assert!(
             size > 0 && (size & (size - 1)) == 0,
             "size must be non-zero power of 2; found: {size}"
         );
@@ -67,7 +67,7 @@ impl<E> RingBuffer<E> {
     /// mutable pointers to exist simultaneously.
     #[inline]
     pub(crate) fn get(&self, sequence: i64) -> *mut E {
-        assert!(sequence >= 0, "sequence must be >= 0; found: {sequence}");
+        debug_assert!(sequence >= 0, "sequence must be >= 0; found: {sequence}");
         // sequence may be greater than buffer size, so mod to bring it inbounds. Since size is a
         // power of 2, the calculation is: `sequence & (size - 1)`, and we've already calculated
         // `(size - 1)`

@@ -3,13 +3,14 @@ use crate::wait::{TryWaitStrategy, WaitStrategy};
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
-/// Writes events to the disruptor.
+/// A handle with mutable access to events on the ring buffer.
 ///
-/// A `MultiProducer` has mutable access to events on the ring buffer, and as a consequence,
-/// `MultiProducer`s cannot run concurrently to any other handles.
+/// Cannot access events concurrently with other handles.
 ///
-/// But, `MultiProducer`s can be cloned and may run concurrently with their clones. Clones of this
-/// `MultiProducer` share only this producer's cursor.
+/// `MultiProducer`s can be cloned and these clones can run concurrently. Clones will not overlap
+/// buffer accesses, but can be used to distribute work.
+///
+/// Clones of this `MultiProducer` share this producer's cursor.
 ///
 /// # Examples
 /// ```
@@ -227,7 +228,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
@@ -235,7 +236,7 @@ where
             claim_end
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, claim_end, write);
     }
 }
@@ -249,7 +250,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
@@ -257,7 +258,7 @@ where
             claim_end
         };
         self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, claim_end, write);
         Ok(())
     }
@@ -492,7 +493,7 @@ where
             claim_end
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, write);
     }
 }
@@ -514,7 +515,7 @@ where
             claim_end
         };
         self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(current_claim, write);
         Ok(())
     }
@@ -539,10 +540,9 @@ fn claim(claim: &Cursor, size: i64) -> (i64, i64) {
     (current_claim, claim_end)
 }
 
-/// Writes events to the disruptor.
+/// A handle with mutable access to events on the ring buffer.
 ///
-/// A `Producer` has mutable access to events on the ring buffer, and as a consequence, `Producer`s
-/// cannot run concurrently to any other handles.
+/// Cannot access events concurrently with other handles.
 #[derive(Debug)]
 pub struct Producer<E, W, const LEAD: bool> {
     pub(crate) cursor: Arc<Cursor>,
@@ -687,7 +687,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
@@ -696,7 +696,7 @@ where
             batch_end
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, batch_end, write);
     }
 }
@@ -710,7 +710,7 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size as i64;
         let desired_seq = if LEAD {
@@ -719,7 +719,7 @@ where
             batch_end
         };
         self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, batch_end, write);
         Ok(())
     }
@@ -814,7 +814,7 @@ where
             batch_end
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, write);
     }
 }
@@ -837,16 +837,97 @@ where
             batch_end
         };
         self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        assert!(self.barrier.sequence() >= desired_seq);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         self.produce(producer_seq, write);
         Ok(())
     }
 }
 
-/// Reads events from the disruptor.
+// ReadAvailable WriteAvailable
+
+pub struct ReadAvailable<'a, E, const BATCH: u32 = 0, const EXACT: bool = false> {
+    // always take mutable ref so that we know the cursor will only be changed by this struct
+    cursor: &'a mut Arc<Cursor>,
+    buffer: &'a Arc<RingBuffer<E>>,
+    current_seq: i64,
+    end_seq: i64,
+}
+
+impl<E, const BATCH: u32> ReadAvailable<'_, E, BATCH, false> {
+    pub fn read<F>(self, mut read: F)
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        fence(Ordering::Acquire);
+        for seq in self.current_seq + 1..=self.end_seq {
+            // SAFETY:
+            // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+            //    ensuring multiple mutable refs are not created here.
+            // 2) The Acquire-Release barrier ensures that following producers will not attempt
+            //    writes to this sequence.
+            let event: &E = unsafe { &*self.buffer.get(seq) };
+            read(event, seq, seq == self.end_seq);
+        }
+        self.cursor.sequence.store(self.end_seq, Ordering::Release);
+    }
+
+    pub fn try_read<F, Err>(&self, mut read: F) -> Result<(), Err>
+    where
+        F: FnMut(&E, i64, bool) -> Result<(), Err>,
+    {
+        fence(Ordering::Acquire);
+        let mut seq = self.current_seq + 1;
+        let (new_seq, result) = loop {
+            // SAFETY:
+            // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+            //    ensuring multiple mutable refs are not created here.
+            // 2) The Acquire-Release barrier ensures that following producers will not attempt
+            //    writes to this sequence.
+            let event: &E = unsafe { &*self.buffer.get(seq) };
+            if let err @ Err(_) = read(event, seq, seq == self.end_seq) {
+                break (seq - 1, err);
+            }
+            if seq == self.end_seq {
+                break (seq, Ok(()));
+            }
+            seq += 1;
+        };
+        // todo: Rollback strategy
+        self.cursor.sequence.store(new_seq, Ordering::Release);
+        result
+    }
+}
+
+impl<E, const BATCH: u32> ReadAvailable<'_, E, BATCH, true> {
+    pub fn read_exact<F>(&self, mut read: F)
+    where
+        F: FnMut(&E, i64, bool),
+    {
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) The mutable pointer to the event is immediately converted to an immutable pointer,
+        //    ensuring multiple mutable refs cannot be created here.
+        // 2) The Acquire-Release barrier ensures that following producers will not attempt writes
+        //    to this sequence.
+        // 3) The pointer is always guaranteed to be inbounds of the ring buffer allocation by the
+        //    checks on BATCH size made when creating this struct.
+        let mut seq = self.current_seq + 1;
+        let mut pointer = self.buffer.get(seq) as *const E;
+        unsafe {
+            for _ in 0..BATCH - 1 {
+                read(&*pointer, seq, false);
+                pointer = pointer.add(1);
+                seq += 1;
+            }
+            read(&*pointer, seq, true);
+        }
+        self.cursor.sequence.store(seq, Ordering::Release);
+    }
+}
+
+/// A handle with immutable access to events on the ring buffer.
 ///
-/// A `Consumer` has only immutable access to events on the ring buffer, but as a consequence,
-/// multiple `Consumer`s can make concurrent, overlapping accesses to the ring buffer.
+/// Can access events concurrently to handles with immutable access.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -923,31 +1004,6 @@ impl<E, W> Consumer<E, W> {
         }
         self.cursor.sequence.store(batch_end, Ordering::Release);
     }
-
-    // fn try_consume<F, Err>(&self, consumer_seq: i64, batch_end: i64, mut read: F) -> Result<(), Err>
-    // where
-    //     F: FnMut(&E, i64, bool) -> Result<(), Err>,
-    // {
-    //     fence(Ordering::Acquire);
-    //     let mut seq = consumer_seq + 1;
-    //     let (new_seq, result) = loop {
-    //         // SAFETY:
-    //         // 1) The mutable pointer to the event is immediately converted to an immutable ref,
-    //         //    ensuring multiple mutable refs are not created here.
-    //         // 2) The Acquire-Release barrier ensures that following producers will not attempt
-    //         //    writes to this sequence.
-    //         let event: &E = unsafe { &*self.buffer.get(seq) };
-    //         if let err @ Err(_) = read(event, seq, seq == batch_end) {
-    //             break (seq, err);
-    //         }
-    //         if seq == batch_end {
-    //             break (seq, Ok(()));
-    //         }
-    //         seq += 1;
-    //     };
-    //     self.cursor.sequence.store(new_seq, Ordering::Release);
-    //     result
-    // }
 }
 
 impl<E, W> Consumer<E, W>
@@ -994,11 +1050,11 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.wait(batch_end, &self.barrier);
-        assert!(self.barrier.sequence() >= batch_end);
+        debug_assert!(self.barrier.sequence() >= batch_end);
         self.consume(consumer_seq, batch_end, read)
     }
 
@@ -1040,8 +1096,21 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
-        assert!(barrier_seq > consumer_seq);
+        debug_assert!(barrier_seq > consumer_seq);
         self.consume(consumer_seq, barrier_seq, read)
+    }
+
+    pub fn wait_batch(&mut self, size: u32) -> ReadAvailable<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = consumer_seq + size as i64;
+        self.wait_strategy.wait(batch_end, &self.barrier);
+        ReadAvailable {
+            cursor: &mut self.cursor,
+            buffer: &self.buffer,
+            current_seq: consumer_seq,
+            end_seq: batch_end,
+        }
     }
 }
 
@@ -1069,11 +1138,11 @@ where
     where
         F: FnMut(&E, i64, bool),
     {
-        assert!(size as usize <= self.buffer.size());
+        debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + size as i64;
         self.wait_strategy.try_wait(batch_end, &self.barrier)?;
-        assert!(self.barrier.sequence() >= batch_end);
+        debug_assert!(self.barrier.sequence() >= batch_end);
         self.consume(consumer_seq, batch_end, read);
         Ok(())
     }
@@ -1085,7 +1154,7 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.try_wait(consumer_seq + 1, &self.barrier)?;
-        assert!(barrier_seq > consumer_seq);
+        debug_assert!(barrier_seq > consumer_seq);
         self.consume(consumer_seq, barrier_seq, read);
         Ok(())
     }
@@ -1192,6 +1261,18 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: WaitStrategy,
 {
+    pub fn wait_exact(&mut self) -> ReadAvailable<'_, E, BATCH, true> {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = consumer_seq + BATCH as i64;
+        self.wait_strategy.wait(batch_end, &self.barrier);
+        ReadAvailable {
+            cursor: &mut self.cursor,
+            buffer: &self.buffer,
+            current_seq: consumer_seq,
+            end_seq: batch_end,
+        }
+    }
+
     /// todo docs
     #[doc = aliasing_model_validity!()]
     pub fn read_exact<F>(&self, read: F)
@@ -1200,7 +1281,7 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         self.wait_strategy.wait(consumer_seq + BATCH as i64, &self.barrier);
-        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
+        debug_assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
         self.consume(consumer_seq, read);
     }
 }
@@ -1217,7 +1298,7 @@ where
     {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         self.wait_strategy.try_wait(consumer_seq + BATCH as i64, &self.barrier)?;
-        assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
+        debug_assert!(self.barrier.sequence() >= consumer_seq + BATCH as i64);
         self.consume(consumer_seq, read);
         Ok(())
     }

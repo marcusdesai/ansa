@@ -628,6 +628,15 @@ impl<W> Timeout<W> {
     }
 }
 
+impl<W> Waiting for Timeout<W>
+where
+    W: Waiting,
+{
+    fn waiting(&self) {
+        self.strategy.waiting()
+    }
+}
+
 // SAFETY: use of `wait_loop_timeout` guarantees correct implementation
 unsafe impl<W> TryWaitStrategy for Timeout<W>
 where
