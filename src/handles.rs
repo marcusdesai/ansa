@@ -90,7 +90,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
@@ -329,7 +329,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
@@ -558,7 +558,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
@@ -741,7 +741,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
@@ -862,7 +862,7 @@ impl<E, W> Consumer<E, W> {
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
@@ -921,9 +921,33 @@ impl<E, W> Consumer<E, W> {
             let event: &E = unsafe { &*self.buffer.get(seq) };
             read(event, seq, seq == batch_end);
         }
-        // Move cursor up to sequence at end of batch.
         self.cursor.sequence.store(batch_end, Ordering::Release);
     }
+
+    // fn try_consume<F, Err>(&self, consumer_seq: i64, batch_end: i64, mut read: F) -> Result<(), Err>
+    // where
+    //     F: FnMut(&E, i64, bool) -> Result<(), Err>,
+    // {
+    //     fence(Ordering::Acquire);
+    //     let mut seq = consumer_seq + 1;
+    //     let (new_seq, result) = loop {
+    //         // SAFETY:
+    //         // 1) The mutable pointer to the event is immediately converted to an immutable ref,
+    //         //    ensuring multiple mutable refs are not created here.
+    //         // 2) The Acquire-Release barrier ensures that following producers will not attempt
+    //         //    writes to this sequence.
+    //         let event: &E = unsafe { &*self.buffer.get(seq) };
+    //         if let err @ Err(_) = read(event, seq, seq == batch_end) {
+    //             break (seq, err);
+    //         }
+    //         if seq == batch_end {
+    //             break (seq, Ok(()));
+    //         }
+    //         seq += 1;
+    //     };
+    //     self.cursor.sequence.store(new_seq, Ordering::Release);
+    //     result
+    // }
 }
 
 impl<E, W> Consumer<E, W>
@@ -1083,7 +1107,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
     }
 
     /// Returns the size of the ring buffer.
-    pub fn batch_size(&self) -> usize {
+    pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
 
