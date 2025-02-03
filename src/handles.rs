@@ -1087,7 +1087,7 @@ fn invalid_batch_size(batch: u32, buffer_size: usize, sequence: i64) -> bool {
     batch == 0 || buffer_size % batch as usize != 0 || sequence % batch as i64 != 0
 }
 
-/// todo docs
+/// Represents a range of available sequences which may be written to.
 pub struct AvailableWrite<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref to hold exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1099,12 +1099,11 @@ pub struct AvailableWrite<'a, E> {
 impl<E> AvailableWrite<'_, E> {
     /// Write a batch of events to the buffer.
     ///
-    /// `write` is a callback with the signature:
-    /// > `write(event: &mut E, sequence: i64, batch_end: bool)`
+    /// The parameters of `write` are:
     ///
-    /// - `event` is a mutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &mut E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn write<F>(self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -1147,12 +1146,11 @@ impl<E> AvailableWrite<'_, E> {
     ///
     /// In effect, rollback to the start of the batch.
     ///
-    /// `write` is a callback with the signature:
-    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `write` are:
     ///
-    /// - `event` is a mutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &mut E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn try_write<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1167,12 +1165,11 @@ impl<E> AvailableWrite<'_, E> {
     ///
     /// In effect, commit successful portion of the batch.
     ///
-    /// `write` is a callback with the signature:
-    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `write` are:
     ///
-    /// - `event` is a mutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &mut E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn try_write_commit<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1192,7 +1189,7 @@ macro_rules! aliasing_model_validity {
     };
 }
 
-/// todo docs
+/// Represents a range of available sequences which may be written to.
 pub struct AvailableWriteExact<'a, E, const BATCH: u32> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1203,12 +1200,11 @@ pub struct AvailableWriteExact<'a, E, const BATCH: u32> {
 impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
     /// Write an exact batch of events to the buffer.
     ///
-    /// `write` is a callback with the signature:
-    /// > `write(event: &mut E, sequence: i64, batch_end: bool)`
+    /// The parameters of `write` are:
     ///
-    /// - `event` is a mutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &mut E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn write<F>(self, mut write: F)
     where
@@ -1238,12 +1234,11 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
     ///
     /// In effect, rollback to the start of the batch.
     ///
-    /// `write` is a callback with the signature:
-    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `write` are:
     ///
-    /// - `event` is a mutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &mut E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn try_write<F, Err>(self, mut write: F) -> Result<(), Err>
     where
@@ -1269,7 +1264,7 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
     }
 }
 
-/// todo docs
+/// Represents a range of available sequences which may be read from.
 pub struct AvailableRead<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1280,12 +1275,11 @@ pub struct AvailableRead<'a, E> {
 impl<E> AvailableRead<'_, E> {
     /// Read a batch of events from the buffer.
     ///
-    /// `read` is a callback with the signature:
-    /// > `read(event: &E, sequence: i64, batch_end: bool)`
+    /// The parameters of `read` are:
     ///
-    /// - `event` is an immutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn read<F>(self, mut read: F)
     where
         F: FnMut(&E, i64, bool),
@@ -1328,12 +1322,11 @@ impl<E> AvailableRead<'_, E> {
     ///
     /// In effect, rollback to the start of the batch.
     ///
-    /// `read` is a callback with the signature:
-    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `read` are:
     ///
-    /// - `event` is an immutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn try_read<F, Err>(self, read: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
@@ -1348,12 +1341,11 @@ impl<E> AvailableRead<'_, E> {
     ///
     /// In effect, commit successful portion of the batch.
     ///
-    /// `read` is a callback with the signature:
-    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `read` are:
     ///
-    /// - `event` is an immutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     pub fn try_read_commit<F, Err>(self, read: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
@@ -1362,7 +1354,7 @@ impl<E> AvailableRead<'_, E> {
     }
 }
 
-/// todo docs
+/// Represents a range of available sequences which may be read from.
 pub struct AvailableReadExact<'a, E, const BATCH: u32> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1372,12 +1364,11 @@ pub struct AvailableReadExact<'a, E, const BATCH: u32> {
 impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
     /// Read an exact batch of events from the buffer.
     ///
-    /// `read` is a callback with the signature:
-    /// > `read(event: &E, sequence: i64, batch_end: bool)`
+    /// The parameters of `read` are:
     ///
-    /// - `event` is an immutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn read<F>(self, mut read: F)
     where
@@ -1407,12 +1398,11 @@ impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
     ///
     /// In effect, rollback to the start of the batch.
     ///
-    /// `read` is a callback with the signature:
-    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    /// The parameters of `read` are:
     ///
-    /// - `event` is an immutable reference to the buffer element being accessed.
-    /// - `sequence` is the position of this event in the sequence.
-    /// - `batch_end` indicates whether this is the last event in the requested batch.
+    /// - `event: &E`, a reference to the buffer element being accessed.
+    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn try_read<F, Err>(self, mut read: F) -> Result<(), Err>
     where
