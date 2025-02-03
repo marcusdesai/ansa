@@ -29,7 +29,6 @@ mod integration_tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     fn simple_disruptor<W: Clone>(wait: W) -> DisruptorHandles<i64, W> {
         DisruptorBuilder::new(64, || 0i64)
@@ -50,10 +49,10 @@ mod integration_tests {
                     }
                 });
                 let out = &mut result;
-                let consumer = $handles.take_consumer(0).unwrap();
+                let mut consumer = $handles.take_consumer(0).unwrap();
                 s.spawn(move || {
                     for _ in 0..num_of_events / 20 {
-                        consumer.batch_read(20, |i, seq, _| out[seq as usize] = *i)
+                        consumer.wait(20).read(|i, seq, _| out[seq as usize] = *i)
                     }
                 });
             });
@@ -68,7 +67,7 @@ mod integration_tests {
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap();
         run_lead_and_consumer!(handles, BATCH, || {
-            producer.batch_write(BATCH, |i, seq, _| *i = seq)
+            producer.wait(BATCH).write(|i, seq, _| *i = seq)
         });
     }
 
@@ -78,7 +77,7 @@ mod integration_tests {
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap().into_exact::<BATCH>().unwrap();
         run_lead_and_consumer!(handles, BATCH, || {
-            producer.write_exact(|i, seq, _| *i = seq)
+            producer.wait().write(|i, seq, _| *i = seq)
         });
     }
 
@@ -88,7 +87,7 @@ mod integration_tests {
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap();
         run_lead_and_consumer!(handles, BATCH, || {
-            producer.batch_write(BATCH, |i, seq, _| *i = seq)
+            producer.wait(BATCH).write(|i, seq, _| *i = seq)
         });
     }
 
@@ -98,7 +97,7 @@ mod integration_tests {
         let mut handles = simple_disruptor(WaitBusy);
         let mut producer = handles.take_lead().unwrap().into_exact_multi::<BATCH>().unwrap();
         run_lead_and_consumer!(handles, BATCH, || {
-            producer.write_exact(|i, seq, _| *i = seq)
+            producer.wait().write(|i, seq, _| *i = seq)
         });
     }
 
@@ -111,7 +110,7 @@ mod integration_tests {
         let multi_2 = multi_1.clone();
         let multi_3 = multi_1.clone();
 
-        let consumer = handles.take_consumer(0).unwrap();
+        let mut consumer = handles.take_consumer(0).unwrap();
 
         let sync_barrier = Arc::new(std::sync::Barrier::new(4));
         let done = Arc::new(AtomicI64::new(0));
@@ -125,7 +124,7 @@ mod integration_tests {
                 s.spawn(move || {
                     sb.wait();
                     for _ in 0..2 {
-                        producer.batch_write(publish_amount / 2, |i, seq, _| *i = seq);
+                        producer.wait(publish_amount / 2).write(|i, seq, _| *i = seq);
                     }
                     dc.fetch_add(1, Ordering::Relaxed);
                 });
@@ -136,7 +135,7 @@ mod integration_tests {
                 sync_barrier.wait();
                 let mut counter = 0;
                 while counter != publish_amount * 3 {
-                    consumer.read_any(|i, seq, _| {
+                    consumer.wait_any().read(|i, seq, _| {
                         counter += 1;
                         out[seq as usize] = *i;
                     })
@@ -186,7 +185,7 @@ mod integration_tests {
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    producer.batch_write(20, |event, seq, _| {
+                    producer.wait(20).write(|event, seq, _| {
                         event.seq = seq;
                         if seq == num_of_events - 1 {
                             event.consumer_break = true;
@@ -196,24 +195,24 @@ mod integration_tests {
                 }
             });
 
-            let consumer_0 = handles.take_consumer(0).unwrap();
+            let mut consumer_0 = handles.take_consumer(0).unwrap();
             let out = &mut consumer_0_out;
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_0.read_any(|event, _, _| {
+                    consumer_0.wait_any().read(|event, _, _| {
                         out.push(*event);
                         should_continue = !event.consumer_break;
                     });
                 }
             });
 
-            let consumer_1 = handles.take_consumer(1).unwrap();
+            let mut consumer_1 = handles.take_consumer(1).unwrap();
             let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_1.batch_read(10, |event, seq, _| {
+                    consumer_1.wait(10).read(|event, seq, _| {
                         if event.seq == seq {
                             c1_counter.fetch_add(1, Ordering::Relaxed);
                         }
@@ -222,26 +221,26 @@ mod integration_tests {
                 }
             });
 
-            let consumer_2 = handles.take_consumer(2).unwrap();
+            let mut consumer_2 = handles.take_consumer(2).unwrap();
             let c2_counter = Arc::clone(&consumer_2_call_counter);
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_2.read_any(|event, _, _| {
+                    consumer_2.wait_any().read(|event, _, _| {
                         c2_counter.fetch_add(1, Ordering::Relaxed);
                         should_continue = !event.consumer_break;
                     })
                 }
             });
 
-            let consumer_3 = handles.take_consumer(3).unwrap();
+            let mut consumer_3 = handles.take_consumer(3).unwrap();
             let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
             let c2_counter = Arc::clone(&consumer_2_call_counter);
             let c3_flag = &mut consumer_3_check_flag;
             s.spawn(move || {
                 let mut should_continue = true;
                 while should_continue {
-                    consumer_3.batch_read(20, |event, seq, _| {
+                    consumer_3.wait(20).read(|event, seq, _| {
                         // both counters should be at or ahead of the seq value this consumer sees
                         *c3_flag = c1_counter.load(Ordering::Relaxed) >= seq;
                         *c3_flag = c2_counter.load(Ordering::Relaxed) >= seq;
@@ -271,84 +270,6 @@ mod integration_tests {
         assert!(consumer_3_check_flag)
     }
 
-    // if running miri, requires MIRIFLAGS="-Zmiri-disable-isolation" to be set
-    #[test]
-    fn test_wait_blocking() {
-        let mut handles = DisruptorBuilder::new(32, || 0i64)
-            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
-            .wait_strategy(WaitBlocking::new())
-            .build()
-            .unwrap();
-
-        let mut producer = handles.take_lead().unwrap();
-        let consumer_0 = handles.take_consumer(0).unwrap();
-        let consumer_1 = handles.take_consumer(1).unwrap();
-
-        let num_of_events = 100;
-        let c0_counter = Arc::new(AtomicI64::new(0));
-        let c1_counter = Arc::new(AtomicI64::new(0));
-
-        let join_p = std::thread::spawn(move || {
-            let mut counter = 0;
-            while counter < num_of_events - 1 {
-                producer.batch_write(10, |i, seq, _| {
-                    counter += 1;
-                    *i = seq;
-                });
-                // add some time just to make sure the consumers end up waiting
-                std::thread::sleep(Duration::from_micros(10));
-            }
-        });
-
-        let c0_out = Arc::clone(&c0_counter);
-        let join_c0 = std::thread::spawn(move || {
-            let mut should_continue = true;
-            while should_continue {
-                consumer_0.read_any(|_, seq, _| {
-                    c0_out.fetch_add(1, Ordering::Relaxed);
-                    should_continue = seq < num_of_events - 1;
-                });
-            }
-        });
-
-        let c1_out = Arc::clone(&c1_counter);
-        let join_c1 = std::thread::spawn(move || {
-            let mut should_continue = true;
-            while should_continue {
-                consumer_1.batch_read(5, |_, seq, _| {
-                    c1_out.fetch_add(1, Ordering::Relaxed);
-                    should_continue = seq < num_of_events - 1;
-                });
-            }
-        });
-
-        #[cfg(not(miri))]
-        let loop_timeout = Duration::from_millis(100);
-        // miri interprets the code and thus takes much longer to run than even debug builds. So we
-        // make the timeout significantly longer to account for this.
-        #[cfg(miri)]
-        let loop_timeout = Duration::from_secs(10);
-
-        let timer = Instant::now();
-        while !join_c1.is_finished() {
-            if timer.elapsed() > loop_timeout {
-                break;
-            }
-        }
-
-        // fail if while loop was timed out, as this will usually indicate deadlock
-        assert!(join_c1.is_finished(), "took too long");
-
-        // join to ensure the threads finish all their work before we read the counters.
-        join_p.join().expect("done p");
-        join_c0.join().expect("done c0");
-        join_c1.join().expect("done c1");
-
-        assert_eq!(c0_counter.load(Ordering::Relaxed), num_of_events);
-        assert_eq!(c1_counter.load(Ordering::Relaxed), num_of_events);
-    }
-
     #[test]
     fn test_trailing_single_producer() {
         let mut handles = DisruptorBuilder::new(64, || 0i64)
@@ -367,7 +288,7 @@ mod integration_tests {
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
-                    producer.batch_write(20, |i, seq, _| {
+                    producer.wait(20).write(|i, seq, _| {
                         counter += 1;
                         *i = seq;
                     })
@@ -375,11 +296,11 @@ mod integration_tests {
             });
 
             let out_0 = &mut result_seqs;
-            let consumer_0 = handles.take_consumer(0).unwrap();
+            let mut consumer_0 = handles.take_consumer(0).unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
-                    consumer_0.batch_read(20, |i, seq, _| {
+                    consumer_0.wait(20).read(|i, seq, _| {
                         counter += 1;
                         out_0[seq as usize] = *i;
                     })
@@ -390,7 +311,7 @@ mod integration_tests {
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
-                    trailing_producer.batch_write(20, |i, _, _| {
+                    trailing_producer.wait(20).write(|i, _, _| {
                         counter += 1;
                         *i = 0;
                     })
@@ -398,11 +319,11 @@ mod integration_tests {
             });
 
             let out_2 = &mut result_blank;
-            let consumer_2 = handles.take_consumer(2).unwrap();
+            let mut consumer_2 = handles.take_consumer(2).unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
-                    consumer_2.batch_read(20, |i, _, _| {
+                    consumer_2.wait(20).read(|i, _, _| {
                         counter += 1;
                         out_2.push(*i);
                     })
@@ -435,7 +356,7 @@ mod integration_tests {
         let join_lead = std::thread::spawn(move || {
             let mut counter = 0;
             while counter < num_of_events {
-                producer.batch_write(20, |i, seq, _| {
+                producer.wait(20).write(|i, seq, _| {
                     counter += 1;
                     *i = seq;
                 })
@@ -447,7 +368,7 @@ mod integration_tests {
         for mut multi_producer in [trailing_multi.clone(), trailing_multi] {
             let join = std::thread::spawn(move || {
                 for _ in 0..10 {
-                    multi_producer.batch_write(10, |i, _, _| {
+                    multi_producer.wait(10).write(|i, _, _| {
                         *i = 0;
                     })
                 }
@@ -456,12 +377,12 @@ mod integration_tests {
         }
 
         let mut results = HashMap::new();
-        for (id, consumer) in handles.drain_consumers() {
+        for (id, mut consumer) in handles.drain_consumers() {
             let join = std::thread::spawn(move || {
                 let mut counter = 0;
                 let mut out = vec![];
                 while counter < num_of_events {
-                    consumer.batch_read(20, |i, _, _| {
+                    consumer.wait(20).read(|i, _, _| {
                         counter += 1;
                         out.push(*i);
                     })
@@ -509,14 +430,14 @@ mod integration_tests {
             s.spawn(move || {
                 let mut producer = lead;
                 for _ in 0..2 {
-                    producer.batch_write(50, |event, seq, _| event.seq = seq)
+                    producer.wait(50).write(|event, seq, _| event.seq = seq)
                 }
                 let multi = producer.into_multi();
                 let mut joins = vec![];
                 for mut multi_producer in [multi.clone(), multi] {
                     let join = std::thread::spawn(move || {
                         for _ in 0..5 {
-                            multi_producer.batch_write(10, |event, seq, _| event.seq = seq)
+                            multi_producer.wait(10).write(|event, seq, _| event.seq = seq)
                         }
                         multi_producer
                     });
@@ -528,7 +449,7 @@ mod integration_tests {
                     .fold(None, |opt, i| opt.or(i.into_single()))
                     .expect("single");
                 for _ in 0..2 {
-                    producer.batch_write(50, |event, seq, _| event.seq = seq)
+                    producer.wait(50).write(|event, seq, _| event.seq = seq)
                 }
             });
 
@@ -540,7 +461,8 @@ mod integration_tests {
                     let join = std::thread::spawn(move || {
                         for _ in 0..5 {
                             multi_producer
-                                .batch_write(10, |event, _, _| event.seq_times_2 = event.seq * 2)
+                                .wait(10)
+                                .write(|event, _, _| event.seq_times_2 = event.seq * 2)
                         }
                         multi_producer
                     });
@@ -552,15 +474,15 @@ mod integration_tests {
                     .fold(None, |opt, i| opt.or(i.into_single()))
                     .expect("single");
                 for _ in 0..3 {
-                    producer.batch_write(50, |event, _, _| event.seq_times_2 = event.seq * 2)
+                    producer.wait(50).write(|event, _, _| event.seq_times_2 = event.seq * 2)
                 }
             });
 
-            let consumer = handles.take_consumer(1).unwrap();
+            let mut consumer = handles.take_consumer(1).unwrap();
             s.spawn(move || {
                 let mut counter = 0;
                 while counter < num_of_events {
-                    consumer.batch_read(20, |event, seq, _| {
+                    consumer.wait(20).read(|event, seq, _| {
                         counter += 1;
                         is_times_2 = is_times_2 && event.seq == seq && event.seq_times_2 == seq * 2;
                     })
@@ -590,7 +512,7 @@ mod integration_tests {
             let mut lead_exact = lead.into_exact::<16>().unwrap();
             s.spawn(move || {
                 for _ in 0..num_of_events / 16 {
-                    lead_exact.write_exact(|i, seq, _| {
+                    lead_exact.wait().write(|i, seq, _| {
                         *i = seq;
                     })
                 }
@@ -601,7 +523,7 @@ mod integration_tests {
             for mut producer in [multi_exact.clone(), multi_exact] {
                 s.spawn(move || {
                     for _ in 0..(num_of_events / 16) / 2 {
-                        producer.write_exact(|i, _, _| {
+                        producer.wait().write(|i, _, _| {
                             *i *= 2;
                         })
                     }
@@ -609,11 +531,11 @@ mod integration_tests {
             }
 
             let consumer = handles.take_consumer(1).unwrap();
-            let consumer_exact = consumer.into_exact::<32>().unwrap();
+            let mut consumer_exact = consumer.into_exact::<32>().unwrap();
             let last = &mut last_i;
             s.spawn(move || {
                 for _ in 0..num_of_events / 32 {
-                    consumer_exact.read_exact(|i, seq, _| {
+                    consumer_exact.wait().read(|i, seq, _| {
                         is_times_2 = is_times_2 && *i == seq * 2;
                         *last = *i;
                     })
@@ -642,7 +564,7 @@ mod integration_tests {
     //         });
     //
     //         let out = &mut result;
-    //         let consumer = handles.take_consumer(0).unwrap();
+    //         let mut consumer = handles.take_consumer(0).unwrap();
     //         let c_join = s.spawn(move || {
     //             for _ in 0..num_of_events / 20 {
     //                 consumer.try_batch_read(20, |i, seq, _| out[seq as usize] = *i).expect("q")

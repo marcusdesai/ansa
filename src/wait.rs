@@ -36,7 +36,6 @@
 //! | [`WaitBusyHint`]              | 0    |
 //! | [`WaitYield`]                 | 0    |
 //! | [`WaitSleep`]                 | 8    |
-//! | [`WaitBlocking`]              | 16   |
 //! | [`WaitPhased<W>`](WaitPhased) | 16   |
 //! | [`Timeout<W>`](Timeout)       | 8    |
 //!
@@ -44,7 +43,7 @@
 //! ```
 //! use ansa::wait::*;
 //!
-//! assert_eq!(size_of::<WaitPhased<WaitBlocking>>(), 32);
+//! assert_eq!(size_of::<WaitPhased<WaitSleep>>(), 24);
 //! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
 //! ```
 //!
@@ -59,7 +58,6 @@
 //! ```
 
 use crate::handles::Barrier;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Implement to provide logic which will run inside a wait loop.
@@ -383,16 +381,13 @@ impl Waiting for WaitYield {
     }
 }
 
-/// Busy-wait, but sleep the current thread on each iteration of the wait loop.
+/// Sleep the current thread on each iteration of the wait loop.
 ///
 /// The duration of the sleep is limited to `u64::MAX` nanoseconds.
 ///
 /// # Performance
 ///
 /// Trades latency for CPU resource use, depending on the length of the sleep.
-///
-/// An important consideration is that the sleep cannot be interrupted, unlike with
-/// [`WaitBlocking`] which will wake when notified. Note also that spurious wakes can occur.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitSleep {
     duration: u64,
@@ -414,81 +409,6 @@ impl Waiting for WaitSleep {
     #[inline]
     fn waiting(&self) {
         std::thread::sleep(Duration::from_nanos(self.duration))
-    }
-}
-
-/// Block on each iteration of the wait loop until signalled that the barrier ahead has moved.
-///
-/// Alternatively, will wake and check whether the barrier has moved after a given duration
-/// (defaulted to `200` microseconds).
-///
-/// The blocking duration is limited to `u64::MAX` nanoseconds.
-///
-/// # Performance
-///
-/// High latency but, in contrast to [`WaitSleep`], will wake when new sequences are made visible.
-///
-/// Configuring the wake duration allows trading latency for CPU resource use.
-#[derive(Clone, Debug)]
-pub struct WaitBlocking {
-    pair: Arc<(Condvar, Mutex<Empty>)>,
-    duration: u64,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct Empty;
-
-impl WaitBlocking {
-    /// Construct an instance of [`WaitBlocking`] with the default wake duration (200 microseconds).
-    #[allow(clippy::new_without_default)]
-    #[inline]
-    pub fn new() -> Self {
-        WaitBlocking {
-            pair: Arc::new((Condvar::new(), Mutex::new(Empty))),
-            duration: 200_000, // 200 micros in nanos
-        }
-    }
-
-    /// Construct an instance of [`WaitBlocking`] with the given wake `duration`.
-    ///
-    /// `duration` will be truncated to `u64::MAX` nanoseconds.
-    #[inline]
-    pub fn wake_after(duration: Duration) -> Self {
-        WaitBlocking {
-            pair: Arc::new((Condvar::new(), Mutex::new(Empty))),
-            duration: duration.as_nanos() as u64,
-        }
-    }
-}
-
-// SAFETY: use of `wait_loop` guarantees correct implementation
-unsafe impl WaitStrategy for WaitBlocking {
-    #[inline]
-    fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
-        let (condvar, mutex) = &*self.pair;
-        let block_duration = Duration::from_nanos(self.duration);
-        let barrier_seq = wait_loop(desired_seq, barrier, || {
-            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), block_duration);
-        });
-        condvar.notify_all();
-        barrier_seq
-    }
-}
-
-// SAFETY: use of `wait_loop_timeout` guarantees correct implementation
-unsafe impl TryWaitStrategy for Timeout<WaitBlocking> {
-    type Error = TimedOut;
-
-    #[inline]
-    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, TimedOut> {
-        let (condvar, mutex) = &*self.strategy.pair;
-        let block_duration = Duration::from_nanos(self.strategy.duration);
-        let timeout_duration = Duration::from_nanos(self.duration);
-        let barrier_seq = wait_loop_timeout(desired_seq, barrier, timeout_duration, || {
-            let _unused = condvar.wait_timeout(mutex.lock().unwrap(), block_duration);
-        })?;
-        condvar.notify_all();
-        Ok(barrier_seq)
     }
 }
 
@@ -662,7 +582,6 @@ mod tests {
         assert_eq!(size_of::<WaitBusyHint>(), 0);
         assert_eq!(size_of::<WaitYield>(), 0);
         assert_eq!(size_of::<WaitSleep>(), 8);
-        assert_eq!(size_of::<WaitBlocking>(), 16);
         assert_eq!(size_of::<WaitPhased<WaitBusy>>(), 16);
         assert_eq!(size_of::<Timeout<WaitBusy>>(), 8);
     }

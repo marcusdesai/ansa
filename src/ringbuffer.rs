@@ -33,10 +33,7 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut() -> E,
     {
-        debug_assert!(
-            size > 0 && (size & (size - 1)) == 0,
-            "size must be non-zero power of 2; found: {size}"
-        );
+        debug_assert!(size > 0 && (size & (size - 1)) == 0);
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
         let mask = size as i64 - 1;
         RingBuffer { buf, mask }
@@ -66,8 +63,8 @@ impl<E> RingBuffer<E> {
     /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
     /// mutable pointers to exist simultaneously.
     #[inline]
-    pub(crate) fn get(&self, sequence: i64) -> *mut E {
-        debug_assert!(sequence >= 0, "sequence must be >= 0; found: {sequence}");
+    pub(crate) unsafe fn get(&self, sequence: i64) -> *mut E {
+        debug_assert!(sequence >= 0);
         // sequence may be greater than buffer size, so mod to bring it inbounds. Since size is a
         // power of 2, the calculation is: `sequence & (size - 1)`, and we've already calculated
         // `(size - 1)`

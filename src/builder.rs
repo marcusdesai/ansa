@@ -1,12 +1,13 @@
 use crate::handles::{Barrier, Consumer, Cursor, Producer};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::WaitBlocking;
+use crate::wait::WaitSleep;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Configures and builds the buffer and handles for a single disruptor.
 ///
@@ -19,7 +20,7 @@ pub struct DisruptorBuilder<F, E, W> {
     /// Factory function for populating the buffer with events. Wrapped in an option only to
     /// facilitate moving the value out of the builder while the builder is still in use.
     event_factory: Option<F>,
-    /// Factory function for building instances of the wait strategy, defaults to WaitBlocking.
+    /// Factory function for building instances of the wait strategy, defaults to WaitSleep.
     wait_strategy: W,
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
     /// indicates that the consumer with id `3` is followed by the consumers with ids `5` and `7`.
@@ -35,14 +36,14 @@ pub struct DisruptorBuilder<F, E, W> {
     element_type: PhantomData<E>,
 }
 
-impl<F, E> DisruptorBuilder<F, E, WaitBlocking> {
+impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     /// Returns a new [`DisruptorBuilder`].
     ///
     /// `size` must be a non-zero power of 2.
     ///
     /// `event_factory` is used to populate the buffer.
     ///
-    /// The default wait strategy is [`WaitBlocking`].
+    /// The default wait strategy is [`WaitSleep`], with a duration of 50 microseconds.
     ///
     /// # Examples
     /// ```
@@ -69,7 +70,7 @@ impl<F, E> DisruptorBuilder<F, E, WaitBlocking> {
         DisruptorBuilder {
             buffer_size: size,
             event_factory: Some(event_factory),
-            wait_strategy: WaitBlocking::new(),
+            wait_strategy: WaitSleep::new(Duration::from_micros(50)),
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
