@@ -196,12 +196,17 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 }
 
-// TODO
-
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
+    /// Returns an [`AvailableWrite`] once at least `size` number of events are available.
+    ///
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that.
+    ///
+    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
+    /// wait for large portions of the buffer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
@@ -230,6 +235,16 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
+    /// Returns an [`AvailableWrite`] if successful and once at least `size` number of events are
+    /// available.
+    ///
+    /// Otherwise, returns the wait strategy error.
+    ///
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that.
+    ///
+    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
+    /// wait for large portions of the buffer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
@@ -431,6 +446,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: WaitStrategy,
 {
+    /// Returns an [`AvailableWriteExact`] once at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableWriteExact<'_, E, BATCH> {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
@@ -457,6 +473,10 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: TryWaitStrategy,
 {
+    /// Returns an [`AvailableWriteExact`] if successful and once at least `BATCH` number of events
+    /// are available.
+    ///
+    /// Otherwise, returns the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableWriteExact<'_, E, BATCH>, W::Error> {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
@@ -621,6 +641,13 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
+    /// Returns an [`AvailableWrite`] once at least `size` number of events are available.
+    ///
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that.
+    ///
+    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
+    /// wait for large portions of the buffer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -645,6 +672,16 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
+    /// Returns an [`AvailableWrite`] if successful and once at least `size` number of events are
+    /// available.
+    ///
+    /// Otherwise, returns the wait strategy error.
+    ///
+    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
+    /// than that.
+    ///
+    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
+    /// wait for large portions of the buffer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -696,7 +733,34 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
         }
     }
 
-    /// todo docs
+    /// Returns an [`ExactProducer`] if `BATCH` is valid.
+    ///
+    /// Otherwise, returns the calling producer.
+    ///
+    /// Valid `BATCH` values must meet the following conditions:
+    /// 1) `BATCH` must not be zero.
+    /// 2) Buffer size must be divisible by `BATCH`.
+    /// 3) This handle's sequence + 1 must be divisible by `BATCH`.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let buffer_size = 64;
+    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// let producer = handles.take_lead().unwrap().into_exact::<16>().unwrap();
+    ///
+    /// let result = producer.into_exact::<10>();
+    /// assert!(matches!(result, Err(ExactProducer { .. })));
+    ///
+    /// let result = result.unwrap_err().into_exact::<8>();
+    ///
+    /// assert!(matches!(result, Ok(ExactProducer { .. })));
+    /// ```
     pub fn into_exact<const NEW: u32>(self) -> Result<ExactProducer<E, W, LEAD, NEW>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
         if invalid_batch_size(NEW, self.buffer.size(), sequence) {
@@ -715,6 +779,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: WaitStrategy,
 {
+    /// Returns an [`AvailableWriteExact`] once at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableWriteExact<'_, E, BATCH> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
@@ -738,6 +803,10 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: TryWaitStrategy,
 {
+    /// Returns an [`AvailableWriteExact`] if successful and once at least `BATCH` number of events
+    /// are available.
+    ///
+    /// Otherwise, returns the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableWriteExact<'_, E, BATCH>, W::Error> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
@@ -824,7 +893,7 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// Waits until at least batch `size` number of events are available.
+    /// Returns an [`AvailableRead`] once at least `size` number of events are available.
     ///
     /// `size` must be less than the size of the buffer. Practically, it should be much smaller
     /// than that.
@@ -845,7 +914,7 @@ where
         }
     }
 
-    /// Waits until any number of events are available.
+    /// Returns an [`AvailableRead`] once any number of events are available.
     pub fn wait_any(&mut self) -> AvailableRead<'_, E> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
@@ -863,7 +932,10 @@ impl<E, W> Consumer<E, W>
 where
     W: TryWaitStrategy,
 {
-    /// Waits until at least batch `size` number of events are available or until an error occurs.
+    /// Returns an [`AvailableRead`] if successful and once at least `size` number of events are
+    /// available.
+    ///
+    /// Otherwise, returns the wait strategy error.
     ///
     /// `size` must be less than the size of the buffer. Practically, it should be much smaller
     /// than that.
@@ -884,7 +956,9 @@ where
         })
     }
 
-    /// Waits until any number of events are available or until an error occurs.
+    /// Returns an [`AvailableRead`] if successful and once any number of events are available.
+    ///
+    /// Otherwise, returns the wait strategy error.
     pub fn try_wait_any(&mut self) -> Result<AvailableRead<'_, E>, W::Error> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.try_wait(consumer_seq + 1, &self.barrier)?;
@@ -973,6 +1047,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: WaitStrategy,
 {
+    /// Returns an [`AvailableReadExact`] once at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableReadExact<'_, E, BATCH> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + BATCH as i64;
@@ -990,6 +1065,10 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: TryWaitStrategy,
 {
+    /// Returns an [`AvailableReadExact`] if successful and once at least `BATCH` number of events
+    /// are available.
+    ///
+    /// Otherwise, returns the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableReadExact<'_, E, BATCH>, W::Error> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + BATCH as i64;
@@ -1008,6 +1087,7 @@ fn invalid_batch_size(batch: u32, buffer_size: usize, sequence: i64) -> bool {
     batch == 0 || buffer_size % batch as usize != 0 || sequence % batch as i64 != 0
 }
 
+/// todo docs
 pub struct AvailableWrite<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref to hold exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1017,7 +1097,14 @@ pub struct AvailableWrite<'a, E> {
 }
 
 impl<E> AvailableWrite<'_, E> {
-    /// todo docs
+    /// Write a batch of events to the buffer.
+    ///
+    /// `write` is a callback with the signature:
+    /// > `write(event: &mut E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is a mutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn write<F>(self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -1031,7 +1118,6 @@ impl<E> AvailableWrite<'_, E> {
             write(event, seq, seq == self.end);
         }
         (self.move_cursor)(self.cursor, self.current, self.end, Ordering::Release);
-        // self.cursor.sequence.store(self.end_seq, Ordering::Release);
     }
 
     fn try_write_inner<F, Err, const COMMIT: bool>(self, mut write: F) -> Result<(), Err>
@@ -1047,18 +1133,26 @@ impl<E> AvailableWrite<'_, E> {
             if let err @ Err(_) = write(event, seq, seq == self.end) {
                 if COMMIT {
                     (self.move_cursor)(self.cursor, self.current, self.end, Ordering::Release);
-                    // self.cursor.sequence.store(seq - 1, Ordering::Release);
                 }
                 return err;
             }
         }
         (self.move_cursor)(self.cursor, self.current, self.end, Ordering::Release);
-        // self.cursor.sequence.store(self.end_seq, Ordering::Release);
         Ok(())
     }
 
-    /// todo
-    /// won't update the sequence value, essentially a rollback
+    /// Write an exact batch of events to the buffer if successful.
+    ///
+    /// Otherwise, return the error and cursor sequence **won't** be updated.
+    ///
+    /// In effect, rollback to the start of the batch.
+    ///
+    /// `write` is a callback with the signature:
+    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is a mutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn try_write<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1066,8 +1160,19 @@ impl<E> AvailableWrite<'_, E> {
         self.try_write_inner::<_, _, false>(write)
     }
 
-    /// todo docs
-    /// will update the sequence value
+    /// Write an exact batch of events to the buffer if successful.
+    ///
+    /// Otherwise, return the error and update cursor sequence to the position of the last
+    /// successful write.
+    ///
+    /// In effect, commit successful portion of the batch.
+    ///
+    /// `write` is a callback with the signature:
+    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is a mutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn try_write_commit<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1087,6 +1192,7 @@ macro_rules! aliasing_model_validity {
     };
 }
 
+/// todo docs
 pub struct AvailableWriteExact<'a, E, const BATCH: u32> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1095,7 +1201,14 @@ pub struct AvailableWriteExact<'a, E, const BATCH: u32> {
 }
 
 impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
-    /// todo docs
+    /// Write an exact batch of events to the buffer.
+    ///
+    /// `write` is a callback with the signature:
+    /// > `write(event: &mut E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is a mutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn write<F>(self, mut write: F)
     where
@@ -1117,11 +1230,20 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
             write(&mut *pointer, seq, true);
         }
         (self.move_cursor)(self.cursor, self.current, seq, Ordering::Release);
-        // self.cursor.sequence.store(seq, Ordering::Release);
     }
 
-    /// todo docs
-    /// won't update the sequence value, essentially a rollback
+    /// Write an exact batch of events to the buffer if successful.
+    ///
+    /// Otherwise, return the error and cursor sequence **won't** be updated.
+    ///
+    /// In effect, rollback to the start of the batch.
+    ///
+    /// `write` is a callback with the signature:
+    /// > `write(event: &mut E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is a mutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn try_write<F, Err>(self, mut write: F) -> Result<(), Err>
     where
@@ -1143,11 +1265,11 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
             write(&mut *pointer, seq, true)?;
         }
         (self.move_cursor)(self.cursor, self.current, seq, Ordering::Release);
-        // self.cursor.sequence.store(seq, Ordering::Release);
         Ok(())
     }
 }
 
+/// todo docs
 pub struct AvailableRead<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1161,7 +1283,7 @@ impl<E> AvailableRead<'_, E> {
     /// `read` is a callback with the signature:
     /// > `read(event: &E, sequence: i64, batch_end: bool)`
     ///
-    /// - `event` is the buffer element being read.
+    /// - `event` is an immutable reference to the buffer element being accessed.
     /// - `sequence` is the position of this event in the sequence.
     /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn read<F>(self, mut read: F)
@@ -1200,8 +1322,18 @@ impl<E> AvailableRead<'_, E> {
         Ok(())
     }
 
-    /// todo
-    /// won't update the sequence value, essentially a rollback
+    /// Read a batch of events from the buffer if successful.
+    ///
+    /// Otherwise, return the error and cursor sequence **won't** be updated.
+    ///
+    /// In effect, rollback to the start of the batch.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is an immutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn try_read<F, Err>(self, read: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
@@ -1209,8 +1341,19 @@ impl<E> AvailableRead<'_, E> {
         self.try_read_inner::<_, _, false>(read)
     }
 
-    /// todo docs
-    /// will update the sequence value
+    /// Read a batch of events from the buffer if successful.
+    ///
+    /// Otherwise, return the error and update cursor sequence to the position of the last
+    /// successful read.
+    ///
+    /// In effect, commit successful portion of the batch.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is an immutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     pub fn try_read_commit<F, Err>(self, read: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
@@ -1219,6 +1362,7 @@ impl<E> AvailableRead<'_, E> {
     }
 }
 
+/// todo docs
 pub struct AvailableReadExact<'a, E, const BATCH: u32> {
     cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
     buffer: &'a Arc<RingBuffer<E>>,
@@ -1226,7 +1370,14 @@ pub struct AvailableReadExact<'a, E, const BATCH: u32> {
 }
 
 impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
-    /// todo docs
+    /// Read an exact batch of events from the buffer.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool)`
+    ///
+    /// - `event` is an immutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn read<F>(self, mut read: F)
     where
@@ -1250,8 +1401,18 @@ impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
         self.cursor.sequence.store(seq, Ordering::Release);
     }
 
-    /// todo
-    /// won't update the sequence value, essentially a rollback
+    /// Read an exact batch of events from the buffer if successful.
+    ///
+    /// Otherwise, return the error and cursor sequence **won't** be updated.
+    ///
+    /// In effect, rollback to the start of the batch.
+    ///
+    /// `read` is a callback with the signature:
+    /// > `read(event: &E, sequence: i64, batch_end: bool) -> Result<(), Err>`
+    ///
+    /// - `event` is an immutable reference to the buffer element being accessed.
+    /// - `sequence` is the position of this event in the sequence.
+    /// - `batch_end` indicates whether this is the last event in the requested batch.
     #[doc = aliasing_model_validity!()]
     pub fn try_read<F, Err>(self, mut read: F) -> Result<(), Err>
     where
