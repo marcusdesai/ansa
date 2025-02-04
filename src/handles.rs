@@ -7,8 +7,8 @@ use std::sync::Arc;
 ///
 /// Cannot access events concurrently with other handles.
 ///
-/// `MultiProducer`s can be cloned and these clones can run concurrently. Clones will not overlap
-/// buffer accesses, but can be used to distribute work.
+/// `MultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
+/// non-overlapping ranges of sequence values, which can be concurrently writen to.
 ///
 /// Clones of this `MultiProducer` share this producer's cursor.
 ///
@@ -21,7 +21,7 @@ use std::sync::Arc;
 ///     .build()
 ///     .unwrap();
 ///
-/// // lead and trailing are separate handles with separate cursors
+/// // lead and trailing are separate handles with separate cursors and clones
 /// let lead = handles.take_lead().unwrap().into_multi();
 /// let trailing = handles.take_producer(0).unwrap().into_multi();
 ///
@@ -200,13 +200,10 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableWrite`] once at least `size` number of events are available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
@@ -219,7 +216,7 @@ where
         debug_assert!(self.barrier.sequence() >= desired_seq);
         AvailableWrite {
             cursor: &mut self.cursor,
-            buffer: &mut self.buffer,
+            buffer: &self.buffer,
             current: current_claim,
             end: claim_end,
             move_cursor: |cursor, current, end, ordering| {
@@ -235,16 +232,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableWrite`] if successful and once at least `size` number of events are
-    /// available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
+    /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let (current_claim, claim_end) = claim(&self.claim, size as i64);
@@ -257,7 +250,7 @@ where
         debug_assert!(self.barrier.sequence() >= desired_seq);
         Ok(AvailableWrite {
             cursor: &mut self.cursor,
-            buffer: &mut self.buffer,
+            buffer: &self.buffer,
             current: current_claim,
             end: claim_end,
             move_cursor: |cursor, current, end, ordering| {
@@ -446,7 +439,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableWriteExact`] once at least `BATCH` number of events are available.
+    /// Wait until at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableWriteExact<'_, E, BATCH> {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
@@ -473,10 +466,9 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableWriteExact`] if successful and once at least `BATCH` number of events
-    /// are available.
+    /// Wait until at least `BATCH` number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
+    /// Otherwise, return the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableWriteExact<'_, E, BATCH>, W::Error> {
         let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
@@ -641,13 +633,10 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableWrite`] once at least `size` number of events are available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -672,16 +661,12 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableWrite`] if successful and once at least `size` number of events are
-    /// available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
+    /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -758,7 +743,6 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
     /// assert!(matches!(result, Err(ExactProducer { .. })));
     ///
     /// let result = result.unwrap_err().into_exact::<8>();
-    ///
     /// assert!(matches!(result, Ok(ExactProducer { .. })));
     /// ```
     pub fn into_exact<const NEW: u32>(self) -> Result<ExactProducer<E, W, LEAD, NEW>, Self> {
@@ -779,7 +763,7 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableWriteExact`] once at least `BATCH` number of events are available.
+    /// Wait until at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableWriteExact<'_, E, BATCH> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
@@ -803,10 +787,9 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH>
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableWriteExact`] if successful and once at least `BATCH` number of events
-    /// are available.
+    /// Wait until at least `BATCH` number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
+    /// Otherwise, return the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableWriteExact<'_, E, BATCH>, W::Error> {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + BATCH as i64;
@@ -893,13 +876,10 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableRead`] once at least `size` number of events are available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -914,7 +894,7 @@ where
         }
     }
 
-    /// Returns an [`AvailableRead`] once any number of events are available.
+    /// Wait until any number of events are available.
     pub fn wait_any(&mut self) -> AvailableRead<'_, E> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
@@ -932,16 +912,12 @@ impl<E, W> Consumer<E, W>
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableRead`] if successful and once at least `size` number of events are
-    /// available.
+    /// Wait until at least `size` number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
+    /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Practically, it should be much smaller
-    /// than that.
-    ///
-    /// Any `size` close to the buffer size will likely cause handles to bunch up and stall as they
-    /// wait for large portions of the buffer to become available.
+    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
+    /// stall, as larger portions of the buffer take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -956,7 +932,7 @@ where
         })
     }
 
-    /// Returns an [`AvailableRead`] if successful and once any number of events are available.
+    /// Wait until any number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
     pub fn try_wait_any(&mut self) -> Result<AvailableRead<'_, E>, W::Error> {
@@ -1047,7 +1023,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: WaitStrategy,
 {
-    /// Returns an [`AvailableReadExact`] once at least `BATCH` number of events are available.
+    /// Wait until at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableReadExact<'_, E, BATCH> {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = consumer_seq + BATCH as i64;
@@ -1065,8 +1041,7 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH>
 where
     W: TryWaitStrategy,
 {
-    /// Returns an [`AvailableReadExact`] if successful and once at least `BATCH` number of events
-    /// are available.
+    /// Wait until at least `BATCH` number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableReadExact<'_, E, BATCH>, W::Error> {
@@ -1089,11 +1064,11 @@ fn invalid_batch_size(batch: u32, buffer_size: usize, sequence: i64) -> bool {
 
 /// Represents a range of available sequences which may be written to.
 pub struct AvailableWrite<'a, E> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref to hold exclusive access
+    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
     end: i64,
-    move_cursor: fn(&mut Arc<Cursor>, i64, i64, Ordering),
+    move_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
 }
 
 impl<E> AvailableWrite<'_, E> {
@@ -1142,9 +1117,8 @@ impl<E> AvailableWrite<'_, E> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, return the error and cursor sequence **won't** be updated.
-    ///
-    /// In effect, rollback to the start of the batch.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// batch start.
     ///
     /// The parameters of `write` are:
     ///
@@ -1161,9 +1135,7 @@ impl<E> AvailableWrite<'_, E> {
     /// Write an exact batch of events to the buffer if successful.
     ///
     /// Otherwise, return the error and update cursor sequence to the position of the last
-    /// successful write.
-    ///
-    /// In effect, commit successful portion of the batch.
+    /// successful write. In effect, commits successful portion of the batch.
     ///
     /// The parameters of `write` are:
     ///
@@ -1183,18 +1155,19 @@ macro_rules! aliasing_model_validity {
         "# Aliasing Model Validity\n\n\
         When checked with [miri](https://github.com/rust-lang/miri), this function is _valid_ \
         under the Tree-Borrows aliasing model, but _invalid_ under Stacked-Borrows.\n\n\
-        If a future rust aliasing model declares this function invalid, then its signature will be \
-        kept as-is, but its implementation will be changed to satisfy the aliasing model. This may \
-        pessimize the function, but its API and semantics are guaranteed to remain unchanged."
+        If rust chooses to formally accept an aliasing model which declares this function invalid, \
+        then its signature will be kept as-is, but its implementation will be changed to satisfy \
+        the aliasing model. This may pessimize the function, but its API and semantics are \
+        guaranteed to remain unchanged."
     };
 }
 
 /// Represents a range of available sequences which may be written to.
 pub struct AvailableWriteExact<'a, E, const BATCH: u32> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
+    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
-    move_cursor: fn(&mut Arc<Cursor>, i64, i64, Ordering),
+    move_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
 }
 
 impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
@@ -1230,9 +1203,8 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, return the error and cursor sequence **won't** be updated.
-    ///
-    /// In effect, rollback to the start of the batch.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// batch start.
     ///
     /// The parameters of `write` are:
     ///
@@ -1266,7 +1238,7 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
 
 /// Represents a range of available sequences which may be read from.
 pub struct AvailableRead<'a, E> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
+    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current_seq: i64,
     end_seq: i64,
@@ -1318,9 +1290,8 @@ impl<E> AvailableRead<'_, E> {
 
     /// Read a batch of events from the buffer if successful.
     ///
-    /// Otherwise, return the error and cursor sequence **won't** be updated.
-    ///
-    /// In effect, rollback to the start of the batch.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// batch start.
     ///
     /// The parameters of `read` are:
     ///
@@ -1337,9 +1308,7 @@ impl<E> AvailableRead<'_, E> {
     /// Read a batch of events from the buffer if successful.
     ///
     /// Otherwise, return the error and update cursor sequence to the position of the last
-    /// successful read.
-    ///
-    /// In effect, commit successful portion of the batch.
+    /// successful read. In effect, commits successful portion of the batch.
     ///
     /// The parameters of `read` are:
     ///
@@ -1356,7 +1325,7 @@ impl<E> AvailableRead<'_, E> {
 
 /// Represents a range of available sequences which may be read from.
 pub struct AvailableReadExact<'a, E, const BATCH: u32> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref for exclusive access
+    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current_seq: i64,
 }
@@ -1394,9 +1363,8 @@ impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
 
     /// Read an exact batch of events from the buffer if successful.
     ///
-    /// Otherwise, return the error and cursor sequence **won't** be updated.
-    ///
-    /// In effect, rollback to the start of the batch.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// batch start.
     ///
     /// The parameters of `read` are:
     ///
