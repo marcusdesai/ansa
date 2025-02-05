@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// Cannot access events concurrently with other handles.
 ///
 /// `MultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
-/// non-overlapping ranges of sequence values, which can be concurrently writen to.
+/// non-overlapping ranges of sequence values, which can be writen to in parallel.
 ///
 /// Clones of this `MultiProducer` share this producer's cursor.
 ///
@@ -647,6 +647,7 @@ where
             batch_end
         };
         self.wait_strategy.wait(desired_seq, &self.barrier);
+        debug_assert!(self.barrier.sequence() >= desired_seq);
         AvailableWrite {
             cursor: &mut self.cursor,
             buffer: &mut self.buffer,
@@ -1117,8 +1118,8 @@ impl<E> AvailableWrite<'_, E> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
-    /// batch start.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
+    /// batch start. **Important**: does _not_ undo successful writes.
     ///
     /// The parameters of `write` are:
     ///
@@ -1203,8 +1204,8 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
-    /// batch start.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
+    /// batch start. **Important**: does _not_ undo successful writes.
     ///
     /// The parameters of `write` are:
     ///
@@ -1290,7 +1291,7 @@ impl<E> AvailableRead<'_, E> {
 
     /// Read a batch of events from the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
     /// batch start.
     ///
     /// The parameters of `read` are:
@@ -1363,7 +1364,7 @@ impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
 
     /// Read an exact batch of events from the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively rolls back to
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
     /// batch start.
     ///
     /// The parameters of `read` are:

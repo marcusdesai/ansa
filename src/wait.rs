@@ -8,14 +8,13 @@
 //! docs, but this is not the only aspect to consider when optimizing performance. The size of the
 //! strategy is also an important factor.
 //!
-//! Each handle struct includes its own instance of the wait strategy used by a single disruptor.
-//! Hence, the size of the strategy can have an effect on performance if, for example, that
-//! additional size means the handle may no longer fit in a single cache line.
+//! Each handle struct includes a wait strategy. So the size of the strategy may impact performance
+//! if, for example, that additional size prevents the handle from fitting into a single cache line.
 //!
 //! Cache lines are commonly `32`, `64`, or `128` bytes. With `64` bytes being the most common.
 //!
-//! When the wait strategy is zero-sized, each handle has the following size (in bytes). If these
-//! sizes are altered, it will only be done in a major version change.
+//! When the wait strategy is zero-sized, each handle has the following size (in bytes). These
+//! sizes will only be altered in a major version change.
 //!
 //! | Handle                                                     | size |
 //! |------------------------------------------------------------|------|
@@ -27,8 +26,7 @@
 //! | [`ExactMultiProducer`](crate::handles::ExactMultiProducer) | 40   |
 //!
 //! And here are the minimum sizes of the provided strategies, again assuming nested wait
-//! strategies are zero-sized. These sizes are also unlikely to change, and may do so only in a
-//! major version change.
+//! strategies are zero-sized. These sizes will also only be altered in a major version change.
 //!
 //! | Strategy                      | size |
 //! |-------------------------------|------|
@@ -39,13 +37,7 @@
 //! | [`WaitPhased<W>`](WaitPhased) | 16   |
 //! | [`Timeout<W>`](Timeout)       | 8    |
 //!
-//! Both [`WaitPhased`] and [`Timeout`] can be considerably larger. For example:
-//! ```
-//! use ansa::wait::*;
-//!
-//! assert_eq!(size_of::<WaitPhased<WaitSleep>>(), 24);
-//! assert_eq!(size_of::<Timeout<WaitPhased<WaitSleep>>>(), 32);
-//! ```
+//! The sizes of both [`WaitPhased`] and [`Timeout`] of course depend on their included strategy.
 //!
 //! Various provided strategies are limited to wait durations of `u64::MAX` nanoseconds, which is
 //! done in order to keep them small. Storing a [`Duration`] instead would double the minimum size
@@ -69,10 +61,6 @@ use std::time::{Duration, Instant};
 ///
 /// If a type, `T`, implements `Waiting`, then `T` will implement `WaitStrategy`, and
 /// `Timeout<T>` will implement `TryWaitStrategy`.
-///
-/// As a consequence of the above blanket impls, do _not_ implement `Waiting` for a type if you
-/// want to provide your own implementations of `WaitStrategy` for `T`, or `TryWaitStrategy`
-/// for `Timeout<T>`.
 ///
 /// # Examples
 /// ```
@@ -170,14 +158,20 @@ pub unsafe trait WaitStrategy {
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
 
-// SAFETY: use of `wait_loop` guarantees correct implementation
+// SAFETY: wait returns once barrier_seq >= desired_seq, with barrier_seq itself
 unsafe impl<W> WaitStrategy for W
 where
     W: Waiting,
 {
     #[inline]
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
-        wait_loop(desired_seq, barrier, || self.waiting())
+        loop {
+            let barrier_seq = barrier.sequence();
+            if barrier_seq >= desired_seq {
+                break barrier_seq;
+            }
+            self.waiting()
+        }
     }
 }
 
@@ -297,37 +291,6 @@ pub unsafe trait TryWaitStrategy {
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
 }
 
-#[inline]
-fn wait_loop(desired: i64, barrier: &Barrier, mut waiting: impl FnMut()) -> i64 {
-    loop {
-        let barrier_seq = barrier.sequence();
-        if barrier_seq >= desired {
-            break barrier_seq;
-        }
-        waiting()
-    }
-}
-
-#[inline]
-fn wait_loop_timeout(
-    desired: i64,
-    barrier: &Barrier,
-    duration: Duration,
-    mut waiting: impl FnMut(),
-) -> Result<i64, TimedOut> {
-    let timer = Instant::now();
-    loop {
-        let barrier_seq = barrier.sequence();
-        if barrier_seq >= desired {
-            break Ok(barrier_seq);
-        }
-        if timer.elapsed() > duration {
-            break Err(TimedOut);
-        }
-        waiting()
-    }
-}
-
 /// Pure busy-wait.
 ///
 /// # Performance
@@ -382,6 +345,8 @@ impl Waiting for WaitYield {
 }
 
 /// Sleep the current thread on each iteration of the wait loop.
+///
+/// Equivalent to polling available sequences at a fixed interval.
 ///
 /// The duration of the sleep is limited to `u64::MAX` nanoseconds.
 ///
@@ -472,7 +437,8 @@ where
     }
 }
 
-// SAFETY: try_wait only returns once barrier_seq >= desired_seq, with barrier_seq itself
+// SAFETY: Before yield_dur exceeded, try_wait only returns once barrier_seq >= desired_seq, with
+// barrier_seq. When exceeded, calls fallback try_wait, which is expected to be validly implemented.
 unsafe impl<W> TryWaitStrategy for WaitPhased<W>
 where
     W: TryWaitStrategy,
@@ -557,7 +523,7 @@ where
     }
 }
 
-// SAFETY: use of `wait_loop_timeout` guarantees correct implementation
+// SAFETY: wait only returns once barrier_seq >= desired_seq, with barrier_seq itself
 unsafe impl<W> TryWaitStrategy for Timeout<W>
 where
     W: Waiting,
@@ -566,7 +532,17 @@ where
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let duration = Duration::from_nanos(self.duration);
-        wait_loop_timeout(desired_seq, barrier, duration, || self.strategy.waiting())
+        let timer = Instant::now();
+        loop {
+            let barrier_seq = barrier.sequence();
+            if barrier_seq >= desired_seq {
+                break Ok(barrier_seq);
+            }
+            if timer.elapsed() > duration {
+                break Err(TimedOut);
+            }
+            self.strategy.waiting()
+        }
     }
 }
 

@@ -41,9 +41,10 @@ impl<E> RingBuffer<E> {
 
     /// Returns a mutable pointer to a single element of the ring buffer.
     ///
-    /// `sequence` does not need to be an inbounds index of the buffer, any non-negative `i64` is
-    /// accepted. The calculation: `sequence mod buffer_size` is used to find which index to return
-    /// an element pointer from.
+    /// `sequence` must be non-negative.
+    ///
+    /// `sequence` does not need to be an inbounds index of the buffer, the calculation:
+    /// `sequence mod buffer_size` is used to find which index to return an element pointer from.
     ///
     /// The returned pointer is guaranteed to be properly aligned and initialised, so dereferencing
     /// can always be done safely.
