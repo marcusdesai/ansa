@@ -3,7 +3,7 @@ mod common;
 const BATCH: u32 = 16;
 
 #[test]
-fn test_lead_multi_producer() {
+fn test_lead_exact_multi_producer() {
     let num_of_events = 240;
     common::run_test_lead(
         num_of_events,
@@ -23,7 +23,7 @@ fn test_lead_multi_producer() {
 }
 
 #[test]
-fn test_trailing_multi_producer() {
+fn test_trailing_exact_multi_producer() {
     let num_of_events = 240;
     common::run_test_trailing(
         num_of_events,

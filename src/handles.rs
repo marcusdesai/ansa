@@ -1118,8 +1118,8 @@ impl<E> AvailableWrite<'_, E> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
-    /// batch start. **Important**: does _not_ undo successful writes.
+    /// Otherwise, leave cursor sequence unchanged and return the error. **Important**: does _not_
+    /// undo successful writes.
     ///
     /// The parameters of `write` are:
     ///
@@ -1204,8 +1204,8 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
 
     /// Write an exact batch of events to the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
-    /// batch start. **Important**: does _not_ undo successful writes.
+    /// Otherwise, leave cursor sequence unchanged and return the error. **Important**: does _not_
+    /// undo successful writes.
     ///
     /// The parameters of `write` are:
     ///

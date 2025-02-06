@@ -3,7 +3,10 @@ use ansa::{Barrier, DisruptorBuilder, DisruptorHandles, Follows, Handle};
 use std::time::{Duration, Instant};
 
 // Any test that doesn't finish within this limit is likely infinite looping, and thus has failed
+#[cfg(not(miri))]
 const TIME_LIMIT: Duration = Duration::from_millis(100);
+#[cfg(miri)]
+const TIME_LIMIT: Duration = Duration::from_secs(10);
 
 // Simulates WaitBusy and allows us to avoid hanging threads by limiting wait times
 #[derive(Copy, Clone, Debug)]
