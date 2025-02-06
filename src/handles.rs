@@ -246,7 +246,16 @@ where
     }
 }
 
-/// todo docs
+/// An optimised handle which mutably accesses events on the ring buffer with a fixed batch size.
+///
+/// Cannot access events concurrently with other handles.
+///
+/// `ExactMultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
+/// non-overlapping ranges of sequence values, which can be writen to in parallel.
+///
+/// Clones of this `ExactMultiProducer` share this producer's cursor.
+///
+/// todo
 /// Construction conditions ensure no out-of-bounds buffer accesses, allowing these accesses to be
 /// optimised.
 #[derive(Debug)]
@@ -645,7 +654,9 @@ where
     }
 }
 
-/// todo docs
+/// An optimised handle which mutably accesses events on the ring buffer with a fixed batch size.
+///
+/// Cannot access events concurrently with other handles.
 #[derive(Debug)]
 pub struct ExactProducer<E, W, const LEAD: bool, const BATCH: u32> {
     pub(crate) cursor: Arc<Cursor>,
@@ -762,7 +773,7 @@ where
 
 /// A handle with immutable access to events on the ring buffer.
 ///
-/// Can access events concurrently to handles with immutable access.
+/// Can access events concurrently to other handles with immutable access.
 #[derive(Debug)]
 pub struct Consumer<E, W> {
     pub(crate) cursor: Arc<Cursor>,
@@ -894,7 +905,9 @@ where
     }
 }
 
-/// todo docs
+/// An optimised handle which immutably accesses events on the ring buffer with a fixed batch size.
+///
+/// Can access events concurrently to other handles with immutable access.
 #[derive(Debug)]
 pub struct ExactConsumer<E, W, const BATCH: u32> {
     cursor: Arc<Cursor>,

@@ -472,8 +472,11 @@ pub struct TimedOut;
 ///
 /// If a type, `T`, implements [`Waiting`], then `Timeout<T>` implements [`TryWaitStrategy`].
 ///
-/// This struct is not required for implementing [`TryWaitStrategy`], it is only a convenience
-/// for automating implementations of this trait.
+/// This struct is not required for implementing `TryWaitStrategy`, it is only a convenience
+/// for automating implementations of timeouts.
+///
+/// `Timeout<W>` also implements `Waiting` when `W` does, transparently allowing the use of
+/// infallible wait methods.
 ///
 /// The length of the timeout is limited to `u64::MAX` nanoseconds.
 ///

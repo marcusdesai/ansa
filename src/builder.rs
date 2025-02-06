@@ -64,6 +64,28 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     ///
     /// let builder = DisruptorBuilder::new(64, factory);
     /// ```
+    /// Of course, the above event types are a bit trivial.
+    /// ```
+    /// use ansa::DisruptorBuilder;
+    ///
+    /// #[derive(Default)]
+    /// enum Currency {
+    ///     #[default]
+    ///     Uninhabited, // indicates event initialised but not yet containing real data
+    ///     GBP,
+    ///     USD,
+    ///     // ... all the rest
+    /// }
+    ///
+    /// #[derive(Default)]
+    /// struct Event {
+    ///     price: u64,
+    ///     time: u64,
+    ///     currency: Currency,
+    /// }
+    ///
+    /// let builder = DisruptorBuilder::new(256, Event::default);
+    /// ```
     pub fn new(size: usize, event_factory: F) -> Self
     where
         E: Sync,
@@ -124,8 +146,8 @@ where
     ///     .build()?;
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    /// But, consumer handles are also not required to follow one another, which allows for them to
-    /// read the ring buffer concurrently.
+    /// But consumer handles are not required to follow one another, which allows for multiple
+    /// consumers to read the ring buffer concurrently.
     /// ```
     /// use ansa::{DisruptorBuilder, Follows, Handle};
     ///
@@ -144,13 +166,14 @@ where
     ///
     /// ## Producers
     ///
-    /// Producer handles must always either follow or be followed by every other handle. If
-    /// this restriction was not in place, then overlapping writes to the buffer (read: mutable
-    /// aliasing) would be possible.
+    /// Producer handles must always either follow or be followed by every other handle.
     ///
-    /// In more technical terms: it is possible to add consumer handles which are partially ordered
-    /// with respect to other consumer handles, but all handles (of any kind) must be totally
-    /// ordered with respect to all producer handles.
+    /// In more technical terms: it is possible for consumer handles to be partially ordered with
+    /// respect to other consumer handles, but all handles (of any kind) must be totally ordered
+    /// with respect to all producer handles.
+    ///
+    /// If this restriction was not in place, overlapping writes to the buffer (read: mutable
+    /// aliasing) would be possible.
     ///
     /// For examples of invalid producer ordering, see: [`BuildError::UnorderedProducer`].
     ///
