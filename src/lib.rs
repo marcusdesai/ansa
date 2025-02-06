@@ -1,8 +1,11 @@
-//! MPMC queue implementation using the disruptor pattern
+//! # Ansa
+//!
+//! Multithreaded, lock-free queue implementation using the disruptor pattern.
+//!
 //! todo
 //!
 //! to mention:
-//! - no panics
+//! - no panics outside of the convenience functions
 //! - sequence limit (i64::MAX)
 //! - Basics of how the disruptor works
 //! - traffic jam analogy
@@ -24,9 +27,13 @@ pub use handles::*;
 
 use wait::WaitSleep;
 
-/// Construct a Single Producer Single Consumer disruptor.
+/// Construct a Single-Producer Single-Consumer disruptor.
 ///
 /// `size` must be a non-zero power of two. `event_factory` is used to populate the buffer.
+///
+/// The strategy [`WaitSleep`] is used with a sleep duration of 100 microseconds.
+///
+/// See: [`DisruptorBuilder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -57,11 +64,15 @@ where
     (producer, consumer)
 }
 
-/// Construct a Multi Producer Single Consumer disruptor.
+/// Construct a Multi-Producer Single-Consumer disruptor.
 ///
 /// `size` must be a non-zero power of two. `event_factory` is used to populate the buffer.
 ///
 /// The returned producer may be cloned to allow distributed writes.
+///
+/// The strategy [`WaitSleep`] is used with a sleep duration of 100 microseconds.
+///
+/// See: [`DisruptorBuilder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -85,10 +96,14 @@ where
     (producer.into_multi(), consumer)
 }
 
-/// Construct a Single Producer Multi Consumer disruptor.
+/// Construct a Single-Producer Multi-Consumer disruptor.
 ///
 /// `size` must be a non-zero power of two. `num_consumers` is the number of consumers to create,
-/// which cannot be changed after this point. `event_factory` is used to populate the buffer.
+/// which cannot be changed after construction. `event_factory` is used to populate the buffer.
+///
+/// The strategy [`WaitSleep`] is used with a sleep duration of 100 microseconds.
+///
+/// See: [`DisruptorBuilder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -124,12 +139,16 @@ where
     (producer, consumers)
 }
 
-/// Construct a Multi Producer Multi Consumer disruptor.
+/// Construct a Multi-Producer Multi-Consumer disruptor.
 ///
 /// `size` must be a non-zero power of two. `num_consumers` is the number of consumers to create,
-/// which cannot be changed after this point. `event_factory` is used to populate the buffer.
+/// which cannot be changed after construction. `event_factory` is used to populate the buffer.
 ///
 /// The returned producer may be cloned to allow distributed writes.
+///
+/// The strategy [`WaitSleep`] is used with a sleep duration of 100 microseconds.
+///
+/// See: [`DisruptorBuilder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///

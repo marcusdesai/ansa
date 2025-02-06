@@ -36,6 +36,8 @@ pub struct DisruptorBuilder<F, E, W> {
     element_type: PhantomData<E>,
 }
 
+const DEFAULT_WAIT: WaitSleep = WaitSleep::new(Duration::from_micros(100));
+
 impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     /// Returns a new [`DisruptorBuilder`].
     ///
@@ -70,7 +72,7 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
         DisruptorBuilder {
             buffer_size: size,
             event_factory: Some(event_factory),
-            wait_strategy: WaitSleep::new(Duration::from_micros(50)),
+            wait_strategy: DEFAULT_WAIT,
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
@@ -95,11 +97,13 @@ where
     /// follows. In the disruptor pattern, management of ring buffer accesses works by ordering
     /// handles according to a precedence, or "follows", relationship.
     ///
-    /// If handle `A` follows handle `B`, then `B` accesses events on the ring buffer exclusively
-    /// before `A`. See: [`Follows`] for more.
+    /// If handle `B` follows handle `A`, then `B` accesses events on the ring buffer exclusively
+    /// after `A`. See: [`Follows`] for more.
     ///
-    /// These precedence relationships must form a directed acyclic graph, where handles follow the
-    /// lead producer or other handles. No loops are allowed.
+    /// These precedence relationships must form a [directed acyclic graph][dag], where handles
+    /// follow the lead producer or other handles. No loops are allowed.
+    ///
+    /// [dag]:https://en.wikipedia.org/wiki/Directed_acyclic_graph
     ///
     /// The "lead producer" is an automatically defined handle. It is always a producer, and it
     /// serves as the root of the graph. Every other handle must follow the lead either directly or
@@ -107,7 +111,20 @@ where
     ///
     /// # Ordering Handles
     ///
-    /// Consumer handles do not necessarily need to follow one another, which allows for them to
+    /// ## Consumers
+    ///
+    /// Consumers can follow each other.
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    ///
+    /// // lead ─► 0 ─► 1
+    /// let _ = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+    ///     .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
+    /// But, consumer handles are also not required to follow one another, which allows for them to
     /// read the ring buffer concurrently.
     /// ```
     /// use ansa::{DisruptorBuilder, Follows, Handle};
@@ -119,13 +136,15 @@ where
     /// let _ = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
+    ///     .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
     /// ```
     /// Both consumers `0` and `1` will read all the events published by the lead producer, without
     /// coordinating with each other.
     ///
-    /// But, producer handles must always either follow or be followed by every other handle. If
+    /// ## Producers
+    ///
+    /// Producer handles must always either follow or be followed by every other handle. If
     /// this restriction was not in place, then overlapping writes to the buffer (read: mutable
     /// aliasing) would be possible.
     ///
@@ -149,16 +168,14 @@ where
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(3, Handle::Producer, Follows::Handles(vec![1, 2]))
     ///     .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]))
-    ///     .build()
-    ///     .unwrap();
+    ///     .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    ///
     /// See: [`MultiProducer`](crate::handles::MultiProducer) for one means to parallelize writes.
     ///
     /// See: [`BuildError`] for full details on error states encountered when building the
-    /// disruptor. Such errors are often caused by calls to
-    /// [`add_handle`](DisruptorBuilder::add_handle) or
-    /// [`extend_handles`](DisruptorBuilder::extend_handles) making the graph malformed.
+    /// disruptor. Such errors are likely to be caused by calls to this function or
+    /// [`extend_handles`](DisruptorBuilder::extend_handles) creating a malformed graph.
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
@@ -393,7 +410,7 @@ pub enum BuildError {
     ///     .add_handle(2, Handle::Producer, Follows::Handles(vec![0]))
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![1], 2));
+    /// assert_eq!(result.unwrap_err(), BuildError::UnorderedProducer(vec![1], 2));
     /// ```
     /// Since producer `2` does not explicitly follow consumer `1`, it cannot be guaranteed that
     /// their buffer access do not overlap. We can fix this by adding id `1` to the `Follows` vec
@@ -413,7 +430,7 @@ pub enum BuildError {
     ///     ])
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![0, 1], 5));
+    /// assert_eq!(result.unwrap_err(), BuildError::UnorderedProducer(vec![0, 1], 5));
     /// ```
     /// Even though it may appear very likely that consumer `1` will finish before producer `5`, it
     /// cannot be guaranteed. This can be fixed by adding id `1` to the `Follows` vec for producer
@@ -442,7 +459,7 @@ pub enum BuildError {
     ///     ])
     ///     .build();
     ///
-    /// assert_eq!(result.err().unwrap(), BuildError::UnorderedProducer(vec![0, 4, 5, 6, 7], 1));
+    /// assert_eq!(result.unwrap_err(), BuildError::UnorderedProducer(vec![0, 4, 5, 6, 7], 1));
     /// ```
     /// In the second call to `extend_handles`, the handles `[4, 5, 6]` are not ordered with respect
     /// to producer `1`. This means we cannot guarantee that those handles and producer `1` will not
@@ -460,7 +477,7 @@ pub enum BuildError {
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0, 2])) // <- here
     ///     .build();
     ///
-    /// assert!(matches!(result, Err(BuildError::UnregisteredID(2))));
+    /// assert_eq!(result.unwrap_err(), BuildError::UnregisteredID(2));
     /// ```
     UnregisteredID(u64),
     /// An ID which loops in the graph. Loops between handles will cause the disruptor to deadlock.
@@ -476,7 +493,7 @@ pub enum BuildError {
     ///     .add_handle(3, Handle::Consumer, Follows::Handles(vec![2]))
     ///     .build();
     ///
-    /// assert!(matches!(result, Err(BuildError::GraphCycle(2))));
+    /// assert_eq!(result.unwrap_err(), BuildError::GraphCycle(2));
     /// ```
     GraphCycle(u64),
     /// An ID which is disconnected from the rest of the graph. Disconnected in this context means
@@ -491,7 +508,7 @@ pub enum BuildError {
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![])) // <- here
     ///     .build();
     ///
-    /// assert!(matches!(result, Err(BuildError::DisconnectedNode(1))));
+    /// assert_eq!(result.unwrap_err(), BuildError::DisconnectedNode(1));
     /// ```
     DisconnectedNode(u64),
 }

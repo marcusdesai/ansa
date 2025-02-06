@@ -155,7 +155,7 @@ pub unsafe trait WaitStrategy {
     /// 2) Must return the last read `barrier sequence`.
     ///
     /// The return value may be used by handles to determine which buffer elements to access, but
-    /// this is not guaranteed.
+    /// this behaviour is not guaranteed.
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
 
@@ -187,13 +187,13 @@ where
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. Valid implementations must
 /// satisfy the following conditions:
-/// 1) `try_wait` may only return when `barrier sequence >= desired_seq` is true.
+/// 1) `try_wait` may only successfully return when `barrier sequence >= desired_seq` is true.
 /// 2) `try_wait`, if successful, must return the last read `barrier sequence`.
 ///
 /// If `try_wait` does not abide by these conditions, then writes to the ring buffer may overlap
 /// with other accesses, causing Undefined Behaviour due to mutable aliasing.
 ///
-/// Note that there are no conditions limiting when `try_wait` can return an error.
+/// Note that no conditions limit when `try_wait` can return an error.
 ///
 /// # Examples
 /// ```
@@ -282,13 +282,13 @@ pub unsafe trait TryWaitStrategy {
     /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
     /// Implementations must satisfy the following conditions:
-    /// 1) May only return when `barrier sequence >= desired_seq` is true.
+    /// 1) May only successfully return when `barrier sequence >= desired_seq` is true.
     /// 2) If successful, must return the last read `barrier sequence`.
     ///
     /// No conditions are placed on returning errors.
     ///
     /// The return value may be used by handles to read or write elements to the ring buffer, but
-    /// this is not guaranteed.
+    /// this behaviour is not guaranteed.
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
 }
 
@@ -364,7 +364,7 @@ impl WaitSleep {
     ///
     /// `duration` will be truncated to `u64::MAX` nanoseconds.
     #[inline]
-    pub fn new(duration: Duration) -> Self {
+    pub const fn new(duration: Duration) -> Self {
         WaitSleep {
             duration: duration.as_nanos() as u64,
         }
@@ -507,7 +507,7 @@ impl<W> Timeout<W> {
     /// Timings should not be treated as exact.
     ///
     /// `duration` will be truncated to `u64::MAX` nanoseconds.
-    pub fn new(duration: Duration, strategy: W) -> Self {
+    pub const fn new(duration: Duration, strategy: W) -> Self {
         Timeout {
             duration: duration.as_nanos() as u64,
             strategy,
