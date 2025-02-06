@@ -14,12 +14,11 @@ use std::sync::Arc;
 ///
 /// # Examples
 /// ```
-/// use ansa::*;
+/// use ansa::{DisruptorBuilder, Follows, Handle};
 ///
 /// let mut handles = DisruptorBuilder::new(64, || 0)
 ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
-///     .build()
-///     .unwrap();
+///     .build()?;
 ///
 /// // lead and trailing are separate handles with separate cursors and clones
 /// let lead = handles.take_lead().unwrap().into_multi();
@@ -29,7 +28,9 @@ use std::sync::Arc;
 ///
 /// assert_eq!(lead.count(), 2);
 /// assert_eq!(trailing.count(), 1);
+/// # Ok::<(), ansa::BuildError>(())
 /// ```
+
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     cursor: Arc<Cursor>,
@@ -63,15 +64,9 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let multi = handles.take_lead().unwrap().into_multi();
+    /// let (multi, _) = ansa::mpsc(64, || 0);
     /// assert_eq!(multi.count(), 1);
+    ///
     /// let multi_2 = multi.clone();
     /// assert_eq!(multi.count(), 2);
     /// // consume a `MultiProducer` by attempting the conversion into a `Producer`
@@ -104,17 +99,11 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
-    /// let mut handles = DisruptorBuilder::new(16, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build();
-    ///
-    /// let multi = handles.unwrap().take_lead().unwrap().into_multi();
+    /// let (multi, _) = ansa::mpsc(64, || 0);
     /// let multi_clone = multi.clone();
     ///
     /// assert!(matches!(multi.into_single(), None));
-    /// assert!(matches!(multi_clone.into_single(), Some(Producer { .. })));
+    /// assert!(matches!(multi_clone.into_single(), Some(ansa::Producer { .. })));
     /// ```
     pub fn into_single(self) -> Option<Producer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|_| Producer {
@@ -140,15 +129,10 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// use ansa::{mpsc, ExactMultiProducer, MultiProducer};
     ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let multi = handles.take_lead().unwrap().into_multi();
+    /// let (multi, _) = mpsc(buffer_size, || 0);
     /// let multi_2 = multi.clone();
     ///
     /// // two multi producers exist for this cursor, but the invalid BATCH value means
@@ -298,19 +282,13 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let lead = handles.take_lead().unwrap().into_multi();
-    /// let exact_multi = lead.into_exact::<16>().expect("exact").unwrap();
-    ///
+    /// let (multi, _) = ansa::mpsc(64, || 0);
+    /// let exact_multi = multi.into_exact::<16>().expect("exact").unwrap();
     /// assert_eq!(exact_multi.count(), 1);
+    ///
     /// let exact_multi_2 = exact_multi.clone();
     /// assert_eq!(exact_multi.count(), 2);
+    ///
     /// // consume `ExactMultiProducer` by attempting conversion into `MultiProducer`
     /// assert!(matches!(exact_multi.into_multi(), None));
     /// assert_eq!(exact_multi_2.count(), 1);
@@ -341,18 +319,12 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// let (producer, _) = ansa::spsc(64, || 0);
+    /// let exact_multi = producer.into_exact_multi::<32>().unwrap();
+    /// let exact_clone = exact_multi.clone();
     ///
-    /// let mut handles = DisruptorBuilder::new(128, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let multi = handles.take_lead().unwrap().into_exact_multi::<32>().unwrap();
-    /// let multi_clone = multi.clone();
-    ///
-    /// assert!(matches!(multi.into_multi(), None));
-    /// assert!(matches!(multi_clone.into_multi(), Some(MultiProducer { .. })));
+    /// assert!(matches!(exact_multi.into_multi(), None));
+    /// assert!(matches!(exact_clone.into_multi(), Some(ansa::MultiProducer { .. })));
     /// ```
     pub fn into_multi(self) -> Option<MultiProducer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|claim| MultiProducer {
@@ -379,28 +351,23 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactMultiProducer<E, W, LEAD, BA
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
+    /// let (producer, _) = ansa::spsc(64, || 0);
     ///
-    /// let exact_multi = handles.take_lead().unwrap().into_exact_multi::<16>().unwrap();
-    /// let exact_multi_2 = exact_multi.clone();
+    /// let exact_multi = producer.into_exact_multi::<16>().unwrap();
+    /// let exact_clone = exact_multi.clone();
     ///
     /// // two multi producers exist for this cursor, but the invalid BATCH value means
     /// // neither will be consumed in this call
     /// let result = exact_multi.into_exact::<10>();
-    /// assert!(matches!(result, Err(ExactMultiProducer { .. })));
+    /// assert!(matches!(result, Err(ansa::ExactMultiProducer { .. })));
     ///
     /// // BATCH meets the required conditions, but there are two producers for this cursor
     /// let result = result.unwrap_err().into_exact::<16>();
     /// assert!(matches!(result, Ok(None)));
     ///
-    /// let result = exact_multi_2.into_exact::<16>();
-    /// assert!(matches!(result, Ok(Some(ExactMultiProducer { .. }))));
+    /// let result = exact_clone.into_exact::<16>();
+    /// assert!(matches!(result, Ok(Some(ansa::ExactMultiProducer { .. }))));
     /// ```
     pub fn into_exact<const NEW_BATCH: u32>(
         self,
@@ -555,21 +522,15 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// use ansa::{spsc, ExactMultiProducer, Producer};
     ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let producer = handles.take_lead().unwrap();
+    /// let (producer, _) = spsc(buffer_size, || 0);
     ///
     /// let result = producer.into_exact_multi::<10>();
     /// assert!(matches!(result, Err(Producer { .. })));
     ///
     /// let result = result.unwrap_err().into_exact_multi::<16>();
-    ///
     /// assert!(matches!(result, Ok(ExactMultiProducer { .. })));
     /// ```
     pub fn into_exact_multi<const BATCH: u32>(
@@ -599,15 +560,10 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// use ansa::{spsc, ExactProducer, Producer};
     ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let producer = handles.take_lead().unwrap();
+    /// let (producer, _) = spsc(buffer_size, || 0);
     ///
     /// let result = producer.into_exact::<10>();
     /// assert!(matches!(result, Err(Producer { .. })));
@@ -730,21 +686,15 @@ impl<E, W, const LEAD: bool, const BATCH: u32> ExactProducer<E, W, LEAD, BATCH> 
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
+    /// let (producer, _) = ansa::spsc(64, || 0);
+    /// let exact = producer.into_exact::<16>().unwrap();
     ///
-    /// let producer = handles.take_lead().unwrap().into_exact::<16>().unwrap();
-    ///
-    /// let result = producer.into_exact::<10>();
-    /// assert!(matches!(result, Err(ExactProducer { .. })));
+    /// let result = exact.into_exact::<10>();
+    /// assert!(matches!(result, Err(ansa::ExactProducer { .. })));
     ///
     /// let result = result.unwrap_err().into_exact::<8>();
-    /// assert!(matches!(result, Ok(ExactProducer { .. })));
+    /// assert!(matches!(result, Ok(ansa::ExactProducer { .. })));
     /// ```
     pub fn into_exact<const NEW: u32>(self) -> Result<ExactProducer<E, W, LEAD, NEW>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;
@@ -843,15 +793,10 @@ impl<E, W> Consumer<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// use ansa::{spsc, Consumer, ExactConsumer};
     ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// let consumer = handles.take_consumer(0).unwrap();
+    /// let (_, consumer) = spsc(buffer_size, || 0);
     ///
     /// let result = consumer.into_exact::<10>();
     /// assert!(matches!(result, Err(Consumer { .. })));
@@ -990,21 +935,15 @@ impl<E, W, const BATCH: u32> ExactConsumer<E, W, BATCH> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
-    ///
     /// let buffer_size = 64;
-    /// let mut handles = DisruptorBuilder::new(buffer_size, || 0)
-    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .build()
-    ///     .unwrap();
+    /// let (_, consumer) = ansa::spsc(buffer_size, || 0);
+    /// let exact = consumer.into_exact::<8>().unwrap();
     ///
-    /// let consumer = handles.take_consumer(0).unwrap().into_exact::<8>().unwrap();
-    ///
-    /// let result = consumer.into_exact::<10>();
-    /// assert!(matches!(result, Err(ExactConsumer { .. })));
+    /// let result = exact.into_exact::<10>();
+    /// assert!(matches!(result, Err(ansa::ExactConsumer { .. })));
     ///
     /// let result = result.unwrap_err().into_exact::<16>();
-    /// assert!(matches!(result, Ok(ExactConsumer { .. })));
+    /// assert!(matches!(result, Ok(ansa::ExactConsumer { .. })));
     /// ```
     pub fn into_exact<const NEW_BATCH: u32>(self) -> Result<ExactConsumer<E, W, NEW_BATCH>, Self> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed) + 1;

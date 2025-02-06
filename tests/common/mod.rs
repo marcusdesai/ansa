@@ -2,7 +2,7 @@ use ansa::wait::WaitStrategy;
 use ansa::{Barrier, DisruptorBuilder, DisruptorHandles, Follows, Handle};
 use std::time::{Duration, Instant};
 
-// Any test that doesn't finish within this limit is likely infinite looping, and thus has failed
+// Any test that doesn't finish within this limit is likely infinitely looping, and thus has failed
 #[cfg(not(miri))]
 const TIME_LIMIT: Duration = Duration::from_millis(100);
 #[cfg(miri)]

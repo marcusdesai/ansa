@@ -37,7 +37,8 @@
 //! | [`WaitPhased<W>`](WaitPhased) | 16   |
 //! | [`Timeout<W>`](Timeout)       | 8    |
 //!
-//! The sizes of both [`WaitPhased`] and [`Timeout`] of course depend on their included strategy.
+//! The sizes of both [`WaitPhased`] and [`Timeout`] of course ultimately depend on their included
+//! strategy.
 //!
 //! Various provided strategies are limited to wait durations of `u64::MAX` nanoseconds, which is
 //! done in order to keep them small. Storing a [`Duration`] instead would double the minimum size

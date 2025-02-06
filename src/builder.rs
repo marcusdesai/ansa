@@ -47,7 +47,7 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::*;
+    /// use ansa::DisruptorBuilder;
     ///
     /// // with a very simple element_factory
     /// let builder = DisruptorBuilder::new(64, || 0i64);
@@ -110,7 +110,7 @@ where
     /// Consumer handles do not necessarily need to follow one another, which allows for them to
     /// read the ring buffer concurrently.
     /// ```
-    /// use ansa::*;
+    /// use ansa::{DisruptorBuilder, Follows, Handle};
     ///
     /// // lead ─► 0
     /// //    |
@@ -122,8 +122,7 @@ where
     ///     .build()
     ///     .unwrap();
     /// ```
-    /// This represents a fan-out from the lead producer to the following consumers `0` and `1`.
-    /// These consumers will both read all the events published by the lead producer, without
+    /// Both consumers `0` and `1` will read all the events published by the lead producer, without
     /// coordinating with each other.
     ///
     /// But, producer handles must always either follow or be followed by every other handle. If
@@ -138,7 +137,7 @@ where
     ///
     /// Below is an example of a validly ordered producer in a graph.
     /// ```
-    /// use ansa::*;
+    /// use ansa::{DisruptorBuilder, Follows, Handle};
     ///
     /// // lead ─► 0 ─► 2
     /// //         |    |
@@ -148,7 +147,7 @@ where
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
-    ///     .add_handle(3, Handle::Producer, Follows::Handles(vec![1, 2])) // fan-in
+    ///     .add_handle(3, Handle::Producer, Follows::Handles(vec![1, 2]))
     ///     .add_handle(4, Handle::Consumer, Follows::Handles(vec![3]))
     ///     .build()
     ///     .unwrap();
@@ -189,7 +188,7 @@ where
     /// # Examples
     ///
     ///```
-    /// use ansa::*;
+    /// use ansa::{DisruptorBuilder, Follows, Handle};
     ///
     /// let _ = DisruptorBuilder::new(64, || 0)
     ///    .extend_handles([
@@ -215,7 +214,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use ansa::*;
+    /// use ansa::{DisruptorBuilder, Follows, Handle};
     /// use ansa::wait::WaitSleep;
     /// use std::time::Duration;
     ///
@@ -386,7 +385,7 @@ pub enum BuildError {
     ///
     /// ## Example Causes
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -401,7 +400,7 @@ pub enum BuildError {
     /// for producer `2`.
     ///
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -421,7 +420,7 @@ pub enum BuildError {
     /// `5`.
     ///
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// // defines the following graph:
     /// // lead ─► 0 ─► 1P ─► 2 ─► 3 ─► 7
@@ -454,7 +453,7 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -468,7 +467,7 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -485,7 +484,7 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::*;
+    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
     ///
     /// let result = DisruptorBuilder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -607,7 +606,7 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
 ///
 /// # Examples
 /// ```
-/// use ansa::*;
+/// use ansa::Follows;
 ///
 /// // ordered directly after the lead producer
 /// let _ = Follows::LeadProducer;
