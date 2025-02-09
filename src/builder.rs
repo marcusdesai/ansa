@@ -55,11 +55,10 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     /// let builder = DisruptorBuilder::new(64, || 0i64);
     ///
     /// // using a closure to capture state
-    /// let mut counter = 0;
+    /// let mut counter = -1_i64;
     /// let factory = move || {
-    ///     let ret = counter;
     ///     counter += 1;
-    ///     ret
+    ///     counter
     /// };
     ///
     /// let builder = DisruptorBuilder::new(64, factory);
@@ -71,7 +70,7 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
     /// #[derive(Default)]
     /// enum Currency {
     ///     #[default]
-    ///     Uninhabited, // indicates event initialised but not yet containing real data
+    ///     None, // indicates event initialised but not yet containing real data
     ///     GBP,
     ///     USD,
     ///     // ... all the rest

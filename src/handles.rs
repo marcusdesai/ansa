@@ -70,7 +70,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// let multi_2 = multi.clone();
     /// assert_eq!(multi.count(), 2);
     /// // consume a `MultiProducer` by attempting the conversion into a `Producer`
-    /// assert!(matches!(multi.into_single(), None));
+    /// assert!(matches!(multi.into_producer(), None));
     /// assert_eq!(multi_2.count(), 1);
     /// ```
     pub fn count(&self) -> usize {
@@ -102,10 +102,10 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// let (multi, _) = ansa::mpsc(64, || 0);
     /// let multi_clone = multi.clone();
     ///
-    /// assert!(matches!(multi.into_single(), None));
-    /// assert!(matches!(multi_clone.into_single(), Some(ansa::Producer { .. })));
+    /// assert!(matches!(multi.into_producer(), None));
+    /// assert!(matches!(multi_clone.into_producer(), Some(ansa::Producer { .. })));
     /// ```
-    pub fn into_single(self) -> Option<Producer<E, W, LEAD>> {
+    pub fn into_producer(self) -> Option<Producer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|_| Producer {
             cursor: self.cursor,
             barrier: self.barrier,
@@ -187,10 +187,10 @@ where
     /// Wait until at least `size` number of events are available.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (current_claim, claim_end) = claim(&self.claim, size as i64);
+        let (current_claim, claim_end) = make_claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -221,10 +221,10 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (current_claim, claim_end) = claim(&self.claim, size as i64);
+        let (current_claim, claim_end) = make_claim(&self.claim, size as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -248,16 +248,15 @@ where
 
 /// An optimised handle which mutably accesses events on the ring buffer with a fixed batch size.
 ///
+/// "Exact" handles only ever move by a given exact increment on the buffer. Fixing their movement
+/// this way allows reducing iteration over batch elements to just pointer additions.
+///
 /// Cannot access events concurrently with other handles.
 ///
 /// `ExactMultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
 /// non-overlapping ranges of sequence values, which can be writen to in parallel.
 ///
 /// Clones of this `ExactMultiProducer` share this producer's cursor.
-///
-/// todo
-/// Construction conditions ensure no out-of-bounds buffer accesses, allowing these accesses to be
-/// optimised.
 #[derive(Debug)]
 pub struct ExactMultiProducer<E, W, const LEAD: bool, const BATCH: u32> {
     cursor: Arc<Cursor>,
@@ -417,7 +416,7 @@ where
 {
     /// Wait until at least `BATCH` number of events are available.
     pub fn wait(&mut self) -> AvailableWriteExact<'_, E, BATCH> {
-        let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
+        let (current_claim, claim_end) = make_claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -446,7 +445,7 @@ where
     ///
     /// Otherwise, return the wait strategy error.
     pub fn try_wait(&mut self) -> Result<AvailableWriteExact<'_, E, BATCH>, W::Error> {
-        let (current_claim, claim_end) = claim(&self.claim, BATCH as i64);
+        let (current_claim, claim_end) = make_claim(&self.claim, BATCH as i64);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -471,7 +470,7 @@ where
 ///
 /// The claimed range is exclusive to a single multi producer clone.
 #[inline]
-fn claim(claim: &Cursor, size: i64) -> (i64, i64) {
+fn make_claim(claim: &Cursor, size: i64) -> (i64, i64) {
     let mut current_claim = claim.sequence.load(Ordering::Relaxed);
     let mut claim_end = current_claim + size;
     while let Err(new_current) = claim.sequence.compare_exchange(
@@ -601,7 +600,7 @@ where
     /// Wait until at least `size` number of events are available.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -632,7 +631,7 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -655,6 +654,9 @@ where
 }
 
 /// An optimised handle which mutably accesses events on the ring buffer with a fixed batch size.
+///
+/// "Exact" handles only ever move by a given exact increment on the buffer. Fixing their movement
+/// this way allows reducing iteration over batch elements to just pointer additions.
 ///
 /// Cannot access events concurrently with other handles.
 #[derive(Debug)]
@@ -836,7 +838,7 @@ where
     /// Wait until at least `size` number of events are available.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -874,7 +876,7 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer take longer to become available.
+    /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -906,6 +908,9 @@ where
 }
 
 /// An optimised handle which immutably accesses events on the ring buffer with a fixed batch size.
+///
+/// "Exact" handles only ever move by a given exact increment on the buffer. Fixing their movement
+/// this way allows reducing iteration over batch elements to just pointer additions.
 ///
 /// Can access events concurrently to other handles with immutable access.
 #[derive(Debug)]
@@ -1024,6 +1029,8 @@ pub struct AvailableWrite<'a, E> {
     move_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
 }
 
+// todo: elucidate docs with 'in another process' statements, eg. for describing mut alias possibility
+
 impl<E> AvailableWrite<'_, E> {
     /// Write a batch of events to the buffer.
     ///
@@ -1032,6 +1039,13 @@ impl<E> AvailableWrite<'_, E> {
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0u32);
+    /// // obtain `AvailableWrite` by waiting
+    /// producer.wait(10).write(|event, seq, _| *event = seq as u32);
+    /// ```
     pub fn write<F>(self, mut write: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -1039,7 +1053,7 @@ impl<E> AvailableWrite<'_, E> {
         fence(Ordering::Acquire);
         for seq in self.current + 1..=self.end {
             // SAFETY:
-            // 1) Only one producer is accessing this sequence, hence only mutable ref will exist.
+            // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
             // 2) Acquire-Release barrier ensures no other accesses to this sequence.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             write(event, seq, seq == self.end);
@@ -1054,7 +1068,7 @@ impl<E> AvailableWrite<'_, E> {
         fence(Ordering::Acquire);
         for seq in self.current + 1..=self.end {
             // SAFETY:
-            // 1) Only one producer is accessing this sequence, hence only mutable ref will exist.
+            // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
             // 2) Acquire-Release barrier ensures no other accesses to this sequence.
             let event: &mut E = unsafe { &mut *self.buffer.get(seq) };
             if let err @ Err(_) = write(event, seq, seq == self.end) {
@@ -1078,6 +1092,37 @@ impl<E> AvailableWrite<'_, E> {
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0u32);
+    /// // obtain `AvailableWrite` by waiting
+    /// producer.wait(10).try_write(|event, seq, _| {
+    ///     if seq == 100 {
+    ///         return Err(seq);
+    ///     }
+    ///     *event = seq as u32;
+    ///     Ok(())
+    /// })?;
+    ///
+    /// assert_eq!(producer.sequence(), 9);
+    /// # Ok::<(), i64>(())
+    /// ```
+    /// Sequence will be rolled back on failure.
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0u32);
+    ///
+    /// let result = producer.wait(10).try_write(|event, seq, _| {
+    ///     if seq == 5 {
+    ///         return Err(seq);
+    ///     }
+    ///     *event = seq as u32;
+    ///     Ok(())
+    /// });
+    /// assert_eq!(result, Err(5));
+    /// // sequence values start at -1
+    /// assert_eq!(producer.sequence(), -1);
+    /// ```
     pub fn try_write<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1095,6 +1140,13 @@ impl<E> AvailableWrite<'_, E> {
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0u32);
+    /// // obtain `AvailableWrite` by waiting
+    /// producer.wait(10).write(|event, seq, _| *event = seq as u32);
+    /// ```
     pub fn try_write_commit<F, Err>(self, write: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -1140,7 +1192,7 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
         let mut seq = self.current + 1;
         unsafe {
             // SAFETY:
-            // 1) Only one producer is accessing this sequence, hence only mutable ref will exist.
+            // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
             // 2) Acquire-Release barrier ensures no other accesses to this sequence.
             let mut pointer = self.buffer.get(seq);
             for _ in 0..BATCH - 1 {
@@ -1173,7 +1225,7 @@ impl<E, const BATCH: u32> AvailableWriteExact<'_, E, BATCH> {
         let mut seq = self.current + 1;
         unsafe {
             // SAFETY:
-            // 1) Only one producer is accessing this sequence, hence only mutable ref will exist.
+            // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
             // 2) Acquire-Release barrier ensures no other accesses to this sequence.
             let mut pointer = self.buffer.get(seq);
             for _ in 0..BATCH - 1 {
@@ -1243,8 +1295,8 @@ impl<E> AvailableRead<'_, E> {
 
     /// Read a batch of events from the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
-    /// batch start.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to the
+    /// start of the batch.
     ///
     /// The parameters of `read` are:
     ///
@@ -1316,8 +1368,8 @@ impl<E, const BATCH: u32> AvailableReadExact<'_, E, BATCH> {
 
     /// Read an exact batch of events from the buffer if successful.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to
-    /// batch start.
+    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to the
+    /// start of the batch.
     ///
     /// The parameters of `read` are:
     ///

@@ -160,7 +160,7 @@ fn test_producer_conversions() {
             let mut producer = joins
                 .into_iter()
                 .map(|h| h.join().expect("done"))
-                .fold(None, |opt, i| opt.or(i.into_single()))
+                .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..2 {
                 producer.wait(50).write(|event, seq, _| event.seq = seq)
@@ -185,7 +185,7 @@ fn test_producer_conversions() {
             let mut producer = joins
                 .into_iter()
                 .map(|h| h.join().expect("done"))
-                .fold(None, |opt, i| opt.or(i.into_single()))
+                .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..3 {
                 producer.wait(50).write(|event, _, _| event.seq_times_2 = event.seq * 2)
