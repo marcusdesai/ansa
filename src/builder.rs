@@ -124,7 +124,7 @@ where
     /// These precedence relationships must form a [directed acyclic graph][dag], where handles
     /// follow the lead producer or other handles. No loops are allowed.
     ///
-    /// [dag]:https://en.wikipedia.org/wiki/Directed_acyclic_graph
+    /// [dag]: https://en.wikipedia.org/wiki/Directed_acyclic_graph
     ///
     /// The "lead producer" is an automatically defined handle. It is always a producer, and it
     /// serves as the root of the graph. Every other handle must follow the lead either directly or

@@ -292,7 +292,7 @@ pub unsafe trait TryWaitStrategy {
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
 }
 
-/// Pure busy-wait.
+/// Pure busy-spin waiting.
 ///
 /// # Performance
 ///
@@ -349,6 +349,8 @@ impl Waiting for WaitYield {
 ///
 /// Equivalent to polling available sequences at a fixed interval.
 ///
+/// Default duration is 50 microseconds.
+///
 /// The duration of the sleep is limited to `u64::MAX` nanoseconds.
 ///
 /// # Performance
@@ -356,7 +358,7 @@ impl Waiting for WaitYield {
 /// Trades latency for CPU resource use, depending on the length of the sleep.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WaitSleep {
-    duration: u64,
+    nanos: u64,
 }
 
 impl WaitSleep {
@@ -366,15 +368,21 @@ impl WaitSleep {
     #[inline]
     pub const fn new(duration: Duration) -> Self {
         WaitSleep {
-            duration: duration.as_nanos() as u64,
+            nanos: duration.as_nanos() as u64,
         }
+    }
+}
+
+impl Default for WaitSleep {
+    fn default() -> Self {
+        WaitSleep { nanos: 50_000 } // 50 microseconds
     }
 }
 
 impl Waiting for WaitSleep {
     #[inline]
     fn waiting(&self) {
-        std::thread::sleep(Duration::from_nanos(self.duration))
+        std::thread::sleep(Duration::from_nanos(self.nanos))
     }
 }
 
@@ -390,8 +398,8 @@ impl Waiting for WaitSleep {
 /// verses CPU resource use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WaitPhased<W> {
-    spin_duration: u64,
-    yield_duration: u64,
+    spin_nanos: u64,
+    yield_nanos: u64,
     fallback: W,
 }
 
@@ -404,12 +412,12 @@ impl<W> WaitPhased<W> {
     /// for yielding to the OS.
     ///
     /// `spin_duration` and `yield_duration` are truncated to `u64::MAX` nanoseconds.
-    pub fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
+    pub const fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
         let spin_nanos = spin_duration.as_nanos() as u64;
-        let yield_nanos = (spin_duration + yield_duration).as_nanos() as u64;
+        let yield_nanos = spin_nanos.saturating_add(yield_duration.as_nanos() as u64);
         WaitPhased {
-            spin_duration: spin_nanos,
-            yield_duration: yield_nanos,
+            spin_nanos,
+            yield_nanos,
             fallback,
         }
     }
@@ -422,8 +430,8 @@ where
 {
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let timer = Instant::now();
-        let spin_dur = Duration::from_nanos(self.spin_duration);
-        let yield_dur = Duration::from_nanos(self.yield_duration);
+        let spin_dur = Duration::from_nanos(self.spin_nanos);
+        let yield_dur = Duration::from_nanos(self.yield_nanos);
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -448,8 +456,8 @@ where
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let timer = Instant::now();
-        let spin_dur = Duration::from_nanos(self.spin_duration);
-        let yield_dur = Duration::from_nanos(self.yield_duration);
+        let spin_dur = Duration::from_nanos(self.spin_nanos);
+        let yield_dur = Duration::from_nanos(self.yield_nanos);
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -496,7 +504,7 @@ pub struct TimedOut;
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
-    duration: u64,
+    nanos: u64,
     strategy: W,
 }
 
@@ -512,22 +520,13 @@ impl<W> Timeout<W> {
     /// `duration` will be truncated to `u64::MAX` nanoseconds.
     pub const fn new(duration: Duration, strategy: W) -> Self {
         Timeout {
-            duration: duration.as_nanos() as u64,
+            nanos: duration.as_nanos() as u64,
             strategy,
         }
     }
 }
 
-impl<W> Waiting for Timeout<W>
-where
-    W: Waiting,
-{
-    fn waiting(&self) {
-        self.strategy.waiting()
-    }
-}
-
-// SAFETY: wait only returns once barrier_seq >= desired_seq, with barrier_seq itself
+// SAFETY: try_wait only successfully returns with barrier_seq once barrier_seq >= desired_seq
 unsafe impl<W> TryWaitStrategy for Timeout<W>
 where
     W: Waiting,
@@ -535,7 +534,7 @@ where
     type Error = TimedOut;
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
-        let duration = Duration::from_nanos(self.duration);
+        let duration = Duration::from_nanos(self.nanos);
         let timer = Instant::now();
         loop {
             let barrier_seq = barrier.sequence();
