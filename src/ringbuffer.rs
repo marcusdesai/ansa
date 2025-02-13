@@ -64,7 +64,7 @@ impl<E> RingBuffer<E> {
     /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
     /// mutable pointers to exist simultaneously.
     #[inline]
-    pub(crate) unsafe fn get(&self, sequence: i64) -> *mut E {
+    unsafe fn get(&self, sequence: i64) -> *mut E {
         debug_assert!(sequence >= 0);
         // sequence may be greater than buffer size, so mod to bring it inbounds. Since size is a
         // power of 2, the calculation is: `sequence & (size - 1)`, and we've already calculated
@@ -75,6 +75,7 @@ impl<E> RingBuffer<E> {
         cell.get()
     }
 
+    #[inline]
     pub(crate) unsafe fn apply<F>(&self, mut seq: i64, size: i64, mut func: F)
     where
         F: FnMut(*mut E, i64, bool),
@@ -104,6 +105,7 @@ impl<E> RingBuffer<E> {
         }
     }
 
+    #[inline]
     pub(crate) unsafe fn try_apply<F, Err>(
         &self,
         mut seq: i64,
