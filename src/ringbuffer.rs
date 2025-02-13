@@ -75,6 +75,70 @@ impl<E> RingBuffer<E> {
         cell.get()
     }
 
+    pub(crate) unsafe fn apply<F>(&self, mut seq: i64, size: i64, mut func: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        debug_assert!(seq >= 0);
+        debug_assert!((size as usize) < self.size());
+        let index = seq & self.mask;
+        // whether the requested batch wraps the buffer
+        let wraps = (index + size) as usize >= self.size();
+        // SAFETY: index will always be inbounds after BitAnd with mask
+        let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
+
+        if wraps {
+            for _ in 0..size - 1 {
+                func(ptr, seq, false);
+                seq += 1;
+                ptr = unsafe { self.get(seq) };
+            }
+            func(ptr, seq, true);
+        } else {
+            for _ in 0..size - 1 {
+                func(ptr, seq, false);
+                seq += 1;
+                ptr = unsafe { ptr.add(1) };
+            }
+            func(ptr, seq, true);
+        }
+    }
+
+    pub(crate) unsafe fn try_apply<F, Err>(
+        &self,
+        mut seq: i64,
+        size: i64,
+        mut func: F,
+    ) -> Result<(), Err>
+    where
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
+    {
+        debug_assert!(seq >= 0);
+        debug_assert!((size as usize) < self.size());
+        let index = seq & self.mask;
+        // whether the requested batch wraps the buffer
+        let wraps = (index + size) as usize >= self.size();
+        // SAFETY: index will always be inbounds after BitAnd with mask
+        let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
+
+        if wraps {
+            for _ in 0..size - 1 {
+                func(ptr, seq, false)?;
+                seq += 1;
+                ptr = unsafe { self.get(seq) };
+            }
+            func(ptr, seq, true)?;
+        } else {
+            for _ in 0..size - 1 {
+                func(ptr, seq, false)?;
+                seq += 1;
+                ptr = unsafe { ptr.add(1) };
+            }
+            func(ptr, seq, true)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub(crate) const fn size(&self) -> usize {
         self.buf.len()

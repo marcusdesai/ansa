@@ -19,11 +19,8 @@
 //! | Handle                                                     | size |
 //! |------------------------------------------------------------|------|
 //! | [`Consumer`](crate::handles::Consumer)                     | 32   |
-//! | [`ExactConsumer`](crate::handles::ExactConsumer)           | 32   |
 //! | [`Producer`](crate::handles::Producer)                     | 32   |
-//! | [`ExactProducer`](crate::handles::ExactProducer)           | 32   |
 //! | [`MultiProducer`](crate::handles::MultiProducer)           | 40   |
-//! | [`ExactMultiProducer`](crate::handles::ExactMultiProducer) | 40   |
 //!
 //! And here are the minimum sizes of the provided strategies, again assuming nested wait
 //! strategies are zero-sized. These sizes will also only be altered in a major version change.
