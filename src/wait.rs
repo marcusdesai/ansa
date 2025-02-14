@@ -13,17 +13,17 @@
 //!
 //! Cache lines are commonly `32`, `64`, or `128` bytes. With `64` bytes being the most common.
 //!
-//! When the wait strategy is zero-sized, each handle has the following size (in bytes). These
-//! sizes will only be altered in a major version change.
+//! When the wait strategy is zero-sized, each handle has the following size (in bytes, on a 64-bit
+//! system). Changes in these sizes, if compiled for a single system, are considered breaking.
 //!
-//! | Handle                                                     | size |
-//! |------------------------------------------------------------|------|
-//! | [`Consumer`](crate::handles::Consumer)                     | 32   |
-//! | [`Producer`](crate::handles::Producer)                     | 32   |
-//! | [`MultiProducer`](crate::handles::MultiProducer)           | 40   |
+//! | Handle                                           | size |
+//! |--------------------------------------------------|------|
+//! | [`Consumer`](crate::handles::Consumer)           | 32   |
+//! | [`Producer`](crate::handles::Producer)           | 32   |
+//! | [`MultiProducer`](crate::handles::MultiProducer) | 40   |
 //!
-//! And here are the minimum sizes of the provided strategies, again assuming nested wait
-//! strategies are zero-sized. These sizes will also only be altered in a major version change.
+//! And here are the minimum sizes of the provided strategies (on a 64-bit system), again assuming
+//! nested strategies are zero-sized. Changes in these sizes are also considered breaking.
 //!
 //! | Strategy                      | size |
 //! |-------------------------------|------|
@@ -38,8 +38,8 @@
 //! strategy.
 //!
 //! Various provided strategies are limited to wait durations of `u64::MAX` nanoseconds, which is
-//! done in order to keep them small. Storing a [`Duration`] instead would double the minimum size
-//! of these strategies.
+//! done in order to keep their sizes small. Storing a [`Duration`] instead would double the
+//! minimum size of these strategies.
 //! ```
 //! use std::time::Duration;
 //!
@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 /// If state or fallibility is required, implement [`WaitStrategy`] or [`TryWaitStrategy`] instead.
 ///
 /// If a type, `T`, implements `Waiting`, then `T` will implement `WaitStrategy`, and
-/// `Timeout<T>` will implement `TryWaitStrategy`.
+/// [`Timeout<T>`](Timeout) will implement `TryWaitStrategy`.
 ///
 /// # Examples
 /// ```
@@ -479,9 +479,6 @@ pub struct TimedOut;
 ///
 /// This struct is not required for implementing `TryWaitStrategy`, it is only a convenience
 /// for automating implementations of timeouts.
-///
-/// `Timeout<W>` also implements `Waiting` when `W` does, transparently allowing the use of
-/// infallible wait methods.
 ///
 /// The length of the timeout is limited to `u64::MAX` nanoseconds.
 ///

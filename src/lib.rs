@@ -161,6 +161,7 @@ where
 /// let (producer, consumers) = ansa::spmc(64, num_consumers, || 0);
 /// assert_eq!(consumers.len(), 5);
 /// ```
+#[allow(clippy::type_complexity)]
 pub fn spmc<E>(
     size: usize,
     num_consumers: u64,
@@ -208,6 +209,7 @@ where
 /// let (multi_producer, consumers) = ansa::mpmc(64, num_consumers, || 0);
 /// assert_eq!(consumers.len(), 5);
 /// ```
+#[allow(clippy::type_complexity)]
 pub fn mpmc<E>(
     size: usize,
     num_consumers: u64,

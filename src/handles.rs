@@ -30,7 +30,6 @@ use std::sync::Arc;
 /// assert_eq!(trailing.count(), 1);
 /// # Ok::<(), ansa::BuildError>(())
 /// ```
-
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     cursor: Arc<Cursor>,
@@ -81,11 +80,37 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// **Important:** The cursor for a `MultiProducer` is shared by all of its clones. Any of
     /// these clones could alter this value at any time, if they are writing to the buffer.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut multi, _) = ansa::mpsc(64, || 0);
+    /// // sequences start at -1, but accesses always occur at the next sequence,
+    /// // so the first accessed sequence will be 0
+    /// assert_eq!(multi.sequence(), -1);
+    ///
+    /// // move the producer cursor up by 10
+    /// multi.wait(10).write(|_, _, _| ());
+    /// assert_eq!(multi.sequence(), 9);
+    ///
+    /// // clone and move only the clone
+    /// let mut clone = multi.clone();
+    /// clone.wait(10).write(|_, _, _| ());
+    ///
+    /// // Both have moved because all clones share the same cursor
+    /// assert_eq!(multi.sequence(), 19);
+    /// assert_eq!(clone.sequence(), 19);
+    /// ```
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
+    ///
+    /// # Examples
+    /// ```
+    /// let (producer, _) = ansa::mpsc(64, || 0);
+    /// assert_eq!(producer.buffer_size(), 64);
+    /// ```
     pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
@@ -114,11 +139,8 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         })
     }
 
-    /// Returns a claim for a range of sequences.
-    ///
-    /// The claimed range is exclusive to a single multi producer clone.
     #[inline]
-    fn claim_batch(&self, size: i64) -> (i64, i64) {
+    fn batch_range(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
         while let Err(new_current) = self.claim.sequence.compare_exchange(
@@ -130,12 +152,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             current_claim = new_current;
             claim_end = new_current + size;
         }
-        (current_claim, claim_end)
-    }
 
-    #[inline]
-    fn batch_range(&self, size: i64) -> (i64, i64) {
-        let (current_claim, claim_end) = self.claim_batch(size);
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -247,11 +264,29 @@ pub struct Producer<E, W, const LEAD: bool> {
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// Returns the current sequence value for this producer's cursor.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0);
+    /// // sequences start at -1, but accesses always occur at the next sequence,
+    /// // so the first accessed sequence will be 0
+    /// assert_eq!(producer.sequence(), -1);
+    ///
+    /// // move the producer up by 10
+    /// producer.wait(10).write(|_, _, _| ());
+    /// assert_eq!(producer.sequence(), 9);
+    /// ```
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
+    ///
+    /// # Examples
+    /// ```
+    /// let (producer, _) = ansa::spsc(64, || 0);
+    /// assert_eq!(producer.buffer_size(), 64);
+    /// ```
     pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
@@ -379,11 +414,34 @@ pub struct Consumer<E, W> {
 
 impl<E, W> Consumer<E, W> {
     /// Returns the current sequence value for this consumer's cursor.
+    ///
+    /// # Examples
+    /// ```
+    /// let (mut producer, mut consumer) = ansa::spsc(64, || 0);
+    /// // sequences start at -1, but accesses always occur at the next sequence,
+    /// // so the first accessed sequence will be 0
+    /// assert_eq!(producer.sequence(), -1);
+    ///
+    /// // move the producer up by 10, otherwise the consumer will block the
+    /// // thread while waiting
+    /// producer.wait(10).write(|_, _, _| ());
+    /// assert_eq!(producer.sequence(), 9);
+    ///
+    /// // now we can move the consumer
+    /// consumer.wait(5).read(|_, _, _| ());
+    /// assert_eq!(consumer.sequence(), 4);
+    /// ```
     pub fn sequence(&self) -> i64 {
         self.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
+    ///
+    /// # Examples
+    /// ```
+    /// let (_, consumer) = ansa::spsc(64, || 0);
+    /// assert_eq!(consumer.buffer_size(), 64);
+    /// ```
     pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
@@ -609,9 +667,8 @@ impl<E> AvailableWrite<'_, E> {
         unsafe {
             self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
                 let event: &mut E = &mut *ptr;
-                write(event, seq, end).map_err(|err| {
+                write(event, seq, end).inspect_err(|_| {
                     (self.move_cursor)(self.cursor, self.current, seq - 1, Ordering::Release);
-                    err
                 })
             })?;
         }
@@ -705,9 +762,8 @@ impl<E> AvailableRead<'_, E> {
         unsafe {
             self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
                 let event: &E = &*ptr;
-                read(event, seq, end).map_err(|err| {
+                read(event, seq, end).inspect_err(|_| {
                     self.cursor.sequence.store(seq - 1, Ordering::Release);
-                    err
                 })
             })?;
         }
@@ -736,14 +792,16 @@ impl Cursor {
         }
     }
 
-    /// Create a cursor at the start of the sequence. All reads and writes begin on the _next_
-    /// position in the sequence, thus cursors start at `-1`, so that reads and writes start at `0`.
+    /// Create a cursor at the start of the sequence. All accesses begin on the _next_ position in
+    /// the sequence, thus cursors start at `-1`, so that accesses start at `0`.
     pub(crate) const fn start() -> Self {
         Cursor::new(-1)
     }
 }
 
-/// A collection of cursors that limits which sequence is available to a handle.
+/// A collection of cursors that determine which sequence is available to a handle.
+///
+/// Every handle has a barrier, and no handle may overtake its barrier.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Barrier(Barrier_);
@@ -764,6 +822,21 @@ impl Barrier {
     }
 
     /// The position of the barrier.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{Barrier, wait::WaitStrategy};
+    ///
+    /// struct MyBusyWait;
+    ///
+    /// // SAFETY: wait returns once barrier seq >= desired_seq, with barrier seq itself
+    /// unsafe impl WaitStrategy for MyBusyWait {
+    ///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
+    ///         while desired_seq > barrier.sequence() {} // busy-spin
+    ///         barrier.sequence()
+    ///     }
+    /// }
+    /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
         match &self.0 {
