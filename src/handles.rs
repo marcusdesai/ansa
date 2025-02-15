@@ -138,9 +138,10 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             wait_strategy: self.wait_strategy,
         })
     }
+}
 
-    #[inline]
-    fn batch_range(&self, size: i64) -> (i64, i64) {
+impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for MultiProducer<E, W, LEAD> {
+    fn wait_range(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
         while let Err(new_current) = self.claim.sequence.compare_exchange(
@@ -152,7 +153,6 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             current_claim = new_current;
             claim_end = new_current + size;
         }
-
         let desired_seq = if LEAD {
             claim_end - self.buffer.size() as i64
         } else {
@@ -161,19 +161,26 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
         (current_claim, desired_seq)
     }
 
-    #[inline]
-    fn as_available_write(&mut self, sequence: i64, batch_size: i64) -> AvailableWrite<'_, E> {
-        AvailableWrite {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
+        Available {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
-            current: sequence,
+            current: from_seq,
             batch_size,
-            move_cursor: |cursor, current, end, ordering| {
+            set_cursor: |cursor, current, end, ordering| {
                 // Busy wait for the cursor to catch up to the start of claimed sequence.
                 while cursor.sequence.load(Ordering::Acquire) != current {}
                 cursor.sequence.store(end, ordering)
             },
         }
+    }
+
+    fn barrier(&self) -> &Barrier {
+        &self.barrier
+    }
+
+    fn strategy(&self) -> &W {
+        &self.wait_strategy
     }
 }
 
@@ -187,27 +194,23 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (producer_seq, desired_seq) = self.batch_range(size as i64);
-        self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= desired_seq);
-        self.as_available_write(producer_seq, size as i64)
+        AvailableWrite(CanWait::wait(self, size))
+    }
+
+    pub fn wait_min(&mut self, size: u32) -> AvailableWrite<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        AvailableWrite(CanWait::wait_min(self, size))
     }
 
     /// Wait until any number of events are available.
     pub fn wait_any(&mut self) -> AvailableWrite<'_, E> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(barrier_seq > producer_seq);
-        self.as_available_write(producer_seq, barrier_seq - producer_seq)
+        AvailableWrite(CanWait::wait_any(self))
     }
 
     /// Wait until at most `size` number of events are available.
-    pub fn wait_upto(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(barrier_seq > producer_seq);
-        let batch_size = (barrier_seq - producer_seq).min(size as i64);
-        self.as_available_write(producer_seq, batch_size)
+    pub fn wait_max(&mut self, size: u32) -> AvailableWrite<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        AvailableWrite(CanWait::wait_max(self, size))
     }
 }
 
@@ -223,31 +226,27 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (producer_seq, desired_seq) = self.batch_range(size as i64);
-        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= desired_seq);
-        Ok(self.as_available_write(producer_seq, size as i64))
+        CanWait::try_wait(self, size).map(AvailableWrite)
+    }
+
+    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
+        debug_assert!(size as usize <= self.buffer.size());
+        CanWait::try_wait_min(self, size).map(AvailableWrite)
     }
 
     /// Wait until any number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     pub fn try_wait_any(&mut self) -> Result<AvailableWrite<'_, E>, W::Error> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > producer_seq);
-        Ok(self.as_available_write(producer_seq, barrier_seq - producer_seq))
+        CanWait::try_wait_any(self).map(AvailableWrite)
     }
 
     /// Wait until at most `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > producer_seq);
-        let batch_size = (barrier_seq - producer_seq).min(size as i64);
-        Ok(self.as_available_write(producer_seq, batch_size))
+        debug_assert!(size as usize <= self.buffer.size());
+        CanWait::try_wait_max(self, size).map(AvailableWrite)
     }
 }
 
@@ -302,9 +301,10 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
             wait_strategy: self.wait_strategy,
         }
     }
+}
 
-    #[inline]
-    fn batch_range(&self, size: i64) -> (i64, i64) {
+impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for Producer<E, W, LEAD> {
+    fn wait_range(&self, size: i64) -> (i64, i64) {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size;
         let desired_seq = if LEAD {
@@ -315,15 +315,22 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
         (producer_seq, desired_seq)
     }
 
-    #[inline]
-    fn as_available_write(&mut self, sequence: i64, batch_size: i64) -> AvailableWrite<'_, E> {
-        AvailableWrite {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
+        Available {
             cursor: &mut self.cursor,
             buffer: &mut self.buffer,
-            current: sequence,
+            current: from_seq,
             batch_size,
-            move_cursor: |cursor, _, end, ordering| cursor.sequence.store(end, ordering),
+            set_cursor: |cursor, _, end, ordering| cursor.sequence.store(end, ordering),
         }
+    }
+
+    fn barrier(&self) -> &Barrier {
+        &self.barrier
+    }
+
+    fn strategy(&self) -> &W {
+        &self.wait_strategy
     }
 }
 
@@ -337,27 +344,23 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (producer_seq, desired_seq) = self.batch_range(size as i64);
-        self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= desired_seq);
-        self.as_available_write(producer_seq, size as i64)
+        AvailableWrite(CanWait::wait(self, size))
+    }
+
+    pub fn wait_min(&mut self, size: u32) -> AvailableWrite<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        AvailableWrite(CanWait::wait_min(self, size))
     }
 
     /// Wait until any number of events are available.
     pub fn wait_any(&mut self) -> AvailableWrite<'_, E> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(barrier_seq > producer_seq);
-        self.as_available_write(producer_seq, barrier_seq - producer_seq)
+        AvailableWrite(CanWait::wait_any(self))
     }
 
     /// Wait until at most `size` number of events are available.
-    pub fn wait_upto(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.wait(desired_seq, &self.barrier);
-        debug_assert!(barrier_seq > producer_seq);
-        let batch_size = (barrier_seq - producer_seq).min(size as i64);
-        self.as_available_write(producer_seq, batch_size)
+    pub fn wait_max(&mut self, size: u32) -> AvailableWrite<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        AvailableWrite(CanWait::wait_max(self, size))
     }
 }
 
@@ -373,31 +376,27 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (producer_seq, desired_seq) = self.batch_range(size as i64);
-        self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= desired_seq);
-        Ok(self.as_available_write(producer_seq, size as i64))
+        CanWait::try_wait(self, size).map(AvailableWrite)
+    }
+
+    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
+        debug_assert!(size as usize <= self.buffer.size());
+        CanWait::try_wait_min(self, size).map(AvailableWrite)
     }
 
     /// Wait until any number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     pub fn try_wait_any(&mut self) -> Result<AvailableWrite<'_, E>, W::Error> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > producer_seq);
-        Ok(self.as_available_write(producer_seq, barrier_seq - producer_seq))
+        CanWait::try_wait_any(self).map(AvailableWrite)
     }
 
     /// Wait until at most `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        let (producer_seq, desired_seq) = self.batch_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(desired_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > producer_seq);
-        let batch_size = (barrier_seq - producer_seq).min(size as i64);
-        Ok(self.as_available_write(producer_seq, batch_size))
+        debug_assert!(size as usize <= self.buffer.size());
+        CanWait::try_wait_max(self, size).map(AvailableWrite)
     }
 }
 
@@ -445,15 +444,35 @@ impl<E, W> Consumer<E, W> {
     pub fn buffer_size(&self) -> usize {
         self.buffer.size()
     }
+}
+
+impl<E, W> CanWait<W, E, ()> for Consumer<E, W> {
+    #[inline]
+    fn wait_range(&self, size: i64) -> (i64, i64) {
+        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = consumer_seq + size;
+        (consumer_seq, batch_end)
+    }
 
     #[inline]
-    fn as_available_read(&mut self, sequence: i64, batch_size: i64) -> AvailableRead<'_, E> {
-        AvailableRead {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, ()> {
+        Available {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
-            current: sequence,
+            current: from_seq,
             batch_size,
+            set_cursor: (),
         }
+    }
+
+    #[inline]
+    fn barrier(&self) -> &Barrier {
+        &self.barrier
+    }
+
+    #[inline]
+    fn strategy(&self) -> &W {
+        &self.wait_strategy
     }
 }
 
@@ -467,29 +486,23 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn wait(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let batch_end = consumer_seq + size as i64;
-        self.wait_strategy.wait(batch_end, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= batch_end);
-        self.as_available_read(consumer_seq, size as i64)
+        AvailableRead(CanWait::wait(self, size))
+    }
+
+    pub fn wait_until(&mut self, size: u32) -> AvailableRead<'_, E> {
+        debug_assert!(size as usize <= self.buffer.size());
+        AvailableRead(CanWait::wait_min(self, size))
     }
 
     /// Wait until any number of events are available.
     pub fn wait_any(&mut self) -> AvailableRead<'_, E> {
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
-        debug_assert!(barrier_seq > consumer_seq);
-        self.as_available_read(consumer_seq, barrier_seq - consumer_seq)
+        AvailableRead(CanWait::wait_any(self))
     }
 
     /// Wait until at most `size` number of events are available.
     pub fn wait_upto(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = self.wait_strategy.wait(consumer_seq + 1, &self.barrier);
-        debug_assert!(barrier_seq > consumer_seq);
-        let batch_size = (barrier_seq - consumer_seq).min(size as i64);
-        self.as_available_read(consumer_seq, batch_size)
+        AvailableRead(CanWait::wait_max(self, size))
     }
 }
 
@@ -505,46 +518,45 @@ where
     /// stall, as larger portions of the buffer may take longer to become available.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let batch_end = consumer_seq + size as i64;
-        self.wait_strategy.try_wait(batch_end, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= batch_end);
-        Ok(self.as_available_read(consumer_seq, size as i64))
+        CanWait::try_wait(self, size).map(AvailableRead)
+    }
+
+    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
+        debug_assert!(size as usize <= self.buffer.size());
+        CanWait::try_wait_min(self, size).map(AvailableRead)
     }
 
     /// Wait until any number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
     pub fn try_wait_any(&mut self) -> Result<AvailableRead<'_, E>, W::Error> {
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = self.wait_strategy.try_wait(consumer_seq + 1, &self.barrier)?;
-        debug_assert!(barrier_seq > consumer_seq);
-        Ok(self.as_available_read(consumer_seq, barrier_seq - consumer_seq))
+        CanWait::try_wait_any(self).map(AvailableRead)
     }
 
     /// Wait until at most `size` number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
-    pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
+    pub fn try_wait_max(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let barrier_seq = self.wait_strategy.try_wait(consumer_seq + 1, &self.barrier)?;
-        debug_assert!(barrier_seq > consumer_seq);
-        let batch_size = (barrier_seq - consumer_seq).min(size as i64);
-        Ok(self.as_available_read(consumer_seq, batch_size))
+        CanWait::try_wait_max(self, size).map(AvailableRead)
     }
+}
+
+struct Available<'a, E, F> {
+    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
+    buffer: &'a Arc<RingBuffer<E>>,
+    current: i64,
+    batch_size: i64,
+    set_cursor: F,
 }
 
 // todo: elucidate docs with 'in another process' statements, eg. for describing mut alias possibility
 
 /// Represents a range of available sequences which may be written to.
-pub struct AvailableWrite<'a, E> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
-    buffer: &'a Arc<RingBuffer<E>>,
-    current: i64,
-    batch_size: i64,
-    move_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
-}
+#[repr(transparent)]
+pub struct AvailableWrite<'a, E>(Available<'a, E, SetCursor>);
+
+type SetCursor = fn(&Arc<Cursor>, i64, i64, Ordering);
 
 impl<E> AvailableWrite<'_, E> {
     /// Write a batch of events to the buffer.
@@ -570,13 +582,13 @@ impl<E> AvailableWrite<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.apply(self.current + 1, self.batch_size, |ptr, seq, end| {
+            self.0.buffer.apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
                 let event: &mut E = &mut *ptr;
                 write(event, seq, end);
             });
         }
-        let seq_end = self.current + self.batch_size;
-        (self.move_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        let seq_end = self.0.current + self.0.batch_size;
+        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
     }
 
     /// Write an exact batch of events to the buffer if successful.
@@ -629,13 +641,15 @@ impl<E> AvailableWrite<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
-                let event: &mut E = &mut *ptr;
-                write(event, seq, end)
-            })?;
+            self.0
+                .buffer
+                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
+                    let event: &mut E = &mut *ptr;
+                    write(event, seq, end)
+                })?;
         }
-        let seq_end = self.current + self.batch_size;
-        (self.move_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        let seq_end = self.0.current + self.0.batch_size;
+        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
         Ok(())
     }
 
@@ -665,26 +679,29 @@ impl<E> AvailableWrite<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
-                let event: &mut E = &mut *ptr;
-                write(event, seq, end).inspect_err(|_| {
-                    (self.move_cursor)(self.cursor, self.current, seq - 1, Ordering::Release);
-                })
-            })?;
+            self.0
+                .buffer
+                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
+                    let event: &mut E = &mut *ptr;
+                    write(event, seq, end).inspect_err(|_| {
+                        (self.0.set_cursor)(
+                            self.0.cursor,
+                            self.0.current,
+                            seq - 1,
+                            Ordering::Release,
+                        );
+                    })
+                })?;
         }
-        let seq_end = self.current + self.batch_size;
-        (self.move_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        let seq_end = self.0.current + self.0.batch_size;
+        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
         Ok(())
     }
 }
 
 /// Represents a range of available sequences which may be read from.
-pub struct AvailableRead<'a, E> {
-    cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
-    buffer: &'a Arc<RingBuffer<E>>,
-    current: i64,
-    batch_size: i64,
-}
+#[repr(transparent)]
+pub struct AvailableRead<'a, E>(Available<'a, E, ()>);
 
 impl<E> AvailableRead<'_, E> {
     /// Read a batch of events from the buffer.
@@ -703,13 +720,13 @@ impl<E> AvailableRead<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.apply(self.current + 1, self.batch_size, |ptr, seq, end| {
+            self.0.buffer.apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
                 let event: &E = &*ptr;
                 read(event, seq, end);
             });
         }
-        let end_seq = self.current + self.batch_size;
-        self.cursor.sequence.store(end_seq, Ordering::Release);
+        let end_seq = self.0.current + self.0.batch_size;
+        self.0.cursor.sequence.store(end_seq, Ordering::Release);
     }
 
     /// Read a batch of events from the buffer if successful.
@@ -731,13 +748,15 @@ impl<E> AvailableRead<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
-                let event: &E = &*ptr;
-                read(event, seq, end)
-            })?;
+            self.0
+                .buffer
+                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
+                    let event: &E = &*ptr;
+                    read(event, seq, end)
+                })?;
         }
-        let end_seq = self.current + self.batch_size;
-        self.cursor.sequence.store(end_seq, Ordering::Release);
+        let end_seq = self.0.current + self.0.batch_size;
+        self.0.cursor.sequence.store(end_seq, Ordering::Release);
         Ok(())
     }
 
@@ -760,16 +779,118 @@ impl<E> AvailableRead<'_, E> {
         // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
         // 2) Acquire-Release barrier ensures no other accesses to this sequence.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
-                let event: &E = &*ptr;
-                read(event, seq, end).inspect_err(|_| {
-                    self.cursor.sequence.store(seq - 1, Ordering::Release);
-                })
-            })?;
+            self.0
+                .buffer
+                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
+                    let event: &E = &*ptr;
+                    read(event, seq, end).inspect_err(|_| {
+                        self.0.cursor.sequence.store(seq - 1, Ordering::Release);
+                    })
+                })?;
         }
-        let end_seq = self.current + self.batch_size;
-        self.cursor.sequence.store(end_seq, Ordering::Release);
+        let end_seq = self.0.current + self.0.batch_size;
+        self.0.cursor.sequence.store(end_seq, Ordering::Release);
         Ok(())
+    }
+}
+
+trait CanWait<W, E, F> {
+    fn wait_range(&self, size: i64) -> (i64, i64);
+
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, F>;
+
+    fn barrier(&self) -> &Barrier;
+
+    fn strategy(&self) -> &W;
+
+    #[inline]
+    fn wait(&mut self, size: u32) -> Available<'_, E, F>
+    where
+        W: WaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(size as i64);
+        self.strategy().wait(till_seq, self.barrier());
+        debug_assert!(self.barrier().sequence() >= till_seq);
+        self.as_available(from_seq, size as i64)
+    }
+
+    #[inline]
+    fn wait_min(&mut self, size: u32) -> Available<'_, E, F>
+    where
+        W: WaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let barrier_seq = self.strategy().wait(till_seq, self.barrier());
+        debug_assert!(barrier_seq >= till_seq);
+        self.as_available(from_seq, barrier_seq - from_seq)
+    }
+
+    #[inline]
+    fn wait_any(&mut self) -> Available<'_, E, F>
+    where
+        W: WaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(1);
+        let barrier_seq = self.strategy().wait(till_seq, self.barrier());
+        debug_assert!(barrier_seq > from_seq);
+        self.as_available(from_seq, barrier_seq - from_seq)
+    }
+
+    #[inline]
+    fn wait_max(&mut self, size: u32) -> Available<'_, E, F>
+    where
+        W: WaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(1);
+        let barrier_seq = self.strategy().wait(till_seq, self.barrier());
+        debug_assert!(barrier_seq > from_seq);
+        let batch_size = (barrier_seq - from_seq).min(size as i64);
+        self.as_available(from_seq, batch_size)
+    }
+
+    #[inline]
+    fn try_wait(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    where
+        W: TryWaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(size as i64);
+        self.strategy().try_wait(till_seq, self.barrier())?;
+        debug_assert!(self.barrier().sequence() >= till_seq);
+        Ok(self.as_available(from_seq, size as i64))
+    }
+
+    #[inline]
+    fn try_wait_min(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    where
+        W: TryWaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let barrier_seq = self.strategy().try_wait(till_seq, self.barrier())?;
+        debug_assert!(barrier_seq >= till_seq);
+        Ok(self.as_available(from_seq, barrier_seq - from_seq))
+    }
+
+    #[inline]
+    fn try_wait_any(&mut self) -> Result<Available<'_, E, F>, W::Error>
+    where
+        W: TryWaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(1);
+        let barrier_seq = self.strategy().try_wait(till_seq, self.barrier())?;
+        debug_assert!(barrier_seq > from_seq);
+        Ok(self.as_available(from_seq, barrier_seq - from_seq))
+    }
+
+    #[inline]
+    fn try_wait_max(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    where
+        W: TryWaitStrategy,
+    {
+        let (from_seq, till_seq) = self.wait_range(1);
+        let barrier_seq = self.strategy().try_wait(till_seq, self.barrier())?;
+        debug_assert!(barrier_seq > from_seq);
+        let batch_size = (barrier_seq - from_seq).min(size as i64);
+        Ok(self.as_available(from_seq, batch_size))
     }
 }
 
