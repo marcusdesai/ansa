@@ -12,6 +12,14 @@ use std::sync::Arc;
 ///
 /// Clones of this `MultiProducer` share this producer's cursor.
 ///
+/// # Limitations
+///
+/// `MultiProducer` clones coordinate by claiming exact ranges of sequences that they alone will
+/// access. Since this claim occurs before waiting for sequence availability, the `MultiProducer`
+/// cannot flexibly change how much it will write depending on the actual sequence availability, as
+/// it must stick to the claimed range. The result is that the methods: `wait_min`, `wait_any` and
+/// `wait_max` (and `try` variants) cannot be implemented for `MultiProducer`s.
+///
 /// # Examples
 /// ```
 /// use ansa::{DisruptorBuilder, Follows, Handle};
@@ -140,7 +148,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 }
 
-impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for MultiProducer<E, W, LEAD> {
+impl<E, W, const LEAD: bool> CanWait<E, W> for MultiProducer<E, W, LEAD> {
     #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
@@ -163,7 +171,7 @@ impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for MultiProducer<E, W, LE
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E> {
         Available {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
@@ -269,7 +277,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     }
 }
 
-impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for Producer<E, W, LEAD> {
+impl<E, W, const LEAD: bool> CanWait<E, W> for Producer<E, W, LEAD> {
     #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -283,7 +291,7 @@ impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for Producer<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E> {
         Available {
             cursor: &mut self.cursor,
             buffer: &mut self.buffer,
@@ -418,7 +426,7 @@ impl<E, W> Consumer<E, W> {
     }
 }
 
-impl<E, W> CanWait<E, W, ()> for Consumer<E, W> {
+impl<E, W> CanWait<E, W> for Consumer<E, W> {
     #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
@@ -426,13 +434,13 @@ impl<E, W> CanWait<E, W, ()> for Consumer<E, W> {
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, ()> {
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E> {
         Available {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
             current: from_seq,
             batch_size,
-            set_cursor: (),
+            set_cursor: |cursor, _, end, ordering| cursor.sequence.store(end, ordering),
         }
     }
 
@@ -515,21 +523,68 @@ where
     }
 }
 
-struct Available<'a, E, F> {
+struct Available<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
     batch_size: i64,
-    set_cursor: F,
+    set_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
+}
+
+impl<E> Available<'_, E> {
+    fn apply<F>(self, f: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
+        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
+        unsafe { self.buffer.apply(self.current + 1, self.batch_size, f) };
+        let seq_end = self.current + self.batch_size;
+        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+    }
+
+    fn try_apply<F, Err>(self, f: F) -> Result<(), Err>
+    where
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
+    {
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
+        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
+        unsafe { self.buffer.try_apply(self.current + 1, self.batch_size, f)? };
+        let seq_end = self.current + self.batch_size;
+        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        Ok(())
+    }
+
+    fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
+    where
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
+    {
+        fence(Ordering::Acquire);
+        // SAFETY:
+        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
+        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
+        unsafe {
+            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
+                f(ptr, seq, end).inspect_err(|_| {
+                    (self.set_cursor)(self.cursor, self.current, seq - 1, Ordering::Release);
+                })
+            })?;
+        }
+        let seq_end = self.current + self.batch_size;
+        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        Ok(())
+    }
 }
 
 // todo: elucidate docs with 'in another process' statements, eg. for describing mut alias possibility
 
 /// Represents a range of available sequences which may be written to.
 #[repr(transparent)]
-pub struct AvailableWrite<'a, E>(Available<'a, E, SetCursor>);
-
-type SetCursor = fn(&Arc<Cursor>, i64, i64, Ordering);
+pub struct AvailableWrite<'a, E>(Available<'a, E>);
 
 impl<E> AvailableWrite<'_, E> {
     /// Write a batch of events to the buffer.
@@ -550,18 +605,11 @@ impl<E> AvailableWrite<'_, E> {
     where
         F: FnMut(&mut E, i64, bool),
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0.buffer.apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                let event: &mut E = &mut *ptr;
-                write(event, seq, end);
-            });
-        }
-        let seq_end = self.0.current + self.0.batch_size;
-        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
+        self.0.apply(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &mut E = unsafe { &mut *ptr };
+            write(event, seq, end)
+        })
     }
 
     /// Write an exact batch of events to the buffer if successful.
@@ -609,21 +657,11 @@ impl<E> AvailableWrite<'_, E> {
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0
-                .buffer
-                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                    let event: &mut E = &mut *ptr;
-                    write(event, seq, end)
-                })?;
-        }
-        let seq_end = self.0.current + self.0.batch_size;
-        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
-        Ok(())
+        self.0.try_apply(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &mut E = unsafe { &mut *ptr };
+            write(event, seq, end)
+        })
     }
 
     /// Write an exact batch of events to the buffer if successful.
@@ -647,34 +685,17 @@ impl<E> AvailableWrite<'_, E> {
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0
-                .buffer
-                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                    let event: &mut E = &mut *ptr;
-                    write(event, seq, end).inspect_err(|_| {
-                        (self.0.set_cursor)(
-                            self.0.cursor,
-                            self.0.current,
-                            seq - 1,
-                            Ordering::Release,
-                        );
-                    })
-                })?;
-        }
-        let seq_end = self.0.current + self.0.batch_size;
-        (self.0.set_cursor)(self.0.cursor, self.0.current, seq_end, Ordering::Release);
-        Ok(())
+        self.0.try_apply_commit(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &mut E = unsafe { &mut *ptr };
+            write(event, seq, end)
+        })
     }
 }
 
 /// Represents a range of available sequences which may be read from.
 #[repr(transparent)]
-pub struct AvailableRead<'a, E>(Available<'a, E, ()>);
+pub struct AvailableRead<'a, E>(Available<'a, E>);
 
 impl<E> AvailableRead<'_, E> {
     /// Read a batch of events from the buffer.
@@ -688,18 +709,11 @@ impl<E> AvailableRead<'_, E> {
     where
         F: FnMut(&E, i64, bool),
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0.buffer.apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                let event: &E = &*ptr;
-                read(event, seq, end);
-            });
-        }
-        let end_seq = self.0.current + self.0.batch_size;
-        self.0.cursor.sequence.store(end_seq, Ordering::Release);
+        self.0.apply(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &E = unsafe { &mut *ptr };
+            read(event, seq, end)
+        })
     }
 
     /// Read a batch of events from the buffer if successful.
@@ -716,21 +730,11 @@ impl<E> AvailableRead<'_, E> {
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0
-                .buffer
-                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                    let event: &E = &*ptr;
-                    read(event, seq, end)
-                })?;
-        }
-        let end_seq = self.0.current + self.0.batch_size;
-        self.0.cursor.sequence.store(end_seq, Ordering::Release);
-        Ok(())
+        self.0.try_apply(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &E = unsafe { &mut *ptr };
+            read(event, seq, end)
+        })
     }
 
     /// Read a batch of events from the buffer if successful.
@@ -747,37 +751,25 @@ impl<E> AvailableRead<'_, E> {
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
-        fence(Ordering::Acquire);
-        // SAFETY:
-        // 1) Only one producer is accessing this sequence, so only one mutable ref will exist.
-        // 2) Acquire-Release barrier ensures no other accesses to this sequence.
-        unsafe {
-            self.0
-                .buffer
-                .try_apply(self.0.current + 1, self.0.batch_size, |ptr, seq, end| {
-                    let event: &E = &*ptr;
-                    read(event, seq, end).inspect_err(|_| {
-                        self.0.cursor.sequence.store(seq - 1, Ordering::Release);
-                    })
-                })?;
-        }
-        let end_seq = self.0.current + self.0.batch_size;
-        self.0.cursor.sequence.store(end_seq, Ordering::Release);
-        Ok(())
+        self.0.try_apply_commit(|ptr, seq, end| {
+            // SAFETY: deref guaranteed safe by ringbuffer initialisation
+            let event: &E = unsafe { &mut *ptr };
+            read(event, seq, end)
+        })
     }
 }
 
-trait CanWait<E, W, F> {
+trait CanWait<E, W> {
     fn wait_range(&self, size: i64) -> (i64, i64);
 
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, F>;
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E>;
 
     fn barrier(&self) -> &Barrier;
 
     fn strategy(&self) -> &W;
 
     #[inline]
-    fn wait(&mut self, size: i64) -> Available<'_, E, F>
+    fn wait(&mut self, size: i64) -> Available<'_, E>
     where
         W: WaitStrategy,
     {
@@ -788,7 +780,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn wait_min(&mut self, size: i64) -> Available<'_, E, F>
+    fn wait_min(&mut self, size: i64) -> Available<'_, E>
     where
         W: WaitStrategy,
     {
@@ -799,7 +791,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn wait_any(&mut self) -> Available<'_, E, F>
+    fn wait_any(&mut self) -> Available<'_, E>
     where
         W: WaitStrategy,
     {
@@ -810,7 +802,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn wait_max(&mut self, size: i64) -> Available<'_, E, F>
+    fn wait_max(&mut self, size: i64) -> Available<'_, E>
     where
         W: WaitStrategy,
     {
@@ -822,7 +814,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn try_wait(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait(&mut self, size: i64) -> Result<Available<'_, E>, W::Error>
     where
         W: TryWaitStrategy,
     {
@@ -833,7 +825,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn try_wait_min(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait_min(&mut self, size: i64) -> Result<Available<'_, E>, W::Error>
     where
         W: TryWaitStrategy,
     {
@@ -844,7 +836,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn try_wait_any(&mut self) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait_any(&mut self) -> Result<Available<'_, E>, W::Error>
     where
         W: TryWaitStrategy,
     {
@@ -855,7 +847,7 @@ trait CanWait<E, W, F> {
     }
 
     #[inline]
-    fn try_wait_max(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait_max(&mut self, size: i64) -> Result<Available<'_, E>, W::Error>
     where
         W: TryWaitStrategy,
     {
