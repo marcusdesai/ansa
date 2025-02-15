@@ -140,7 +140,8 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 }
 
-impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for MultiProducer<E, W, LEAD> {
+impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for MultiProducer<E, W, LEAD> {
+    #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
@@ -161,6 +162,7 @@ impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for MultiProducer<E, W, LE
         (current_claim, desired_seq)
     }
 
+    #[inline]
     fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
         Available {
             cursor: &mut self.cursor,
@@ -175,10 +177,12 @@ impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for MultiProducer<E, W, LE
         }
     }
 
+    #[inline]
     fn barrier(&self) -> &Barrier {
         &self.barrier
     }
 
+    #[inline]
     fn strategy(&self) -> &W {
         &self.wait_strategy
     }
@@ -188,29 +192,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait(self, size))
-    }
-
-    pub fn wait_min(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait_min(self, size))
-    }
-
-    /// Wait until any number of events are available.
-    pub fn wait_any(&mut self) -> AvailableWrite<'_, E> {
-        AvailableWrite(CanWait::wait_any(self))
-    }
-
-    /// Wait until at most `size` number of events are available.
-    pub fn wait_max(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait_max(self, size))
+        AvailableWrite(CanWait::wait(self, size as i64))
     }
 }
 
@@ -218,35 +205,14 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait(self, size).map(AvailableWrite)
-    }
-
-    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_min(self, size).map(AvailableWrite)
-    }
-
-    /// Wait until any number of events are available.
-    ///
-    /// Otherwise, return the wait strategy error.
-    pub fn try_wait_any(&mut self) -> Result<AvailableWrite<'_, E>, W::Error> {
-        CanWait::try_wait_any(self).map(AvailableWrite)
-    }
-
-    /// Wait until at most `size` number of events are available.
-    ///
-    /// Otherwise, return the wait strategy error.
-    pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_max(self, size).map(AvailableWrite)
+        CanWait::try_wait(self, size as i64).map(AvailableWrite)
     }
 }
 
@@ -303,7 +269,8 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     }
 }
 
-impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for Producer<E, W, LEAD> {
+impl<E, W, const LEAD: bool> CanWait<E, W, SetCursor> for Producer<E, W, LEAD> {
+    #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let producer_seq = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = producer_seq + size;
@@ -315,6 +282,7 @@ impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for Producer<E, W, LEAD> {
         (producer_seq, desired_seq)
     }
 
+    #[inline]
     fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, SetCursor> {
         Available {
             cursor: &mut self.cursor,
@@ -325,10 +293,12 @@ impl<E, W, const LEAD: bool> CanWait<W, E, SetCursor> for Producer<E, W, LEAD> {
         }
     }
 
+    #[inline]
     fn barrier(&self) -> &Barrier {
         &self.barrier
     }
 
+    #[inline]
     fn strategy(&self) -> &W {
         &self.wait_strategy
     }
@@ -338,18 +308,18 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait(self, size))
+        AvailableWrite(CanWait::wait(self, size as i64))
     }
 
+    /// Wait until at least `size` number of events are available.
     pub fn wait_min(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait_min(self, size))
+        AvailableWrite(CanWait::wait_min(self, size as i64))
     }
 
     /// Wait until any number of events are available.
@@ -360,7 +330,7 @@ where
     /// Wait until at most `size` number of events are available.
     pub fn wait_max(&mut self, size: u32) -> AvailableWrite<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableWrite(CanWait::wait_max(self, size))
+        AvailableWrite(CanWait::wait_max(self, size as i64))
     }
 }
 
@@ -368,20 +338,22 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait(self, size).map(AvailableWrite)
+        CanWait::try_wait(self, size as i64).map(AvailableWrite)
     }
 
+    /// Wait until at least `size` number of events are available.
+    ///
+    /// Otherwise, return the wait strategy error.
     pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_min(self, size).map(AvailableWrite)
+        CanWait::try_wait_min(self, size as i64).map(AvailableWrite)
     }
 
     /// Wait until any number of events are available.
@@ -396,7 +368,7 @@ where
     /// Otherwise, return the wait strategy error.
     pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_max(self, size).map(AvailableWrite)
+        CanWait::try_wait_max(self, size as i64).map(AvailableWrite)
     }
 }
 
@@ -446,12 +418,11 @@ impl<E, W> Consumer<E, W> {
     }
 }
 
-impl<E, W> CanWait<W, E, ()> for Consumer<E, W> {
+impl<E, W> CanWait<E, W, ()> for Consumer<E, W> {
     #[inline]
     fn wait_range(&self, size: i64) -> (i64, i64) {
         let consumer_seq = self.cursor.sequence.load(Ordering::Relaxed);
-        let batch_end = consumer_seq + size;
-        (consumer_seq, batch_end)
+        (consumer_seq, consumer_seq + size)
     }
 
     #[inline]
@@ -480,18 +451,18 @@ impl<E, W> Consumer<E, W>
 where
     W: WaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn wait(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableRead(CanWait::wait(self, size))
+        AvailableRead(CanWait::wait(self, size as i64))
     }
 
-    pub fn wait_until(&mut self, size: u32) -> AvailableRead<'_, E> {
+    /// Wait until at least `size` number of events are available.
+    pub fn wait_min(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableRead(CanWait::wait_min(self, size))
+        AvailableRead(CanWait::wait_min(self, size as i64))
     }
 
     /// Wait until any number of events are available.
@@ -500,9 +471,9 @@ where
     }
 
     /// Wait until at most `size` number of events are available.
-    pub fn wait_upto(&mut self, size: u32) -> AvailableRead<'_, E> {
+    pub fn wait_max(&mut self, size: u32) -> AvailableRead<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        AvailableRead(CanWait::wait_max(self, size))
+        AvailableRead(CanWait::wait_max(self, size as i64))
     }
 }
 
@@ -510,20 +481,22 @@ impl<E, W> Consumer<E, W>
 where
     W: TryWaitStrategy,
 {
-    /// Wait until at least `size` number of events are available.
+    /// Wait until exactly `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
     ///
-    /// `size` must be less than the size of the buffer. Large `size`s may also cause handles to
-    /// stall, as larger portions of the buffer may take longer to become available.
+    /// `size` must be less than the size of the buffer.
     pub fn try_wait(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait(self, size).map(AvailableRead)
+        CanWait::try_wait(self, size as i64).map(AvailableRead)
     }
 
+    /// Wait until at least `size` number of events are available.
+    ///
+    /// Otherwise, return the wait strategy error.
     pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_min(self, size).map(AvailableRead)
+        CanWait::try_wait_min(self, size as i64).map(AvailableRead)
     }
 
     /// Wait until any number of events are available.
@@ -538,7 +511,7 @@ where
     /// Otherwise, returns the wait strategy error.
     pub fn try_wait_max(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        CanWait::try_wait_max(self, size).map(AvailableRead)
+        CanWait::try_wait_max(self, size as i64).map(AvailableRead)
     }
 }
 
@@ -794,7 +767,7 @@ impl<E> AvailableRead<'_, E> {
     }
 }
 
-trait CanWait<W, E, F> {
+trait CanWait<E, W, F> {
     fn wait_range(&self, size: i64) -> (i64, i64);
 
     fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Available<'_, E, F>;
@@ -804,22 +777,22 @@ trait CanWait<W, E, F> {
     fn strategy(&self) -> &W;
 
     #[inline]
-    fn wait(&mut self, size: u32) -> Available<'_, E, F>
+    fn wait(&mut self, size: i64) -> Available<'_, E, F>
     where
         W: WaitStrategy,
     {
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_range(size);
         self.strategy().wait(till_seq, self.barrier());
         debug_assert!(self.barrier().sequence() >= till_seq);
-        self.as_available(from_seq, size as i64)
+        self.as_available(from_seq, size)
     }
 
     #[inline]
-    fn wait_min(&mut self, size: u32) -> Available<'_, E, F>
+    fn wait_min(&mut self, size: i64) -> Available<'_, E, F>
     where
         W: WaitStrategy,
     {
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_range(size);
         let barrier_seq = self.strategy().wait(till_seq, self.barrier());
         debug_assert!(barrier_seq >= till_seq);
         self.as_available(from_seq, barrier_seq - from_seq)
@@ -837,34 +810,34 @@ trait CanWait<W, E, F> {
     }
 
     #[inline]
-    fn wait_max(&mut self, size: u32) -> Available<'_, E, F>
+    fn wait_max(&mut self, size: i64) -> Available<'_, E, F>
     where
         W: WaitStrategy,
     {
         let (from_seq, till_seq) = self.wait_range(1);
         let barrier_seq = self.strategy().wait(till_seq, self.barrier());
         debug_assert!(barrier_seq > from_seq);
-        let batch_size = (barrier_seq - from_seq).min(size as i64);
+        let batch_size = (barrier_seq - from_seq).min(size);
         self.as_available(from_seq, batch_size)
     }
 
     #[inline]
-    fn try_wait(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
     where
         W: TryWaitStrategy,
     {
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_range(size);
         self.strategy().try_wait(till_seq, self.barrier())?;
         debug_assert!(self.barrier().sequence() >= till_seq);
-        Ok(self.as_available(from_seq, size as i64))
+        Ok(self.as_available(from_seq, size))
     }
 
     #[inline]
-    fn try_wait_min(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait_min(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
     where
         W: TryWaitStrategy,
     {
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_range(size);
         let barrier_seq = self.strategy().try_wait(till_seq, self.barrier())?;
         debug_assert!(barrier_seq >= till_seq);
         Ok(self.as_available(from_seq, barrier_seq - from_seq))
@@ -882,14 +855,14 @@ trait CanWait<W, E, F> {
     }
 
     #[inline]
-    fn try_wait_max(&mut self, size: u32) -> Result<Available<'_, E, F>, W::Error>
+    fn try_wait_max(&mut self, size: i64) -> Result<Available<'_, E, F>, W::Error>
     where
         W: TryWaitStrategy,
     {
         let (from_seq, till_seq) = self.wait_range(1);
         let barrier_seq = self.strategy().try_wait(till_seq, self.barrier())?;
         debug_assert!(barrier_seq > from_seq);
-        let batch_size = (barrier_seq - from_seq).min(size as i64);
+        let batch_size = (barrier_seq - from_seq).min(size);
         Ok(self.as_available(from_seq, batch_size))
     }
 }
