@@ -9,7 +9,7 @@ fn test_lead_producer() {
         |mut producer| {
             [move || {
                 for _ in 0..num_of_events / 16 {
-                    producer.wait(16).process(|i, seq, _| *i = seq)
+                    producer.wait(16).apply(|i, seq, _| *i = seq)
                 }
             }]
         },
@@ -25,7 +25,7 @@ fn test_trailing_producer() {
         |mut producer| {
             [move || {
                 for _ in 0..num_of_events / 16 {
-                    producer.wait(16).process(|i, _, _| *i = 0)
+                    producer.wait(16).apply(|i, _, _| *i = 0)
                 }
             }]
         },

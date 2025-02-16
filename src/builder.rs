@@ -293,7 +293,7 @@ where
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
-        let lead_handle = HandleInner {
+        let handle = HandleInner {
             cursor: lead_cursor,
             barrier,
             buffer,
@@ -301,7 +301,7 @@ where
         };
 
         Ok(DisruptorHandles {
-            lead: Some(lead_handle.producer()),
+            lead: Some(handle.to_producer()),
             producers,
             consumers,
         })
@@ -368,10 +368,10 @@ where
             };
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
-                    producers.insert(id, handle.producer());
+                    producers.insert(id, handle.to_producer());
                 }
                 Handle::Consumer => {
-                    consumers.insert(id, handle.consumer());
+                    consumers.insert(id, handle.to_consumer());
                 }
             }
         }
