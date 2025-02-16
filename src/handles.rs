@@ -40,11 +40,8 @@ use std::sync::Arc;
 /// ```
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
-    cursor: Arc<Cursor>,
-    barrier: Barrier,
-    buffer: Arc<RingBuffer<E>>,
+    handle: HandleInner<E, W, LEAD>,
     claim: Arc<Cursor>, // shared between all clones of this multi producer
-    wait_strategy: W,
 }
 
 impl<E, W, const LEAD: bool> Clone for MultiProducer<E, W, LEAD>
@@ -53,11 +50,13 @@ where
 {
     fn clone(&self) -> Self {
         MultiProducer {
-            cursor: Arc::clone(&self.cursor),
-            barrier: self.barrier.clone(),
-            buffer: Arc::clone(&self.buffer),
+            handle: HandleInner {
+                cursor: Arc::clone(&self.handle.cursor),
+                barrier: self.handle.barrier.clone(),
+                buffer: Arc::clone(&self.handle.buffer),
+                wait_strategy: self.handle.wait_strategy.clone(),
+            },
             claim: Arc::clone(&self.claim),
-            wait_strategy: self.wait_strategy.clone(),
         }
     }
 }
@@ -98,12 +97,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// assert_eq!(multi.sequence(), -1);
     ///
     /// // move the producer cursor up by 10
-    /// multi.wait(10).write(|_, _, _| ());
+    /// multi.wait(10).process(|_, _, _| ());
     /// assert_eq!(multi.sequence(), 9);
     ///
     /// // clone and move only the clone
     /// let mut clone = multi.clone();
-    /// clone.wait(10).write(|_, _, _| ());
+    /// clone.wait(10).process(|_, _, _| ());
     ///
     /// // Both have moved because all clones share the same cursor
     /// assert_eq!(multi.sequence(), 19);
@@ -111,7 +110,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.cursor.sequence.load(Ordering::Relaxed)
+        self.handle.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
@@ -123,7 +122,17 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn buffer_size(&self) -> usize {
-        self.buffer.size()
+        self.handle.buffer.size()
+    }
+
+    /// Note, only sets for this clone. The strategies for other clones sharing this cursor will
+    /// remain unchanged.
+    #[inline]
+    pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> MultiProducer<E, W2, LEAD> {
+        MultiProducer {
+            handle: self.handle.set_wait_strategy(wait_strategy),
+            claim: self.claim,
+        }
     }
 
     /// Return a [`Producer`] if exactly one `MultiProducer` exists for this cursor.
@@ -144,12 +153,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     #[inline]
     pub fn into_producer(self) -> Option<Producer<E, W, LEAD>> {
         Arc::into_inner(self.claim).map(|_| Producer {
-            handle: HandleInner {
-                cursor: self.cursor,
-                barrier: self.barrier,
-                buffer: self.buffer,
-                wait_strategy: self.wait_strategy,
-            },
+            handle: self.handle,
         })
     }
 
@@ -167,7 +171,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             claim_end = new_current + size;
         }
         let desired_seq = if LEAD {
-            claim_end - self.buffer.size() as i64
+            claim_end - self.handle.buffer.size() as i64
         } else {
             claim_end
         };
@@ -175,10 +179,10 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> AvailableWrite<'_, E> {
-        AvailableWrite(Available {
-            cursor: &mut self.cursor,
-            buffer: &self.buffer,
+    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> EventsMut<'_, E> {
+        EventsMut(Available {
+            cursor: &mut self.handle.cursor,
+            buffer: &self.handle.buffer,
             current: from_seq,
             batch_size,
             set_cursor: |cursor, current, end, ordering| {
@@ -197,11 +201,11 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
+    pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
+        debug_assert!(size as usize <= self.handle.buffer.size());
         let (from_seq, till_seq) = self.wait_range(size as i64);
-        self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= till_seq);
+        self.handle.wait_strategy.wait(till_seq, &self.handle.barrier);
+        debug_assert!(self.handle.barrier.sequence() >= till_seq);
         self.as_available(from_seq, size as i64)
     }
 }
@@ -215,11 +219,11 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
+    pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+        debug_assert!(size as usize <= self.handle.buffer.size());
         let (from_seq, till_seq) = self.wait_range(size as i64);
-        self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= till_seq);
+        self.handle.wait_strategy.try_wait(till_seq, &self.handle.barrier)?;
+        debug_assert!(self.handle.barrier.sequence() >= till_seq);
         Ok(self.as_available(from_seq, size as i64))
     }
 }
@@ -244,7 +248,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// assert_eq!(producer.sequence(), -1);
     ///
     /// // move the producer up by 10
-    /// producer.wait(10).write(|_, _, _| ());
+    /// producer.wait(10).process(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     /// ```
     #[inline]
@@ -264,16 +268,18 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
         self.handle.buffer.size()
     }
 
+    #[inline]
+    pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Producer<E, W2, LEAD> {
+        self.handle.set_wait_strategy(wait_strategy).producer()
+    }
+
     /// Converts this `Producer` into a [`MultiProducer`].
     #[inline]
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.handle.cursor.sequence.load(Ordering::Relaxed);
         MultiProducer {
-            cursor: self.handle.cursor,
-            barrier: self.handle.barrier,
-            buffer: self.handle.buffer,
+            handle: self.handle,
             claim: Arc::new(Cursor::new(producer_seq)),
-            wait_strategy: self.handle.wait_strategy,
         }
     }
 }
@@ -285,23 +291,23 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn wait(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        AvailableWrite(self.handle.wait(size))
+    pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
+        EventsMut(self.handle.wait(size))
     }
 
     /// Wait until at least `size` number of events are available.
-    pub fn wait_min(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        AvailableWrite(self.handle.wait_min(size))
+    pub fn wait_min(&mut self, size: u32) -> EventsMut<'_, E> {
+        EventsMut(self.handle.wait_min(size))
     }
 
     /// Wait until any number of events are available.
-    pub fn wait_any(&mut self) -> AvailableWrite<'_, E> {
-        AvailableWrite(self.handle.wait_any())
+    pub fn wait_any(&mut self) -> EventsMut<'_, E> {
+        EventsMut(self.handle.wait_any())
     }
 
     /// Wait until at most `size` number of events are available.
-    pub fn wait_max(&mut self, size: u32) -> AvailableWrite<'_, E> {
-        AvailableWrite(self.handle.wait_max(size))
+    pub fn wait_max(&mut self, size: u32) -> EventsMut<'_, E> {
+        EventsMut(self.handle.wait_max(size))
     }
 }
 
@@ -314,29 +320,29 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn try_wait(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        self.handle.try_wait(size).map(AvailableWrite)
+    pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+        self.handle.try_wait(size).map(EventsMut)
     }
 
     /// Wait until at least `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        self.handle.try_wait_min(size).map(AvailableWrite)
+    pub fn try_wait_min(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+        self.handle.try_wait_min(size).map(EventsMut)
     }
 
     /// Wait until any number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_any(&mut self) -> Result<AvailableWrite<'_, E>, W::Error> {
-        self.handle.try_wait_any().map(AvailableWrite)
+    pub fn try_wait_any(&mut self) -> Result<EventsMut<'_, E>, W::Error> {
+        self.handle.try_wait_any().map(EventsMut)
     }
 
     /// Wait until at most `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_upto(&mut self, size: u32) -> Result<AvailableWrite<'_, E>, W::Error> {
-        self.handle.try_wait_max(size).map(AvailableWrite)
+    pub fn try_wait_upto(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+        self.handle.try_wait_max(size).map(EventsMut)
     }
 }
 
@@ -361,11 +367,11 @@ impl<E, W> Consumer<E, W> {
     ///
     /// // move the producer up by 10, otherwise the consumer will block the
     /// // thread while waiting
-    /// producer.wait(10).write(|_, _, _| ());
+    /// producer.wait(10).process(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     ///
     /// // now we can move the consumer
-    /// consumer.wait(5).read(|_, _, _| ());
+    /// consumer.wait(5).process(|_, _, _| ());
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
     #[inline]
@@ -384,6 +390,11 @@ impl<E, W> Consumer<E, W> {
     pub fn buffer_size(&self) -> usize {
         self.handle.buffer.size()
     }
+
+    #[inline]
+    pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Consumer<E, W2> {
+        self.handle.set_wait_strategy(wait_strategy).consumer()
+    }
 }
 
 impl<E, W> Consumer<E, W>
@@ -393,23 +404,23 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn wait(&mut self, size: u32) -> AvailableRead<'_, E> {
-        AvailableRead(self.handle.wait(size))
+    pub fn wait(&mut self, size: u32) -> Events<'_, E> {
+        Events(self.handle.wait(size))
     }
 
     /// Wait until at least `size` number of events are available.
-    pub fn wait_min(&mut self, size: u32) -> AvailableRead<'_, E> {
-        AvailableRead(self.handle.wait_min(size))
+    pub fn wait_min(&mut self, size: u32) -> Events<'_, E> {
+        Events(self.handle.wait_min(size))
     }
 
     /// Wait until any number of events are available.
-    pub fn wait_any(&mut self) -> AvailableRead<'_, E> {
-        AvailableRead(self.handle.wait_any())
+    pub fn wait_any(&mut self) -> Events<'_, E> {
+        Events(self.handle.wait_any())
     }
 
     /// Wait until at most `size` number of events are available.
-    pub fn wait_max(&mut self, size: u32) -> AvailableRead<'_, E> {
-        AvailableRead(self.handle.wait_max(size))
+    pub fn wait_max(&mut self, size: u32) -> Events<'_, E> {
+        Events(self.handle.wait_max(size))
     }
 }
 
@@ -422,29 +433,29 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn try_wait(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
-        self.handle.try_wait(size).map(AvailableRead)
+    pub fn try_wait(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
+        self.handle.try_wait(size).map(Events)
     }
 
     /// Wait until at least `size` number of events are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_min(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
-        self.handle.try_wait_min(size).map(AvailableRead)
+    pub fn try_wait_min(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
+        self.handle.try_wait_min(size).map(Events)
     }
 
     /// Wait until any number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
-    pub fn try_wait_any(&mut self) -> Result<AvailableRead<'_, E>, W::Error> {
-        self.handle.try_wait_any().map(AvailableRead)
+    pub fn try_wait_any(&mut self) -> Result<Events<'_, E>, W::Error> {
+        self.handle.try_wait_any().map(Events)
     }
 
     /// Wait until at most `size` number of events are available.
     ///
     /// Otherwise, returns the wait strategy error.
-    pub fn try_wait_max(&mut self, size: u32) -> Result<AvailableRead<'_, E>, W::Error> {
-        self.handle.try_wait_max(size).map(AvailableRead)
+    pub fn try_wait_max(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
+        self.handle.try_wait_max(size).map(Events)
     }
 }
 
@@ -465,6 +476,16 @@ impl<E, W> HandleInner<E, W, false> {
 impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
     pub(crate) fn producer(self) -> Producer<E, W, LEAD> {
         Producer { handle: self }
+    }
+
+    #[inline]
+    fn set_wait_strategy<W2>(self, wait_strategy: W2) -> HandleInner<E, W2, LEAD> {
+        HandleInner {
+            cursor: self.cursor,
+            barrier: self.barrier,
+            buffer: self.buffer,
+            wait_strategy,
+        }
     }
 
     #[inline]
@@ -632,14 +653,14 @@ impl<E> Available<'_, E> {
 
 // todo: elucidate docs with 'in another process' statements, eg. for describing mut alias possibility
 
-/// Represents a range of available sequences which may be written to.
+/// A batch of events which may be mutably accessed.
 #[repr(transparent)]
-pub struct AvailableWrite<'a, E>(Available<'a, E>);
+pub struct EventsMut<'a, E>(Available<'a, E>);
 
-impl<E> AvailableWrite<'_, E> {
-    /// Write a batch of events to the buffer.
+impl<E> EventsMut<'_, E> {
+    /// Process a batch of mutable events on the buffer.
     ///
-    /// The parameters of `write` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
@@ -649,25 +670,25 @@ impl<E> AvailableWrite<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     /// // obtain `AvailableWrite` by waiting
-    /// producer.wait(10).write(|event, seq, _| *event = seq as u32);
+    /// producer.wait(10).process(|event, seq, _| *event = seq as u32);
     /// ```
-    pub fn write<F>(self, mut write: F)
+    pub fn process<F>(self, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
         self.0.apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
-            write(event, seq, end)
+            f(event, seq, end)
         })
     }
 
-    /// Write an exact batch of events to the buffer if successful.
+    /// Process a batch of mutable events on the buffer.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. **Important**: does _not_
-    /// undo successful writes.
+    /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
+    /// **Important**: does _not_ undo successful writes.
     ///
-    /// The parameters of `write` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
@@ -677,7 +698,7 @@ impl<E> AvailableWrite<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     /// // obtain `AvailableWrite` by waiting
-    /// producer.wait(10).try_write(|event, seq, _| {
+    /// producer.wait(10).try_process(|event, seq, _| {
     ///     if seq == 100 {
     ///         return Err(seq);
     ///     }
@@ -692,7 +713,7 @@ impl<E> AvailableWrite<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// let result = producer.wait(10).try_write(|event, seq, _| {
+    /// let result = producer.wait(10).try_process(|event, seq, _| {
     ///     if seq == 5 {
     ///         return Err(seq);
     ///     }
@@ -703,23 +724,23 @@ impl<E> AvailableWrite<'_, E> {
     /// // sequence values start at -1
     /// assert_eq!(producer.sequence(), -1);
     /// ```
-    pub fn try_write<F, Err>(self, mut write: F) -> Result<(), Err>
+    pub fn try_process<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
         self.0.try_apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
-            write(event, seq, end)
+            f(event, seq, end)
         })
     }
 
-    /// Write an exact batch of events to the buffer if successful.
+    /// Process a batch of mutable events on the buffer.
     ///
-    /// Otherwise, return the error and update cursor sequence to the position of the last
-    /// successful write. In effect, commits successful portion of the batch.
+    /// When an error occurs, returns the error and updates the cursor sequence to the position of
+    /// the last successfully processed event. In effect, commits successful portion of the batch.
     ///
-    /// The parameters of `write` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
@@ -729,82 +750,81 @@ impl<E> AvailableWrite<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     /// // obtain `AvailableWrite` by waiting
-    /// producer.wait(10).write(|event, seq, _| *event = seq as u32);
+    /// producer.wait(10).process(|event, seq, _| *event = seq as u32);
     /// ```
-    pub fn try_write_commit<F, Err>(self, mut write: F) -> Result<(), Err>
+    pub fn try_process_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
         self.0.try_apply_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
-            write(event, seq, end)
+            f(event, seq, end)
         })
     }
 }
 
-/// Represents a range of available sequences which may be read from.
+/// A batch of events which may be immutably accessed.
 #[repr(transparent)]
-pub struct AvailableRead<'a, E>(Available<'a, E>);
+pub struct Events<'a, E>(Available<'a, E>);
 
-impl<E> AvailableRead<'_, E> {
-    /// Read a batch of events from the buffer.
+impl<E> Events<'_, E> {
+    /// Process a batch of immutable events on the buffer.
     ///
-    /// The parameters of `read` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
-    pub fn read<F>(self, mut read: F)
+    pub fn process<F>(self, mut f: F)
     where
         F: FnMut(&E, i64, bool),
     {
         self.0.apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &mut *ptr };
-            read(event, seq, end)
+            f(event, seq, end)
         })
     }
 
-    /// Read a batch of events from the buffer if successful.
+    /// Process a batch of immutable events on the buffer.
     ///
-    /// Otherwise, leave cursor sequence unchanged and return the error. Effectively returns to the
-    /// start of the batch.
+    /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
     ///
-    /// The parameters of `read` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
-    pub fn try_read<F, Err>(self, mut read: F) -> Result<(), Err>
+    pub fn try_process<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
         self.0.try_apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &mut *ptr };
-            read(event, seq, end)
+            f(event, seq, end)
         })
     }
 
-    /// Read a batch of events from the buffer if successful.
+    /// Process a batch of immutable events on the buffer.
     ///
-    /// Otherwise, return the error and update cursor sequence to the position of the last
-    /// successful read. In effect, commits successful portion of the batch.
+    /// When an error occurs, returns the error and updates the cursor sequence to the position of
+    /// the last successfully processed event. In effect, commits successful portion of the batch.
     ///
-    /// The parameters of `read` are:
+    /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
     /// - `sequence: i64`, the position of this event in the sequence.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
-    pub fn try_read_commit<F, Err>(self, mut read: F) -> Result<(), Err>
+    pub fn try_process_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
         self.0.try_apply_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &mut *ptr };
-            read(event, seq, end)
+            f(event, seq, end)
         })
     }
 }

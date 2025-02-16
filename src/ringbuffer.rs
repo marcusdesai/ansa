@@ -88,18 +88,18 @@ impl<E> RingBuffer<E> {
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
-        if wraps {
+        if !wraps && cfg!(feature = "tree-borrows") {
             for _ in 0..size - 1 {
                 func(ptr, seq, false);
                 seq += 1;
-                ptr = unsafe { self.get(seq) };
+                ptr = unsafe { ptr.add(1) };
             }
             func(ptr, seq, true);
         } else {
             for _ in 0..size - 1 {
                 func(ptr, seq, false);
                 seq += 1;
-                ptr = unsafe { ptr.add(1) };
+                ptr = unsafe { self.get(seq) };
             }
             func(ptr, seq, true);
         }
@@ -123,18 +123,18 @@ impl<E> RingBuffer<E> {
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
-        if wraps {
+        if !wraps && cfg!(feature = "tree-borrows") {
             for _ in 0..size - 1 {
                 func(ptr, seq, false)?;
                 seq += 1;
-                ptr = unsafe { self.get(seq) };
+                ptr = unsafe { ptr.add(1) };
             }
             func(ptr, seq, true)?;
         } else {
             for _ in 0..size - 1 {
                 func(ptr, seq, false)?;
                 seq += 1;
-                ptr = unsafe { ptr.add(1) };
+                ptr = unsafe { self.get(seq) };
             }
             func(ptr, seq, true)?;
         }

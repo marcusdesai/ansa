@@ -36,7 +36,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                producer.wait(20).write(|event, seq, _| {
+                producer.wait(20).process(|event, seq, _| {
                     event.seq = seq;
                     if seq == num_of_events - 1 {
                         event.consumer_break = true;
@@ -51,7 +51,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_0.wait_any().read(|event, _, _| {
+                consumer_0.wait_any().process(|event, _, _| {
                     out.push(*event);
                     should_continue = !event.consumer_break;
                 });
@@ -63,7 +63,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_1.wait(10).read(|event, seq, _| {
+                consumer_1.wait(10).process(|event, seq, _| {
                     if event.seq == seq {
                         c1_counter.fetch_add(1, Ordering::Relaxed);
                     }
@@ -77,7 +77,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_2.wait_any().read(|event, _, _| {
+                consumer_2.wait_any().process(|event, _, _| {
                     c2_counter.fetch_add(1, Ordering::Relaxed);
                     should_continue = !event.consumer_break;
                 })
@@ -91,7 +91,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_3.wait(20).read(|event, seq, _| {
+                consumer_3.wait(20).process(|event, seq, _| {
                     // both counters should be at or ahead of the seq value this consumer sees
                     *c3_flag = c1_counter.load(Ordering::Relaxed) >= seq;
                     *c3_flag = c2_counter.load(Ordering::Relaxed) >= seq;
@@ -144,14 +144,14 @@ fn test_producer_conversions() {
         s.spawn(move || {
             let mut producer = lead;
             for _ in 0..2 {
-                producer.wait(50).write(|event, seq, _| event.seq = seq)
+                producer.wait(50).process(|event, seq, _| event.seq = seq)
             }
             let multi = producer.into_multi();
             let mut joins = vec![];
             for mut multi_producer in [multi.clone(), multi] {
                 let join = std::thread::spawn(move || {
                     for _ in 0..5 {
-                        multi_producer.wait(10).write(|event, seq, _| event.seq = seq)
+                        multi_producer.wait(10).process(|event, seq, _| event.seq = seq)
                     }
                     multi_producer
                 });
@@ -163,7 +163,7 @@ fn test_producer_conversions() {
                 .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..2 {
-                producer.wait(50).write(|event, seq, _| event.seq = seq)
+                producer.wait(50).process(|event, seq, _| event.seq = seq)
             }
         });
 
@@ -176,7 +176,7 @@ fn test_producer_conversions() {
                     for _ in 0..5 {
                         multi_producer
                             .wait(10)
-                            .write(|event, _, _| event.seq_times_2 = event.seq * 2)
+                            .process(|event, _, _| event.seq_times_2 = event.seq * 2)
                     }
                     multi_producer
                 });
@@ -188,7 +188,7 @@ fn test_producer_conversions() {
                 .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..3 {
-                producer.wait(50).write(|event, _, _| event.seq_times_2 = event.seq * 2)
+                producer.wait(50).process(|event, _, _| event.seq_times_2 = event.seq * 2)
             }
         });
 
@@ -196,7 +196,7 @@ fn test_producer_conversions() {
         s.spawn(move || {
             let mut counter = 0;
             while counter < num_of_events {
-                consumer.wait(20).read(|event, seq, _| {
+                consumer.wait(20).process(|event, seq, _| {
                     counter += 1;
                     is_times_2 = is_times_2 && event.seq == seq && event.seq_times_2 == seq * 2;
                 })
