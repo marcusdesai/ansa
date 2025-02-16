@@ -1,4 +1,4 @@
-use crate::handles::{Barrier, Consumer, Cursor, Producer};
+use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::WaitSleep;
 use std::collections::{HashMap, HashSet};
@@ -293,7 +293,7 @@ where
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
 
-        let lead_producer = Producer {
+        let lead_handle = HandleInner {
             cursor: lead_cursor,
             barrier,
             buffer,
@@ -301,7 +301,7 @@ where
         };
 
         Ok(DisruptorHandles {
-            lead: Some(lead_producer),
+            lead: Some(lead_handle.producer()),
             producers,
             consumers,
         })
@@ -360,24 +360,18 @@ where
                 }
             };
             // unwrap okay as this entry in handles_map is guaranteed to exist for this id
+            let handle = HandleInner {
+                cursor,
+                barrier,
+                buffer: Arc::clone(buffer),
+                wait_strategy: self.wait_strategy.clone(),
+            };
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
-                    let producer = Producer {
-                        cursor,
-                        barrier,
-                        buffer: Arc::clone(buffer),
-                        wait_strategy: self.wait_strategy.clone(),
-                    };
-                    producers.insert(id, producer);
+                    producers.insert(id, handle.producer());
                 }
                 Handle::Consumer => {
-                    let consumer = Consumer {
-                        cursor,
-                        barrier,
-                        buffer: Arc::clone(buffer),
-                        wait_strategy: self.wait_strategy.clone(),
-                    };
-                    consumers.insert(id, consumer);
+                    consumers.insert(id, handle.consumer());
                 }
             }
         }
