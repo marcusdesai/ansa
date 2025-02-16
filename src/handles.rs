@@ -1,5 +1,7 @@
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{TryWaitStrategy, WaitStrategy};
+use std::collections::Bound;
+use std::ops::RangeBounds;
 use std::sync::atomic::{fence, AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -173,7 +175,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     #[inline]
-    fn wait_range(&self, size: i64) -> (i64, i64) {
+    fn wait_bounds(&self, size: i64) -> (i64, i64) {
         let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
         let mut claim_end = current_claim + size;
         while let Err(new_current) = self.claim.sequence.compare_exchange(
@@ -194,7 +196,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> EventsMut<'_, E> {
+    fn as_events_mut(&mut self, from_seq: i64, batch_size: i64) -> EventsMut<'_, E> {
         EventsMut(AvailableBatch {
             cursor: &mut self.handle.cursor,
             buffer: &self.handle.buffer,
@@ -218,10 +220,10 @@ where
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
         debug_assert!(size as usize <= self.handle.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.handle.wait_strategy.wait(till_seq, &self.handle.barrier);
         debug_assert!(self.handle.barrier.sequence() >= till_seq);
-        self.as_available(from_seq, size as i64)
+        self.as_events_mut(from_seq, size as i64)
     }
 }
 
@@ -236,10 +238,10 @@ where
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.handle.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.handle.wait_strategy.try_wait(till_seq, &self.handle.barrier)?;
         debug_assert!(self.handle.barrier.sequence() >= till_seq);
-        Ok(self.as_available(from_seq, size as i64))
+        Ok(self.as_events_mut(from_seq, size as i64))
     }
 }
 
@@ -301,9 +303,16 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     }
 
     /// Converts this `Producer` into a [`MultiProducer`].
+    ///
+    /// # Examples
+    /// ```
+    /// let (producer, _) = ansa::spsc(64, || 0);
+    ///
+    /// assert!(matches!(producer.into_multi(), ansa::MultiProducer { .. }))
+    /// ```
     #[inline]
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
-        let producer_seq = self.handle.cursor.sequence.load(Ordering::Relaxed);
+        let producer_seq = self.sequence();
         MultiProducer {
             handle: self.handle,
             claim: Arc::new(Cursor::new(producer_seq)),
@@ -322,19 +331,15 @@ where
         EventsMut(self.handle.wait(size))
     }
 
-    /// Wait until at least `size` number of events are available.
-    pub fn wait_min(&mut self, size: u32) -> EventsMut<'_, E> {
-        EventsMut(self.handle.wait_min(size))
-    }
-
-    /// Wait until any number of events are available.
-    pub fn wait_any(&mut self) -> EventsMut<'_, E> {
-        EventsMut(self.handle.wait_any())
-    }
-
-    /// Wait until at most `size` number of events are available.
-    pub fn wait_max(&mut self, size: u32) -> EventsMut<'_, E> {
-        EventsMut(self.handle.wait_max(size))
+    /// Wait until a number of events within the given range are available.
+    ///
+    /// The lower bound of the range has a minimum possible value of one, and must be less than the
+    /// buffer size.
+    pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
+    where
+        R: RangeBounds<u32>,
+    {
+        EventsMut(self.handle.wait_range(range))
     }
 }
 
@@ -351,25 +356,17 @@ where
         self.handle.try_wait(size).map(EventsMut)
     }
 
-    /// Wait until at least `size` number of events are available.
+    /// Wait until a number of events within the given range are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_min(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
-        self.handle.try_wait_min(size).map(EventsMut)
-    }
-
-    /// Wait until any number of events are available.
     ///
-    /// Otherwise, return the wait strategy error.
-    pub fn try_wait_any(&mut self) -> Result<EventsMut<'_, E>, W::Error> {
-        self.handle.try_wait_any().map(EventsMut)
-    }
-
-    /// Wait until at most `size` number of events are available.
-    ///
-    /// Otherwise, return the wait strategy error.
-    pub fn try_wait_upto(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
-        self.handle.try_wait_max(size).map(EventsMut)
+    /// The lower bound of the range has a minimum possible value of one, and must be less than the
+    /// buffer size.
+    pub fn try_wait_range<R>(&mut self, range: R) -> Result<EventsMut<'_, E>, W::Error>
+    where
+        R: RangeBounds<u32>,
+    {
+        self.handle.try_wait_range(range).map(EventsMut)
     }
 }
 
@@ -447,19 +444,15 @@ where
         Events(self.handle.wait(size))
     }
 
-    /// Wait until at least `size` number of events are available.
-    pub fn wait_min(&mut self, size: u32) -> Events<'_, E> {
-        Events(self.handle.wait_min(size))
-    }
-
-    /// Wait until any number of events are available.
-    pub fn wait_any(&mut self) -> Events<'_, E> {
-        Events(self.handle.wait_any())
-    }
-
-    /// Wait until at most `size` number of events are available.
-    pub fn wait_max(&mut self, size: u32) -> Events<'_, E> {
-        Events(self.handle.wait_max(size))
+    /// Wait until a number of events within the given range are available.
+    ///
+    /// The lower bound of the range has a minimum possible value of one, and must be less than the
+    /// buffer size.
+    pub fn wait_range<R>(&mut self, range: R) -> Events<'_, E>
+    where
+        R: RangeBounds<u32>,
+    {
+        Events(self.handle.wait_range(range))
     }
 }
 
@@ -476,25 +469,17 @@ where
         self.handle.try_wait(size).map(Events)
     }
 
-    /// Wait until at least `size` number of events are available.
+    /// Wait until a number of events within the given range are available.
     ///
     /// Otherwise, return the wait strategy error.
-    pub fn try_wait_min(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
-        self.handle.try_wait_min(size).map(Events)
-    }
-
-    /// Wait until any number of events are available.
     ///
-    /// Otherwise, returns the wait strategy error.
-    pub fn try_wait_any(&mut self) -> Result<Events<'_, E>, W::Error> {
-        self.handle.try_wait_any().map(Events)
-    }
-
-    /// Wait until at most `size` number of events are available.
-    ///
-    /// Otherwise, returns the wait strategy error.
-    pub fn try_wait_max(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
-        self.handle.try_wait_max(size).map(Events)
+    /// The lower bound of the range has a minimum possible value of one, and must be less than the
+    /// buffer size.
+    pub fn try_wait_range<R>(&mut self, range: R) -> Result<Events<'_, E>, W::Error>
+    where
+        R: RangeBounds<u32>,
+    {
+        self.handle.try_wait_range(range).map(Events)
     }
 }
 
@@ -528,7 +513,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
     }
 
     #[inline]
-    fn wait_range(&self, size: i64) -> (i64, i64) {
+    fn wait_bounds(&self, size: i64) -> (i64, i64) {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = sequence + size;
         let desired_seq = if LEAD {
@@ -558,37 +543,31 @@ where
     #[inline]
     fn wait(&mut self, size: u32) -> AvailableBatch<'_, E> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.barrier.sequence() >= till_seq);
         self.as_available(from_seq, size as i64)
     }
 
     #[inline]
-    fn wait_min(&mut self, size: u32) -> AvailableBatch<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+    fn wait_range<R>(&mut self, range: R) -> AvailableBatch<'_, E>
+    where
+        R: RangeBounds<u32>,
+    {
+        let batch_min = match range.start_bound() {
+            Bound::Included(b) | Bound::Excluded(b) => *b,
+            Bound::Unbounded => 1,
+        };
+        debug_assert!(batch_min as usize <= self.buffer.size());
+        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
         let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(barrier_seq >= till_seq);
-        self.as_available(from_seq, barrier_seq - from_seq)
-    }
-
-    #[inline]
-    fn wait_any(&mut self) -> AvailableBatch<'_, E> {
-        let (from_seq, till_seq) = self.wait_range(1);
-        let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(barrier_seq > from_seq);
-        self.as_available(from_seq, barrier_seq - from_seq)
-    }
-
-    #[inline]
-    fn wait_max(&mut self, size: u32) -> AvailableBatch<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(1);
-        let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(barrier_seq > from_seq);
-        let batch_size = (barrier_seq - from_seq).min(size as i64);
-        self.as_available(from_seq, batch_size)
+        debug_assert!(self.barrier.sequence() >= till_seq);
+        let batch_max = match range.end_bound() {
+            Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min((*b - 1) as i64),
+            Bound::Unbounded => barrier_seq - from_seq,
+        };
+        self.as_available(from_seq, batch_max)
     }
 }
 
@@ -599,37 +578,31 @@ where
     #[inline]
     fn try_wait(&mut self, size: u32) -> Result<AvailableBatch<'_, E>, W::Error> {
         debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
         Ok(self.as_available(from_seq, size as i64))
     }
 
     #[inline]
-    fn try_wait_min(&mut self, size: u32) -> Result<AvailableBatch<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(size as i64);
+    fn try_wait_range<R>(&mut self, range: R) -> Result<AvailableBatch<'_, E>, W::Error>
+    where
+        R: RangeBounds<u32>,
+    {
+        let batch_min = match range.start_bound() {
+            Bound::Included(b) | Bound::Excluded(b) => (*b).max(1),
+            Bound::Unbounded => 1,
+        };
+        debug_assert!(batch_min as usize <= self.buffer.size());
+        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
         let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(barrier_seq >= till_seq);
-        Ok(self.as_available(from_seq, barrier_seq - from_seq))
-    }
-
-    #[inline]
-    fn try_wait_any(&mut self) -> Result<AvailableBatch<'_, E>, W::Error> {
-        let (from_seq, till_seq) = self.wait_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > from_seq);
-        Ok(self.as_available(from_seq, barrier_seq - from_seq))
-    }
-
-    #[inline]
-    fn try_wait_max(&mut self, size: u32) -> Result<AvailableBatch<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
-        let (from_seq, till_seq) = self.wait_range(1);
-        let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(barrier_seq > from_seq);
-        let batch_size = (barrier_seq - from_seq).min(size as i64);
-        Ok(self.as_available(from_seq, batch_size))
+        debug_assert!(self.barrier.sequence() >= till_seq);
+        let batch_max = match range.end_bound() {
+            Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min((*b - 1) as i64),
+            Bound::Unbounded => barrier_seq - from_seq,
+        };
+        Ok(self.as_available(from_seq, batch_max))
     }
 }
 
@@ -759,7 +732,7 @@ impl<E> EventsMut<'_, E> {
     /// });
     ///
     /// assert_eq!(result, Err(5));
-    /// // sequence values start at -1
+    /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(producer.sequence(), -1);
     /// ```
     pub fn try_apply<F, Err>(self, mut f: F) -> Result<(), Err>
@@ -900,7 +873,7 @@ impl<E> Events<'_, E> {
     /// });
     ///
     /// assert_eq!(result, Err(5));
-    /// // sequence values start at -1
+    /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(consumer.sequence(), -1);
     /// ```
     pub fn try_apply<F, Err>(self, mut f: F) -> Result<(), Err>
@@ -957,7 +930,7 @@ impl<E> Events<'_, E> {
     /// });
     ///
     /// assert_eq!(result, Err(5));
-    /// // sequence values start at -1
+    /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
     pub fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
