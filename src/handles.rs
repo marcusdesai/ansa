@@ -16,11 +16,31 @@ use std::sync::Arc;
 ///
 /// # Limitations
 ///
-/// `MultiProducer` clones coordinate by claiming exact ranges of sequences that they alone will
-/// access. Since this claim occurs before waiting for sequence availability, the `MultiProducer`
-/// cannot flexibly change how much it can access depending on the actual sequence availability, as
-/// it must stick to the claimed range. The result is that the methods: `wait_min`, `wait_any` and
-/// `wait_max` (and `try` variants) cannot be implemented for `MultiProducer`s.
+/// `MultiProducers` provide a much more limited API in comparison to either [`Producers`](Producer)
+/// or [`Consumers`](Consumer) due to the mechanism by which `MultiProducer` clones are coordinated.
+///
+/// As soon as a `MultiProducer` clone claims and waits for available sequences, it is commited to
+/// moving the shared cursor up to the end of the claimed batch, regardless of whether either
+/// waiting for or processing the batch is successful or not.
+///
+/// This commitment greatly effects fallible methods, as it requires that batches always be
+/// completed (and the cursor moved), even if errors have occurred. Importantly, this means that
+/// cursor updates alone should *not* be used to determine, e.g., successful updates to events.
+///
+/// Another consequence is that batches cannot be sized dynamically depending on the sequences
+/// actually available, hence `wait_range` cannot be implemented.
+///
+/// The limitation also prohibits separate `wait` methods from being provided, because [`EventsMut`]
+/// structs should not be returned. If an [`EventsMut`] is dropped in user code the claim it was
+/// generated from will go unused. Instead, combined wait and apply methods are provided.
+///
+/// TL;DR, the three consequence of this limitation are:
+/// 1) `wait_range` cannot be implemented for `MultiProducer`.
+/// 2) Separate wait and apply methods cannot be provided for `MultiProducer`.
+/// 3) The `try_wait_apply` method will always move the cursor up by the requested batch size,
+///    regardless of whether errors occur.
+///
+/// See: **\[INSERT EXAMPLES LINK]** for ways to parallelize producers which don't use `MultiProducer`.
 ///
 /// # Examples
 /// ```
@@ -99,12 +119,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// assert_eq!(multi.sequence(), -1);
     ///
     /// // move the producer cursor up by 10
-    /// multi.wait(10).apply(|_, _, _| ());
+    /// multi.wait_apply(10, |_, _, _| ());
     /// assert_eq!(multi.sequence(), 9);
     ///
     /// // clone and move only the clone
     /// let mut clone = multi.clone();
-    /// clone.wait(10).apply(|_, _, _| ());
+    /// clone.wait_apply(10, |_, _, _| ());
     ///
     /// // Both have moved because all clones share the same cursor
     /// assert_eq!(multi.sequence(), 19);
@@ -169,9 +189,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn into_producer(self) -> Option<Producer<E, W, LEAD>> {
-        Arc::into_inner(self.claim).map(|_| Producer {
-            handle: self.handle,
-        })
+        Arc::into_inner(self.claim).map(|_| self.handle.to_producer())
     }
 
     #[inline]
@@ -209,6 +227,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             },
         })
     }
+
+    #[inline]
+    fn update_cursor(&self, start: i64, end: i64) {
+        while self.handle.cursor.sequence.load(Ordering::Acquire) != start {}
+        self.handle.cursor.sequence.store(end, Ordering::Release)
+    }
 }
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
@@ -218,12 +242,15 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
+    pub fn wait_apply<F>(&mut self, size: u32, f: F)
+    where
+        F: FnMut(&mut E, i64, bool),
+    {
         debug_assert!(size as usize <= self.handle.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.handle.wait_strategy.wait(till_seq, &self.handle.barrier);
         debug_assert!(self.handle.barrier.sequence() >= till_seq);
-        self.as_events_mut(from_seq, size as i64)
+        self.as_events_mut(from_seq, size as i64).apply(f)
     }
 }
 
@@ -236,12 +263,23 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+    ///
+    /// Wait::Error must be convertible to returned error
+    pub fn try_wait_apply<F, Err>(&mut self, size: u32, f: F) -> Result<(), Err>
+    where
+        F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
+        Err: From<W::Error>,
+    {
         debug_assert!(size as usize <= self.handle.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
-        self.handle.wait_strategy.try_wait(till_seq, &self.handle.barrier)?;
+        self.handle
+            .wait_strategy
+            .try_wait(till_seq, &self.handle.barrier)
+            .inspect_err(|_| self.update_cursor(from_seq, till_seq))?;
         debug_assert!(self.handle.barrier.sequence() >= till_seq);
-        Ok(self.as_events_mut(from_seq, size as i64))
+        self.as_events_mut(from_seq, size as i64)
+            .try_apply(f)
+            .inspect_err(|_| self.update_cursor(from_seq, till_seq))
     }
 }
 
@@ -783,7 +821,6 @@ impl<E> EventsMut<'_, E> {
     /// });
     ///
     /// assert_eq!(result, Err(5));
-    /// // the last successful sequence
     /// assert_eq!(producer.sequence(), 4);
     /// ```
     pub fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
@@ -915,7 +952,7 @@ impl<E> Events<'_, E> {
     /// assert_eq!(consumer.sequence(), 9);
     /// # Ok::<(), i64>(())
     /// ```
-    /// On failure, the cursor will not be moved.
+    /// On failure, the cursor will be moved to the last successful sequence.
     /// ```
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
@@ -930,7 +967,6 @@ impl<E> Events<'_, E> {
     /// });
     ///
     /// assert_eq!(result, Err(5));
-    /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
     pub fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>

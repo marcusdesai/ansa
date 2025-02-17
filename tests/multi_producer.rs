@@ -11,7 +11,7 @@ fn test_lead_multi_producer() {
             for mut producer in [multi.clone(), multi.clone(), multi] {
                 funcs.push(move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        producer.wait(20).apply(|i, seq, _| *i = seq)
+                        producer.wait_apply(20, |i, seq, _| *i = seq)
                     }
                 })
             }
@@ -31,7 +31,7 @@ fn test_trailing_multi_producer() {
             for mut producer in [multi.clone(), multi.clone(), multi] {
                 funcs.push(move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        producer.wait(20).apply(|i, _, _| *i = 0)
+                        producer.wait_apply(20, |i, _, _| *i = 0)
                     }
                 })
             }

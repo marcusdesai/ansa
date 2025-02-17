@@ -51,7 +51,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_0.wait_any().apply(|event, _, _| {
+                consumer_0.wait_range(..).apply(|event, _, _| {
                     out.push(*event);
                     should_continue = !event.consumer_break;
                 });
@@ -77,7 +77,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_2.wait_any().apply(|event, _, _| {
+                consumer_2.wait_range(..).apply(|event, _, _| {
                     c2_counter.fetch_add(1, Ordering::Relaxed);
                     should_continue = !event.consumer_break;
                 })
@@ -151,7 +151,7 @@ fn test_producer_conversions() {
             for mut multi_producer in [multi.clone(), multi] {
                 let join = std::thread::spawn(move || {
                     for _ in 0..5 {
-                        multi_producer.wait(10).apply(|event, seq, _| event.seq = seq)
+                        multi_producer.wait_apply(10, |event, seq, _| event.seq = seq)
                     }
                     multi_producer
                 });
@@ -175,8 +175,7 @@ fn test_producer_conversions() {
                 let join = std::thread::spawn(move || {
                     for _ in 0..5 {
                         multi_producer
-                            .wait(10)
-                            .apply(|event, _, _| event.seq_times_2 = event.seq * 2)
+                            .wait_apply(10, |event, _, _| event.seq_times_2 = event.seq * 2)
                     }
                     multi_producer
                 });

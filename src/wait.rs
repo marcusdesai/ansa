@@ -11,7 +11,7 @@
 //! Each handle struct includes a wait strategy. So the size of the strategy may impact performance
 //! if, for example, that additional size prevents the handle from fitting into a single cache line.
 //!
-//! Cache lines are commonly `32`, `64`, or `128` bytes. With `64` bytes being the most common.
+//! Cache lines are commonly `64`, or `128` bytes.
 //!
 //! When the wait strategy is zero-sized, each handle has the following size (in bytes, on a 64-bit
 //! system). Changes in these sizes, if compiled for a single system, are considered breaking.
