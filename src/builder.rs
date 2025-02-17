@@ -301,7 +301,7 @@ where
         };
 
         Ok(DisruptorHandles {
-            lead: Some(handle.to_producer()),
+            lead: Some(handle.into_producer()),
             producers,
             consumers,
         })
@@ -368,10 +368,10 @@ where
             };
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
-                    producers.insert(id, handle.to_producer());
+                    producers.insert(id, handle.into_producer());
                 }
                 Handle::Consumer => {
-                    consumers.insert(id, handle.to_consumer());
+                    consumers.insert(id, handle.into_consumer());
                 }
             }
         }
@@ -398,7 +398,7 @@ where
             ));
         }
         let chains = validate_graph(&self.followed_by, &self.follows_lead)?;
-        validate_order(&self.handles_map, &chains)?;
+        validate_order(&self.handles_map, chains)?;
         Ok(())
     }
 }
@@ -607,7 +607,7 @@ fn visit(
 }
 
 /// Returns `Ok` if all chains of the graph contain all producers. Otherwise, returns the
-/// `(chain, id)` pair where the producer id is not in the chain.
+/// `(chain, id)` pair where the producer `id` is not in the `chain`.
 ///
 /// A chain is a totally-ordered subset of a partially-ordered set (poset). If a chain does not
 /// include an element, `e`, of the poset, then there exist elements of that chain which are
@@ -616,7 +616,7 @@ fn visit(
 ///
 /// Another way of thinking about this is: it should not be possible to traverse the DAG from the
 /// root to any single leaf node without visiting every producer.
-fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Result<(), BuildError> {
+fn validate_order(handles_map: &U64Map<Handle>, chains: Vec<Vec<u64>>) -> Result<(), BuildError> {
     let producer_ids: U64Set = handles_map
         .iter()
         .filter(|(_, h)| matches!(h, Handle::Producer))
@@ -628,7 +628,7 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: &Vec<Vec<u64>>) -> Resul
     for chain in chains {
         for id in &producer_ids {
             if !chain.contains(id) {
-                return Err(BuildError::UnorderedProducer(chain.clone(), *id));
+                return Err(BuildError::UnorderedProducer(chain, *id));
             }
         }
     }
@@ -895,7 +895,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(
             result,
             Err(BuildError::UnorderedProducer(vec![0, 1, 2, 3, 7], 4))
@@ -919,7 +919,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(result, Ok(()))
     }
 
@@ -940,7 +940,7 @@ mod tests {
             (7, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 7], vec![0, 4, 5, 6, 3, 7]];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(result, Ok(()))
     }
 
@@ -968,7 +968,7 @@ mod tests {
             vec![0, 2, 3, 4, 6],
             vec![0, 2, 3, 5, 6],
         ];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(result, Ok(()))
     }
 
@@ -987,7 +987,7 @@ mod tests {
             (5, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(result, Err(BuildError::UnorderedProducer(vec![0, 5], 4)))
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
             (5, Handle::Consumer),
         ]);
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
-        let result = validate_order(&handles_map, &chains);
+        let result = validate_order(&handles_map, chains);
         assert_eq!(result, Ok(()))
     }
 

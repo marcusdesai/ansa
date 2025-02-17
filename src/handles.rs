@@ -14,33 +14,8 @@ use std::sync::Arc;
 ///
 /// Clones of this `MultiProducer` share this producer's cursor.
 ///
-/// # Limitations
-///
-/// `MultiProducers` provide a much more limited API in comparison to either [`Producers`](Producer)
-/// or [`Consumers`](Consumer) due to the mechanism by which `MultiProducer` clones are coordinated.
-///
-/// As soon as a `MultiProducer` clone claims and waits for available sequences, it is commited to
-/// moving the shared cursor up to the end of the claimed batch, regardless of whether either
-/// waiting for or processing the batch is successful or not.
-///
-/// This commitment greatly effects fallible methods, as it requires that batches always be
-/// completed (and the cursor moved), even if errors have occurred. Importantly, this means that
-/// cursor updates alone should *not* be used to determine, e.g., successful updates to events.
-///
-/// Another consequence is that batches cannot be sized dynamically depending on the sequences
-/// actually available, hence `wait_range` cannot be implemented.
-///
-/// The limitation also prohibits separate `wait` methods from being provided, because [`EventsMut`]
-/// structs should not be returned. If an [`EventsMut`] is dropped in user code the claim it was
-/// generated from will go unused. Instead, combined wait and apply methods are provided.
-///
-/// TL;DR, the three consequence of this limitation are:
-/// 1) `wait_range` cannot be implemented for `MultiProducer`.
-/// 2) Separate wait and apply methods cannot be provided for `MultiProducer`.
-/// 3) The `try_wait_apply` method will always move the cursor up by the requested batch size,
-///    regardless of whether errors occur.
-///
-/// See: **\[INSERT EXAMPLES LINK]** for ways to parallelize producers which don't use `MultiProducer`.
+/// See: **\[INSERT LINK]** for alternative methods of parallelizing producers without using
+/// `MultiProducer`.
 ///
 /// # Examples
 /// ```
@@ -60,6 +35,34 @@ use std::sync::Arc;
 /// assert_eq!(trailing.count(), 1);
 /// # Ok::<(), ansa::BuildError>(())
 /// ```
+///
+/// # Limitations
+///
+/// The `MultiProducer` API is quite minimal in comparison to either [`Producers`](Producer) or
+/// [`Consumers`](Consumer). This is due to the mechanism used to coordinate `MultiProducer` clones.
+///
+/// TL;DR, the `MultiProducer` limitations are:
+/// 1) `wait_range` method cannot be implemented.
+/// 2) Separate `wait` and `apply` methods cannot be provided.
+/// 3) The `try_wait_apply` method will always move the cursor up by the requested batch size,
+///    even if an error occurs.
+///
+/// As soon as a `MultiProducer` clone claims and waits for available sequences, it is commited to
+/// moving the shared cursor up to the end of the claimed batch, regardless of whether either
+/// waiting for or processing the batch are successful or not.
+///
+/// This commitment requires that batches always be completed (and the cursor moved), even for
+/// fallible methods where might errors occur. Importantly, this means that handles which follow a
+/// `MultiProducer` cannot assume, e.g., that an event was successfully written based only on its
+/// sequence becoming available.
+///
+/// Another consequence is that batches cannot be sized dynamically depending on what sequences are
+/// actually available, as the claim bounds must be used. So `wait_range` cannot be implemented.
+///
+/// Lastly, separate `wait` methods cannot be provided, because [`EventsMut`] structs cannot be
+/// guaranteed to operate correctly in user code. If an [`EventsMut`] is dropped in user code,
+/// the claim it was generated from will go unused, causing permanent disruptor stalls. Instead,
+/// combined wait and apply methods are provided.
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     handle: HandleInner<E, W, LEAD>,
@@ -189,7 +192,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn into_producer(self) -> Option<Producer<E, W, LEAD>> {
-        Arc::into_inner(self.claim).map(|_| self.handle.to_producer())
+        Arc::into_inner(self.claim).map(|_| self.handle.into_producer())
     }
 
     #[inline]
@@ -337,7 +340,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Producer<E, W2, LEAD> {
-        self.handle.set_wait_strategy(wait_strategy).to_producer()
+        self.handle.set_wait_strategy(wait_strategy).into_producer()
     }
 
     /// Converts this `Producer` into a [`MultiProducer`].
@@ -373,6 +376,8 @@ where
     ///
     /// The lower bound of the range has a minimum possible value of one, and must be less than the
     /// buffer size.
+    ///
+    /// bounds are `[1, barrier sequence]`
     pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
     where
         R: RangeBounds<u32>,
@@ -467,7 +472,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Consumer<E, W2> {
-        self.handle.set_wait_strategy(wait_strategy).to_consumer()
+        self.handle.set_wait_strategy(wait_strategy).into_consumer()
     }
 }
 
@@ -530,13 +535,13 @@ pub(crate) struct HandleInner<E, W, const LEAD: bool> {
 }
 
 impl<E, W> HandleInner<E, W, false> {
-    pub(crate) fn to_consumer(self) -> Consumer<E, W> {
+    pub(crate) fn into_consumer(self) -> Consumer<E, W> {
         Consumer { handle: self }
     }
 }
 
 impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
-    pub(crate) fn to_producer(self) -> Producer<E, W, LEAD> {
+    pub(crate) fn into_producer(self) -> Producer<E, W, LEAD> {
         Producer { handle: self }
     }
 
