@@ -49,7 +49,7 @@ use std::sync::Arc;
 ///
 /// As soon as a `MultiProducer` clone claims and waits for available sequences, it is commited to
 /// moving the shared cursor up to the end of the claimed batch, regardless of whether either
-/// waiting for or processing the batch are successful or not.
+/// waiting for or processing the batch is successful or not.
 ///
 /// This commitment requires that batches always be completed (and the cursor moved), even for
 /// fallible methods where might errors occur. Importantly, this means that handles which follow a
@@ -60,9 +60,9 @@ use std::sync::Arc;
 /// actually available, as the claim bounds must be used. So `wait_range` cannot be implemented.
 ///
 /// Lastly, separate `wait` methods cannot be provided, because [`EventsMut`] structs cannot be
-/// guaranteed to operate correctly in user code. If an [`EventsMut`] is dropped in user code,
-/// the claim it was generated from will go unused, causing permanent disruptor stalls. Instead,
-/// combined wait and apply methods are provided.
+/// guaranteed to operate correctly in user code. If an `EventsMut` is dropped without an apply
+/// method being called, then the claim it was generated from will go unused, causing permanent
+/// disruptor stalls. Instead, combined wait and apply methods are provided.
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     handle: HandleInner<E, W, LEAD>,
@@ -374,10 +374,21 @@ where
 
     /// Wait until a number of events within the given range are available.
     ///
-    /// The lower bound of the range has a minimum possible value of one, and must be less than the
-    /// buffer size.
+    /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// bounds are `[1, barrier sequence]`
+    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
+    ///
+    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (mut producer, _) = ansa::spsc(64, || 0);
+    ///
+    /// producer.wait_range(..=10); // waits for a batch of at most 10 events
+    /// producer.wait_range(10..); // waits for a batch of at least 10 events
+    /// producer.wait_range(..); // waits for any number of events
+    /// ```
     pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
     where
         R: RangeBounds<u32>,
@@ -401,10 +412,27 @@ where
 
     /// Wait until a number of events within the given range are available.
     ///
-    /// Otherwise, return the wait strategy error.
+    /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The lower bound of the range has a minimum possible value of one, and must be less than the
-    /// buffer size.
+    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
+    ///
+    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ansa::wait::{Timeout, WaitBusy};
+    ///
+    /// let (mut producer, _) = ansa::spsc(64, || 0);
+    /// let timeout = Timeout::new(Duration::from_millis(1), WaitBusy);
+    /// let mut producer = producer.set_wait_strategy(timeout);
+    ///
+    /// producer.try_wait_range(..=10)?; // waits for a batch of at most 10 events
+    /// producer.try_wait_range(10..)?; // waits for a batch of at least 10 events
+    /// producer.try_wait_range(..)?; // waits for any number of events
+    /// # Ok::<(), ansa::wait::TimedOut>(())
+    /// ```
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<EventsMut<'_, E>, W::Error>
     where
         R: RangeBounds<u32>,
@@ -489,8 +517,21 @@ where
 
     /// Wait until a number of events within the given range are available.
     ///
-    /// The lower bound of the range has a minimum possible value of one, and must be less than the
-    /// buffer size.
+    /// If a lower bound is provided, it must be less than the buffer size.
+    ///
+    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
+    ///
+    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (_, mut consumer) = ansa::spsc(64, || 0);
+    ///
+    /// consumer.wait_range(..=10); // waits for a batch of at most 10 events
+    /// consumer.wait_range(10..); // waits for a batch of at least 10 events
+    /// consumer.wait_range(..); // waits for any number of events
+    /// ```
     pub fn wait_range<R>(&mut self, range: R) -> Events<'_, E>
     where
         R: RangeBounds<u32>,
@@ -514,10 +555,27 @@ where
 
     /// Wait until a number of events within the given range are available.
     ///
-    /// Otherwise, return the wait strategy error.
+    /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The lower bound of the range has a minimum possible value of one, and must be less than the
-    /// buffer size.
+    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
+    ///
+    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ansa::wait::{Timeout, WaitBusy};
+    ///
+    /// let (_, mut consumer) = ansa::spsc(64, || 0);
+    /// let timeout = Timeout::new(Duration::from_millis(1), WaitBusy);
+    /// let mut consumer = consumer.set_wait_strategy(timeout);
+    ///
+    /// consumer.try_wait_range(..=10)?; // waits for a batch of at most 10 events
+    /// consumer.try_wait_range(10..)?; // waits for a batch of at least 10 events
+    /// consumer.try_wait_range(..)?; // waits for any number of events
+    /// # Ok::<(), ansa::wait::TimedOut>(())
+    /// ```
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<Events<'_, E>, W::Error>
     where
         R: RangeBounds<u32>,
@@ -585,7 +643,7 @@ where
 {
     #[inline]
     fn wait(&mut self, size: u32) -> AvailableBatch<'_, E> {
-        debug_assert!(size as usize <= self.buffer.size());
+        debug_assert!((size as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.barrier.sequence() >= till_seq);
@@ -598,10 +656,11 @@ where
         R: RangeBounds<u32>,
     {
         let batch_min = match range.start_bound() {
-            Bound::Included(b) | Bound::Excluded(b) => *b,
+            Bound::Included(b) => (*b).max(1),
+            Bound::Excluded(b) => *b + 1,
             Bound::Unbounded => 1,
         };
-        debug_assert!(batch_min as usize <= self.buffer.size());
+        debug_assert!((batch_min as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
         let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.barrier.sequence() >= till_seq);
@@ -620,7 +679,7 @@ where
 {
     #[inline]
     fn try_wait(&mut self, size: u32) -> Result<AvailableBatch<'_, E>, W::Error> {
-        debug_assert!(size as usize <= self.buffer.size());
+        debug_assert!((size as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
@@ -633,10 +692,11 @@ where
         R: RangeBounds<u32>,
     {
         let batch_min = match range.start_bound() {
-            Bound::Included(b) | Bound::Excluded(b) => (*b).max(1),
+            Bound::Included(b) => (*b).max(1),
+            Bound::Excluded(b) => *b + 1,
             Bound::Unbounded => 1,
         };
-        debug_assert!(batch_min as usize <= self.buffer.size());
+        debug_assert!((batch_min as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
         let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
@@ -663,9 +723,9 @@ impl<E> AvailableBatch<'_, E> {
         F: FnMut(*mut E, i64, bool),
     {
         fence(Ordering::Acquire);
-        // SAFETY: Acquire-Release barrier ensures that following handles cannot access this
-        // sequence before the current handle has finished interacting with it. The construction of
-        // the disruptor guarantees no producer & consumer overlap, thus no mutable aliasing.
+        // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
+        // before this handle has finished interacting with it. Construction of the disruptor
+        // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.apply(self.current + 1, self.batch_size, f) };
         let seq_end = self.current + self.batch_size;
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
@@ -676,9 +736,9 @@ impl<E> AvailableBatch<'_, E> {
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         fence(Ordering::Acquire);
-        // SAFETY: Acquire-Release barrier ensures that following handles cannot access this
-        // sequence before the current handle has finished interacting with it. The construction of
-        // the disruptor guarantees no producer & consumer overlap, thus no mutable aliasing.
+        // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
+        // before this handle has finished interacting with it. Construction of the disruptor
+        // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.try_apply(self.current + 1, self.batch_size, f)? };
         let seq_end = self.current + self.batch_size;
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
@@ -690,9 +750,9 @@ impl<E> AvailableBatch<'_, E> {
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         fence(Ordering::Acquire);
-        // SAFETY: Acquire-Release barrier ensures that following handles cannot access this
-        // sequence before the current handle has finished interacting with it. The construction of
-        // the disruptor guarantees no producer & consumer overlap, thus no mutable aliasing.
+        // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
+        // before this handle has finished interacting with it. Construction of the disruptor
+        // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
             self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
                 f(ptr, seq, end).inspect_err(|_| {
@@ -713,6 +773,11 @@ impl<E> AvailableBatch<'_, E> {
 pub struct EventsMut<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> EventsMut<'_, E> {
+    /// Returns the size of this batch
+    pub fn batch_size(&self) -> i64 {
+        self.0.batch_size
+    }
+
     /// Process a batch of mutable events on the buffer.
     ///
     /// The parameters of `f` are:
@@ -845,6 +910,11 @@ impl<E> EventsMut<'_, E> {
 pub struct Events<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> Events<'_, E> {
+    /// Returns the size of this batch
+    pub fn batch_size(&self) -> i64 {
+        self.0.batch_size
+    }
+
     /// Process a batch of immutable events on the buffer.
     ///
     /// The parameters of `f` are:
@@ -1045,7 +1115,7 @@ impl Barrier {
     /// // SAFETY: wait returns once barrier seq >= desired_seq, with barrier seq itself
     /// unsafe impl WaitStrategy for MyBusyWait {
     ///     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
-    ///         while desired_seq > barrier.sequence() {} // busy-spin
+    ///         while barrier.sequence() < desired_seq {} // busy-spin
     ///         barrier.sequence()
     ///     }
     /// }
