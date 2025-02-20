@@ -7,15 +7,13 @@ fn test_lead_multi_producer() {
         num_of_events,
         |handles| handles.take_lead().unwrap().into_multi(),
         |multi| {
-            let mut funcs = Vec::new();
-            for mut producer in [multi.clone(), multi.clone(), multi] {
-                funcs.push(move || {
+            [multi.clone(), multi.clone(), multi].into_iter().map(|mut clone| {
+                move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        producer.wait_apply(20, |i, seq, _| *i = seq)
+                        clone.wait_apply(20, |i, seq, _| *i = seq)
                     }
-                })
-            }
-            funcs
+                }
+            })
         },
     );
 }
@@ -27,15 +25,13 @@ fn test_trailing_multi_producer() {
         num_of_events,
         |id, handles| handles.take_producer(id).unwrap().into_multi(),
         |multi| {
-            let mut funcs = Vec::new();
-            for mut producer in [multi.clone(), multi.clone(), multi] {
-                funcs.push(move || {
+            [multi.clone(), multi.clone(), multi].into_iter().map(|mut clone| {
+                move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        producer.wait_apply(20, |i, _, _| *i = 0)
+                        clone.wait_apply(20, |i, _, _| *i = 0)
                     }
-                })
-            }
-            funcs
+                }
+            })
         },
     );
 }

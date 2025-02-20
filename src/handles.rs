@@ -65,7 +65,7 @@ use std::sync::Arc;
 /// disruptor stalls. Instead, combined wait and apply methods are provided.
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
-    handle: HandleInner<E, W, LEAD>,
+    inner: HandleInner<E, W, LEAD>,
     claim: Arc<Cursor>, // shared between all clones of this multi producer
 }
 
@@ -75,11 +75,11 @@ where
 {
     fn clone(&self) -> Self {
         MultiProducer {
-            handle: HandleInner {
-                cursor: Arc::clone(&self.handle.cursor),
-                barrier: self.handle.barrier.clone(),
-                buffer: Arc::clone(&self.handle.buffer),
-                wait_strategy: self.handle.wait_strategy.clone(),
+            inner: HandleInner {
+                cursor: Arc::clone(&self.inner.cursor),
+                barrier: self.inner.barrier.clone(),
+                buffer: Arc::clone(&self.inner.buffer),
+                wait_strategy: self.inner.wait_strategy.clone(),
             },
             claim: Arc::clone(&self.claim),
         }
@@ -135,7 +135,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.handle.cursor.sequence.load(Ordering::Relaxed)
+        self.inner.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
@@ -147,7 +147,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn buffer_size(&self) -> usize {
-        self.handle.buffer.size()
+        self.inner.buffer.size()
     }
 
     /// Set the wait strategy for this `MultiProducer` clone.
@@ -170,7 +170,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> MultiProducer<E, W2, LEAD> {
         MultiProducer {
-            handle: self.handle.set_wait_strategy(wait_strategy),
+            inner: self.inner.set_wait_strategy(wait_strategy),
             claim: self.claim,
         }
     }
@@ -192,7 +192,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn into_producer(self) -> Option<Producer<E, W, LEAD>> {
-        Arc::into_inner(self.claim).map(|_| self.handle.into_producer())
+        Arc::into_inner(self.claim).map(|_| self.inner.into_producer())
     }
 
     #[inline]
@@ -209,7 +209,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             claim_end = new_current + size;
         }
         let desired_seq = if LEAD {
-            claim_end - self.handle.buffer.size() as i64
+            claim_end - self.inner.buffer.size() as i64
         } else {
             claim_end
         };
@@ -219,8 +219,8 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     #[inline]
     fn as_events_mut(&mut self, from_seq: i64, batch_size: i64) -> EventsMut<'_, E> {
         EventsMut(AvailableBatch {
-            cursor: &mut self.handle.cursor,
-            buffer: &self.handle.buffer,
+            cursor: &mut self.inner.cursor,
+            buffer: &self.inner.buffer,
             current: from_seq,
             batch_size,
             set_cursor: |cursor, current, end, ordering| {
@@ -233,8 +233,8 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
 
     #[inline]
     fn update_cursor(&self, start: i64, end: i64) {
-        while self.handle.cursor.sequence.load(Ordering::Acquire) != start {}
-        self.handle.cursor.sequence.store(end, Ordering::Release)
+        while self.inner.cursor.sequence.load(Ordering::Acquire) != start {}
+        self.inner.cursor.sequence.store(end, Ordering::Release)
     }
 }
 
@@ -249,10 +249,10 @@ where
     where
         F: FnMut(&mut E, i64, bool),
     {
-        debug_assert!(size as usize <= self.handle.buffer.size());
+        debug_assert!(size as usize <= self.inner.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
-        self.handle.wait_strategy.wait(till_seq, &self.handle.barrier);
-        debug_assert!(self.handle.barrier.sequence() >= till_seq);
+        self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
+        debug_assert!(self.inner.barrier.sequence() >= till_seq);
         self.as_events_mut(from_seq, size as i64).apply(f)
     }
 }
@@ -273,13 +273,13 @@ where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
         Err: From<W::Error>,
     {
-        debug_assert!(size as usize <= self.handle.buffer.size());
+        debug_assert!(size as usize <= self.inner.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
-        self.handle
+        self.inner
             .wait_strategy
-            .try_wait(till_seq, &self.handle.barrier)
+            .try_wait(till_seq, &self.inner.barrier)
             .inspect_err(|_| self.update_cursor(from_seq, till_seq))?;
-        debug_assert!(self.handle.barrier.sequence() >= till_seq);
+        debug_assert!(self.inner.barrier.sequence() >= till_seq);
         self.as_events_mut(from_seq, size as i64)
             .try_apply(f)
             .inspect_err(|_| self.update_cursor(from_seq, till_seq))
@@ -292,7 +292,7 @@ where
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct Producer<E, W, const LEAD: bool> {
-    handle: HandleInner<E, W, LEAD>,
+    inner: HandleInner<E, W, LEAD>,
 }
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
@@ -311,7 +311,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.handle.cursor.sequence.load(Ordering::Relaxed)
+        self.inner.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
@@ -323,7 +323,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn buffer_size(&self) -> usize {
-        self.handle.buffer.size()
+        self.inner.buffer.size()
     }
 
     /// Set the wait strategy for this handle.
@@ -340,7 +340,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Producer<E, W2, LEAD> {
-        self.handle.set_wait_strategy(wait_strategy).into_producer()
+        self.inner.set_wait_strategy(wait_strategy).into_producer()
     }
 
     /// Converts this `Producer` into a [`MultiProducer`].
@@ -355,7 +355,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.sequence();
         MultiProducer {
-            handle: self.handle,
+            inner: self.inner,
             claim: Arc::new(Cursor::new(producer_seq)),
         }
     }
@@ -369,7 +369,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
-        EventsMut(self.handle.wait(size))
+        EventsMut(self.inner.wait(size))
     }
 
     /// Wait until a number of events within the given range are available.
@@ -393,7 +393,7 @@ where
     where
         R: RangeBounds<u32>,
     {
-        EventsMut(self.handle.wait_range(range))
+        EventsMut(self.inner.wait_range(range))
     }
 }
 
@@ -407,7 +407,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
-        self.handle.try_wait(size).map(EventsMut)
+        self.inner.try_wait(size).map(EventsMut)
     }
 
     /// Wait until a number of events within the given range are available.
@@ -437,7 +437,7 @@ where
     where
         R: RangeBounds<u32>,
     {
-        self.handle.try_wait_range(range).map(EventsMut)
+        self.inner.try_wait_range(range).map(EventsMut)
     }
 }
 
@@ -447,7 +447,7 @@ where
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct Consumer<E, W> {
-    handle: HandleInner<E, W, false>,
+    inner: HandleInner<E, W, false>,
 }
 
 impl<E, W> Consumer<E, W> {
@@ -471,7 +471,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.handle.cursor.sequence.load(Ordering::Relaxed)
+        self.inner.cursor.sequence.load(Ordering::Relaxed)
     }
 
     /// Returns the size of the ring buffer.
@@ -483,7 +483,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     #[inline]
     pub fn buffer_size(&self) -> usize {
-        self.handle.buffer.size()
+        self.inner.buffer.size()
     }
 
     /// Set the wait strategy for this handle.
@@ -500,7 +500,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> Consumer<E, W2> {
-        self.handle.set_wait_strategy(wait_strategy).into_consumer()
+        self.inner.set_wait_strategy(wait_strategy).into_consumer()
     }
 }
 
@@ -512,7 +512,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn wait(&mut self, size: u32) -> Events<'_, E> {
-        Events(self.handle.wait(size))
+        Events(self.inner.wait(size))
     }
 
     /// Wait until a number of events within the given range are available.
@@ -536,7 +536,7 @@ where
     where
         R: RangeBounds<u32>,
     {
-        Events(self.handle.wait_range(range))
+        Events(self.inner.wait_range(range))
     }
 }
 
@@ -550,7 +550,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     pub fn try_wait(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
-        self.handle.try_wait(size).map(Events)
+        self.inner.try_wait(size).map(Events)
     }
 
     /// Wait until a number of events within the given range are available.
@@ -580,7 +580,7 @@ where
     where
         R: RangeBounds<u32>,
     {
-        self.handle.try_wait_range(range).map(Events)
+        self.inner.try_wait_range(range).map(Events)
     }
 }
 
@@ -594,13 +594,13 @@ pub(crate) struct HandleInner<E, W, const LEAD: bool> {
 
 impl<E, W> HandleInner<E, W, false> {
     pub(crate) fn into_consumer(self) -> Consumer<E, W> {
-        Consumer { handle: self }
+        Consumer { inner: self }
     }
 }
 
 impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
     pub(crate) fn into_producer(self) -> Producer<E, W, LEAD> {
-        Producer { handle: self }
+        Producer { inner: self }
     }
 
     #[inline]

@@ -2,10 +2,10 @@
 // https://github.com/nicholassm/disruptor-rs/blob/bd15292e34d2c4bb53cba5709e0cf23e9753ebb8/src/ringbuffer.rs
 // authored by: Nicholas Schultz-Møller
 
-use std::cell::UnsafeCell;
+use core::cell::UnsafeCell;
 
 /// A circular buffer of elements allocated on the heap. The buffer cannot be resized once created,
-/// and its size must be a power of 2.
+/// and its size must be a non-zero power of 2.
 ///
 /// `mask` contains `(size - 1)`, which is half of what's needed to calculate a modulus with a
 /// power of 2 number.
@@ -75,6 +75,7 @@ impl<E> RingBuffer<E> {
         cell.get()
     }
 
+    /// See: [`RingBuffer::get`].
     #[inline]
     pub(crate) unsafe fn apply<F>(&self, mut seq: i64, size: i64, mut func: F)
     where
@@ -89,6 +90,7 @@ impl<E> RingBuffer<E> {
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
         if !wraps && cfg!(feature = "tree-borrows") {
+            // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
             for _ in 0..size - 1 {
                 func(ptr, seq, false);
                 seq += 1;
@@ -105,6 +107,7 @@ impl<E> RingBuffer<E> {
         }
     }
 
+    /// See: [`RingBuffer::get`].
     #[inline]
     pub(crate) unsafe fn try_apply<F, Err>(
         &self,
@@ -124,6 +127,7 @@ impl<E> RingBuffer<E> {
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
         if !wraps && cfg!(feature = "tree-borrows") {
+            // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
             for _ in 0..size - 1 {
                 func(ptr, seq, false)?;
                 seq += 1;

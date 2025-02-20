@@ -197,7 +197,7 @@ where
     ///
     /// See: [`BuildError`] for full details on error states encountered when building the
     /// disruptor. Such errors are likely to be caused by calls to this function or
-    /// [`extend_handles`](DisruptorBuilder::extend_handles) creating a malformed graph.
+    /// [`extend_handles`](DisruptorBuilder::extend_handles) creating an invalid graph.
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
@@ -235,8 +235,8 @@ where
     ///        (1, Handle::Consumer, Follows::LeadProducer),
     ///        (2, Handle::Consumer, Follows::Handles(vec![0, 1]))
     ///    ])
-    ///    .build()
-    ///    .unwrap();
+    ///    .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
     ///```
     pub fn extend_handles(self, iter: impl IntoIterator<Item = (u64, Handle, Follows)>) -> Self {
         let mut this = self;
@@ -260,8 +260,8 @@ where
     /// let _ = DisruptorBuilder::new(32, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .wait_strategy(WaitSleep::new(Duration::from_nanos(500)))
-    ///     .build()
-    ///     .unwrap();
+    ///     .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
     /// ```
     pub fn wait_strategy<W2>(self, strategy: W2) -> DisruptorBuilder<F, E, W2>
     where

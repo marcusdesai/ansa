@@ -205,6 +205,3 @@ fn test_producer_conversions() {
 
     assert!(is_times_2);
 }
-
-// Only passes miri when MIRIFLAGS="-Zmiri-tree-borrows" is set. In other words: the exact
-// handles don't adhere to the Stacked-Borrow rules.
