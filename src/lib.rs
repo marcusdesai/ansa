@@ -59,13 +59,6 @@ pub use builder::*;
 pub use handles::*;
 
 use crate::wait::{WaitPhased, WaitSleep};
-use std::time::Duration;
-
-const BACKOFF_WAIT: WaitPhased<WaitSleep> = WaitPhased::new(
-    Duration::from_millis(1),
-    Duration::from_millis(1),
-    WaitSleep::new(Duration::from_micros(50)),
-);
 
 /// Construct a Single-Producer Single-Consumer disruptor.
 ///
@@ -100,7 +93,6 @@ where
     );
     let mut handles = DisruptorBuilder::new(size, event_factory)
         .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-        .wait_strategy(BACKOFF_WAIT)
         .build()
         .unwrap();
     let producer = handles.take_lead().unwrap();

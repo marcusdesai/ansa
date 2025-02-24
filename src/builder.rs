@@ -1,6 +1,6 @@
 use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer};
 use crate::ringbuffer::RingBuffer;
-use crate::wait::WaitSleep;
+use crate::wait::{WaitPhased, WaitSleep};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -13,6 +13,10 @@ use std::time::Duration;
 ///
 /// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
 /// is called.
+///
+/// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1
+/// millisecond, then spin-yields the thread for 1 millisecond, and finally spin-sleeps with a
+/// 50 microsecond sleep duration.
 #[derive(Debug)]
 pub struct DisruptorBuilder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
@@ -20,6 +24,8 @@ pub struct DisruptorBuilder<F, E, W> {
     /// Factory function for populating the buffer with events. Wrapped in an option only to
     /// facilitate moving the value out of the builder while the builder is still in use.
     event_factory: Option<F>,
+    /// Directly provided storage for the RingBuffer.
+    provided_buffer: Option<Box<[E]>>,
     /// Factory function for building instances of the wait strategy, defaults to WaitSleep.
     wait_strategy: W,
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
@@ -33,25 +39,48 @@ pub struct DisruptorBuilder<F, E, W> {
     handles_map: U64Map<Handle>,
     /// Tracks whether ids have been reused.
     overlapping_ids: U64Set,
-    element_type: PhantomData<E>,
+    event_type: PhantomData<E>,
 }
 
-const DEFAULT_WAIT: WaitSleep = WaitSleep::new(Duration::from_micros(100));
+pub(crate) const BACKOFF_WAIT: WaitPhased<WaitSleep> = WaitPhased::new(
+    Duration::from_millis(1),
+    Duration::from_millis(1),
+    WaitSleep::new(Duration::from_micros(50)),
+);
 
-impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
+impl<E> DisruptorBuilder<fn() -> E, E, WaitPhased<WaitSleep>> {
     /// Returns a new [`DisruptorBuilder`].
     ///
-    /// `size` must be a non-zero power of 2.
+    /// The size of `buffer` must be a non-zero power of 2.
+    pub fn with_buffer(buffer: Box<[E]>) -> Self
+    where
+        E: Sync,
+    {
+        DisruptorBuilder {
+            buffer_size: buffer.len(),
+            event_factory: None,
+            provided_buffer: Some(buffer),
+            wait_strategy: BACKOFF_WAIT,
+            followed_by: U64Map::default(),
+            follows: U64Map::default(),
+            follows_lead: U64Set::default(),
+            handles_map: U64Map::default(),
+            overlapping_ids: U64Set::default(),
+            event_type: PhantomData,
+        }
+    }
+}
+
+impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
+    /// Returns a new [`DisruptorBuilder`].
     ///
-    /// `event_factory` is used to populate the buffer.
-    ///
-    /// The default wait strategy is [`WaitSleep`], with a duration of 50 microseconds.
+    /// `size` must be a non-zero power of 2. `event_factory` is used to populate the buffer.
     ///
     /// # Examples
     /// ```
     /// use ansa::DisruptorBuilder;
     ///
-    /// // with a very simple element_factory
+    /// // with a very simple event_factory
     /// let builder = DisruptorBuilder::new(64, || 0i64);
     ///
     /// // using a closure to capture state
@@ -93,13 +122,14 @@ impl<F, E> DisruptorBuilder<F, E, WaitSleep> {
         DisruptorBuilder {
             buffer_size: size,
             event_factory: Some(event_factory),
-            wait_strategy: DEFAULT_WAIT,
+            provided_buffer: None,
+            wait_strategy: BACKOFF_WAIT,
             followed_by: U64Map::default(),
             follows: U64Map::default(),
             follows_lead: U64Set::default(),
             handles_map: U64Map::default(),
             overlapping_ids: U64Set::default(),
-            element_type: PhantomData,
+            event_type: PhantomData,
         }
     }
 }
@@ -270,13 +300,14 @@ where
         DisruptorBuilder {
             buffer_size: self.buffer_size,
             event_factory: self.event_factory,
+            provided_buffer: None,
             wait_strategy: strategy,
             followed_by: self.followed_by,
             follows: self.follows,
             follows_lead: self.follows_lead,
             handles_map: self.handles_map,
             overlapping_ids: self.overlapping_ids,
-            element_type: PhantomData,
+            event_type: PhantomData,
         }
     }
 
@@ -286,9 +317,7 @@ where
     /// For full details on error states, please see [`BuildError`].
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
-        // unwrap okay as this value will always be inhabited as per construction of the builder
-        let element_factory = self.event_factory.take().unwrap();
-        let buffer = Arc::new(RingBuffer::new(self.buffer_size, element_factory));
+        let buffer = Arc::new(self.construct_buffer());
         let lead_cursor = Arc::new(Cursor::start());
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
@@ -305,6 +334,16 @@ where
             producers,
             consumers,
         })
+    }
+
+    fn construct_buffer(&mut self) -> RingBuffer<E> {
+        match (self.event_factory.take(), self.provided_buffer.take()) {
+            (Some(event_factory), None) => {
+                RingBuffer::from_factory(self.buffer_size, event_factory)
+            }
+            (None, Some(buffer)) => RingBuffer::from_buffer(buffer),
+            _ => unreachable!("guaranteed by DisruptorBuilder construction methods"),
+        }
     }
 
     fn construct_lead_barrier(&self, cursor_map: U64Map<Arc<Cursor>>) -> Barrier {

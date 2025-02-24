@@ -24,17 +24,24 @@ pub(crate) struct RingBuffer<E> {
 unsafe impl<E> Sync for RingBuffer<E> where E: Sync {}
 
 impl<E> RingBuffer<E> {
-    /// Create a [`RingBuffer`]. Uses a boxed slice for storage, ensuring data is held contiguously
-    /// in memory.
+    /// Create a [`RingBuffer`] from a factory function.
     ///
-    /// `size` must be a non-zero power of two. Error flagging for invalid sizes is handled at a
-    /// higher level in the API, so callers must uphold this constraint.
-    pub(crate) fn new<F>(size: usize, mut factory: F) -> Self
-    where
-        F: FnMut() -> E,
-    {
-        debug_assert!(size > 0 && (size & (size - 1)) == 0);
+    /// `size` must be a non-zero power of two. Callers must uphold this constraint.
+    pub(crate) fn from_factory(size: usize, mut factory: impl FnMut() -> E) -> Self {
+        debug_assert!(valid_rb_size(size));
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
+        let mask = size as i64 - 1;
+        RingBuffer { buf, mask }
+    }
+
+    /// Create a [`RingBuffer`] from an existing buffer.
+    ///
+    /// `size` must be a non-zero power of two. Callers must uphold this constraint.
+    pub(crate) fn from_buffer(buf: Box<[E]>) -> Self {
+        let size = buf.len();
+        debug_assert!(valid_rb_size(size));
+        // SAFETY: UnsafeCell<E> has the same size and layout as E
+        let buf: Box<[UnsafeCell<E>]> = unsafe { std::mem::transmute(buf) };
         let mask = size as i64 - 1;
         RingBuffer { buf, mask }
     }
@@ -81,6 +88,9 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut(*mut E, i64, bool),
     {
+        if size == 0 {
+            return;
+        }
         debug_assert!(seq >= 0);
         debug_assert!((size as usize) < self.size());
         let index = seq & self.mask;
@@ -118,6 +128,9 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
+        if size == 0 {
+            return Ok(());
+        }
         debug_assert!(seq >= 0);
         debug_assert!((size as usize) < self.size());
         let index = seq & self.mask;
@@ -149,4 +162,9 @@ impl<E> RingBuffer<E> {
     pub(crate) const fn size(&self) -> usize {
         self.buf.len()
     }
+}
+
+#[inline]
+pub(crate) fn valid_rb_size(n: usize) -> bool {
+    n > 0 && (n & (n - 1)) == 0
 }

@@ -36,7 +36,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                producer.wait(20).apply(|event, seq, _| {
+                producer.wait(20).apply_mut(|event, seq, _| {
                     event.seq = seq;
                     if seq == num_of_events - 1 {
                         event.consumer_break = true;
@@ -51,7 +51,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_0.wait_range(..).apply(|event, _, _| {
+                consumer_0.wait_range(1..).apply(|event, _, _| {
                     out.push(*event);
                     should_continue = !event.consumer_break;
                 });
@@ -77,7 +77,7 @@ fn test_complex_consumer_dag() {
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
-                consumer_2.wait_range(..).apply(|event, _, _| {
+                consumer_2.wait_range(1..).apply(|event, _, _| {
                     c2_counter.fetch_add(1, Ordering::Relaxed);
                     should_continue = !event.consumer_break;
                 })
@@ -144,7 +144,7 @@ fn test_producer_conversions() {
         s.spawn(move || {
             let mut producer = lead;
             for _ in 0..2 {
-                producer.wait(50).apply(|event, seq, _| event.seq = seq)
+                producer.wait(50).apply_mut(|event, seq, _| event.seq = seq)
             }
             let multi = producer.into_multi();
             let mut joins = vec![];
@@ -163,7 +163,7 @@ fn test_producer_conversions() {
                 .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..2 {
-                producer.wait(50).apply(|event, seq, _| event.seq = seq)
+                producer.wait(50).apply_mut(|event, seq, _| event.seq = seq)
             }
         });
 
@@ -187,7 +187,7 @@ fn test_producer_conversions() {
                 .fold(None, |opt, i| opt.or(i.into_producer()))
                 .expect("single");
             for _ in 0..3 {
-                producer.wait(50).apply(|event, _, _| event.seq_times_2 = event.seq * 2)
+                producer.wait(50).apply_mut(|event, _, _| event.seq_times_2 = event.seq * 2)
             }
         });
 

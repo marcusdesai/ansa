@@ -79,9 +79,17 @@ pub trait Waiting {
 
 /// Implement to provide a wait loop which runs as a handle waits for a sequence.
 ///
+/// Then list rules...
+///
 /// If a wait strategy does not require either control over loop behaviour, or carrying state
 /// across loop iterations, then prefer implementing [`Waiting`] instead, as it provides a safe
 /// interface.
+///
+/// well-behaved, won't cause UB if not observed:
+/// should return as soon as barrier >= desired
+/// safety:
+/// must not return while barrier < desired
+/// must return with the last barrier seq value
 ///
 /// # Safety
 ///
@@ -222,7 +230,7 @@ where
 /// }
 /// ```
 ///
-/// Implementing a no wait strategy is also possible.
+/// Implementing a no wait strategy is also possible (though not necessary, see: `wait_range`).
 /// ```
 /// use ansa::{Barrier, wait::TryWaitStrategy};
 ///

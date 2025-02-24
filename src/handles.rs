@@ -222,7 +222,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             cursor: &mut self.inner.cursor,
             buffer: &self.inner.buffer,
             current: from_seq,
-            batch_size,
+            size: batch_size,
             set_cursor: |cursor, current, end, ordering| {
                 // Busy wait for the cursor to catch up to the start of claimed sequence.
                 while cursor.sequence.load(Ordering::Acquire) != current {}
@@ -253,7 +253,7 @@ where
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
         debug_assert!(self.inner.barrier.sequence() >= till_seq);
-        self.as_events_mut(from_seq, size as i64).apply(f)
+        self.as_events_mut(from_seq, size as i64).apply_mut(f)
     }
 }
 
@@ -281,7 +281,7 @@ where
             .inspect_err(|_| self.update_cursor(from_seq, till_seq))?;
         debug_assert!(self.inner.barrier.sequence() >= till_seq);
         self.as_events_mut(from_seq, size as i64)
-            .try_apply(f)
+            .try_apply_mut(f)
             .inspect_err(|_| self.update_cursor(from_seq, till_seq))
     }
 }
@@ -306,7 +306,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// assert_eq!(producer.sequence(), -1);
     ///
     /// // move the producer up by 10
-    /// producer.wait(10).apply(|_, _, _| ());
+    /// producer.wait(10).apply_mut(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     /// ```
     #[inline]
@@ -376,18 +376,16 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
-    ///
-    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
     /// # Examples
     ///
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0);
     ///
-    /// producer.wait_range(..=10); // waits for a batch of at most 10 events
+    /// producer.wait_range(1..=10); // waits for a batch of at most 10 events
     /// producer.wait_range(10..); // waits for a batch of at least 10 events
-    /// producer.wait_range(..); // waits for any number of events
+    /// producer.wait_range(1..); // waits for any number of events
     /// ```
     pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
     where
@@ -414,9 +412,7 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
-    ///
-    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
     /// # Examples
     ///
@@ -428,9 +424,9 @@ where
     /// let timeout = Timeout::new(Duration::from_millis(1), WaitBusy);
     /// let mut producer = producer.set_wait_strategy(timeout);
     ///
-    /// producer.try_wait_range(..=10)?; // waits for a batch of at most 10 events
+    /// producer.try_wait_range(1..=10)?; // waits for a batch of at most 10 events
     /// producer.try_wait_range(10..)?; // waits for a batch of at least 10 events
-    /// producer.try_wait_range(..)?; // waits for any number of events
+    /// producer.try_wait_range(1..)?; // waits for any number of events
     /// # Ok::<(), ansa::wait::TimedOut>(())
     /// ```
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<EventsMut<'_, E>, W::Error>
@@ -462,7 +458,7 @@ impl<E, W> Consumer<E, W> {
     ///
     /// // move the producer up by 10, otherwise the consumer will block the
     /// // thread while waiting for available events
-    /// producer.wait(10).apply(|_, _, _| ());
+    /// producer.wait(10).apply_mut(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     ///
     /// // now we can move the consumer
@@ -519,19 +515,35 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
+    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
-    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    /// Any range which starts from 0 or is unbounded enables non-blocking waits for
+    /// [`well-behaved`] WaitStrategy implementations
     ///
     /// # Examples
     ///
     /// ```
-    /// let (_, mut consumer) = ansa::spsc(64, || 0);
+    /// let (mut producer, mut consumer) = ansa::spsc(64, || 0);
     ///
-    /// consumer.wait_range(..=10); // waits for a batch of at most 10 events
-    /// consumer.wait_range(10..); // waits for a batch of at least 10 events
-    /// consumer.wait_range(..); // waits for any number of events
+    /// let events = consumer.wait_range(..); // wait for any number of events
+    /// assert_eq!(events.size(), 0);
+    ///
+    /// // this would block the thread waiting for the producer to move
+    /// // consumer.wait_range(1..);
+    ///
+    /// // move the lead producer
+    /// producer.wait(20).apply_mut(|_, _, _| ());
+    ///
+    /// let events = consumer.wait_range(..=10); // wait for a batch of at most 10 events
+    /// assert_eq!(events.size(), 10);
+    ///
+    /// let events = consumer.wait_range(10..); // wait for a batch of at least 10 events
+    /// assert_eq!(events.size(), 20);
+    ///
+    /// let events = consumer.wait_range(..);
+    /// assert_eq!(events.size(), 20);
     /// ```
+    /// Can be used to for non-blocking waits. .. is always non-blocking
     pub fn wait_range<R>(&mut self, range: R) -> Events<'_, E>
     where
         R: RangeBounds<u32>,
@@ -557,9 +569,7 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// The minimum possible lower bound is `1`. `0` is accepted but changed to `1`.
-    ///
-    /// All ranges will return a batch with a size in the interval: `[1, barrier sequence]`.
+    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
     /// # Examples
     ///
@@ -567,13 +577,16 @@ where
     /// use std::time::Duration;
     /// use ansa::wait::{Timeout, WaitBusy};
     ///
-    /// let (_, mut consumer) = ansa::spsc(64, || 0);
+    /// let (mut producer, consumer) = ansa::spsc(64, || 0);
+    /// // move the lead producer
+    /// producer.wait(20).apply_mut(|_, _, _| ());
+    ///
     /// let timeout = Timeout::new(Duration::from_millis(1), WaitBusy);
     /// let mut consumer = consumer.set_wait_strategy(timeout);
     ///
-    /// consumer.try_wait_range(..=10)?; // waits for a batch of at most 10 events
+    /// consumer.try_wait_range(1..=10)?; // waits for a batch of at most 10 events
     /// consumer.try_wait_range(10..)?; // waits for a batch of at least 10 events
-    /// consumer.try_wait_range(..)?; // waits for any number of events
+    /// consumer.try_wait_range(1..)?; // waits for any number of events
     /// # Ok::<(), ansa::wait::TimedOut>(())
     /// ```
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<Events<'_, E>, W::Error>
@@ -631,7 +644,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
             current: from_seq,
-            batch_size,
+            size: batch_size,
             set_cursor: |cursor, _, end, ordering| cursor.sequence.store(end, ordering),
         }
     }
@@ -656,9 +669,9 @@ where
         R: RangeBounds<u32>,
     {
         let batch_min = match range.start_bound() {
-            Bound::Included(b) => (*b).max(1),
+            Bound::Included(b) => *b,
             Bound::Excluded(b) => *b + 1,
-            Bound::Unbounded => 1,
+            Bound::Unbounded => 0,
         };
         debug_assert!((batch_min as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
@@ -692,9 +705,9 @@ where
         R: RangeBounds<u32>,
     {
         let batch_min = match range.start_bound() {
-            Bound::Included(b) => (*b).max(1),
+            Bound::Included(b) => *b,
             Bound::Excluded(b) => *b + 1,
-            Bound::Unbounded => 1,
+            Bound::Unbounded => 0,
         };
         debug_assert!((batch_min as usize) < self.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
@@ -713,7 +726,7 @@ struct AvailableBatch<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
-    batch_size: i64,
+    size: i64,
     set_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
 }
 
@@ -726,8 +739,8 @@ impl<E> AvailableBatch<'_, E> {
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
-        unsafe { self.buffer.apply(self.current + 1, self.batch_size, f) };
-        let seq_end = self.current + self.batch_size;
+        unsafe { self.buffer.apply(self.current + 1, self.size, f) };
+        let seq_end = self.current + self.size;
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
     }
 
@@ -739,13 +752,13 @@ impl<E> AvailableBatch<'_, E> {
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
-        unsafe { self.buffer.try_apply(self.current + 1, self.batch_size, f)? };
-        let seq_end = self.current + self.batch_size;
+        unsafe { self.buffer.try_apply(self.current + 1, self.size, f)? };
+        let seq_end = self.current + self.size;
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
         Ok(())
     }
 
-    fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
+    fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
@@ -754,13 +767,13 @@ impl<E> AvailableBatch<'_, E> {
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.batch_size, |ptr, seq, end| {
+            self.buffer.try_apply(self.current + 1, self.size, |ptr, seq, end| {
                 f(ptr, seq, end).inspect_err(|_| {
                     (self.set_cursor)(self.cursor, self.current, seq - 1, Ordering::Release);
                 })
             })?;
         }
-        let seq_end = self.current + self.batch_size;
+        let seq_end = self.current + self.size;
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
         Ok(())
     }
@@ -774,8 +787,8 @@ pub struct EventsMut<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> EventsMut<'_, E> {
     /// Returns the size of this batch
-    pub fn batch_size(&self) -> i64 {
-        self.0.batch_size
+    pub fn size(&self) -> i64 {
+        self.0.size
     }
 
     /// Process a batch of mutable events on the buffer.
@@ -790,9 +803,9 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).apply(|event, seq, _| *event = seq as u32);
+    /// producer.wait(10).apply_mut(|event, seq, _| *event = seq as u32);
     /// ```
-    pub fn apply<F>(self, mut f: F)
+    pub fn apply_mut<F>(self, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -818,7 +831,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).try_apply(|_, seq, _| {
+    /// producer.wait(10).try_apply_mut(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -832,7 +845,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// let result = producer.wait(10).try_apply(|_, seq, _| {
+    /// let result = producer.wait(10).try_apply_mut(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -843,7 +856,7 @@ impl<E> EventsMut<'_, E> {
     /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(producer.sequence(), -1);
     /// ```
-    pub fn try_apply<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_apply_mut<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
@@ -869,7 +882,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).try_apply_commit(|_, seq, _| {
+    /// producer.wait(10).try_commit_mut(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -883,7 +896,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// let result = producer.wait(10).try_apply_commit(|_, seq, _| {
+    /// let result = producer.wait(10).try_commit_mut(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -893,11 +906,11 @@ impl<E> EventsMut<'_, E> {
     /// assert_eq!(result, Err(5));
     /// assert_eq!(producer.sequence(), 4);
     /// ```
-    pub fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_commit_mut<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_apply_commit(|ptr, seq, end| {
+        self.0.try_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
             f(event, seq, end)
@@ -911,8 +924,8 @@ pub struct Events<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> Events<'_, E> {
     /// Returns the size of this batch
-    pub fn batch_size(&self) -> i64 {
-        self.0.batch_size
+    pub fn size(&self) -> i64 {
+        self.0.size
     }
 
     /// Process a batch of immutable events on the buffer.
@@ -928,7 +941,7 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply(|_, _, _| ());
+    /// producer.wait(20).apply_mut(|_, _, _| ());
     ///
     /// consumer.wait(10).apply(|event, seq, _| println!("{seq}: {event}"));
     /// ```
@@ -958,7 +971,7 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply(|_, _, _| ());
+    /// producer.wait(20).apply_mut(|_, _, _| ());
     ///
     /// consumer.wait(10).try_apply(|_, seq, _| {
     ///     match seq {
@@ -975,7 +988,7 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply(|_, _, _| ());
+    /// producer.wait(20).apply_mut(|_, _, _| ());
     ///
     /// let result = consumer.wait(10).try_apply(|_, seq, _| {
     ///     match seq {
@@ -1015,9 +1028,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply(|_, _, _| ());
+    /// producer.wait(20).apply_mut(|_, _, _| ());
     ///
-    /// consumer.wait(10).try_apply_commit(|_, seq, _| {
+    /// consumer.wait(10).try_commit(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -1032,9 +1045,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply(|_, _, _| ());
+    /// producer.wait(20).apply_mut(|_, _, _| ());
     ///
-    /// let result = consumer.wait(10).try_apply_commit(|_, seq, _| {
+    /// let result = consumer.wait(10).try_commit(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -1044,11 +1057,11 @@ impl<E> Events<'_, E> {
     /// assert_eq!(result, Err(5));
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
-    pub fn try_apply_commit<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_apply_commit(|ptr, seq, end| {
+        self.0.try_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &mut *ptr };
             f(event, seq, end)

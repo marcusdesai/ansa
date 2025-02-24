@@ -106,7 +106,7 @@ pub fn run_test_trailing<P: Send, I, F>(
         let mut lead = handles.take_lead().unwrap();
         let jh = s.spawn(move || {
             for _ in 0..num_of_events / 20 {
-                lead.wait(20).apply(|i, seq, _| *i = seq)
+                lead.wait(20).apply_mut(|i, seq, _| *i = seq)
             }
         });
         join_handles.push(jh);
