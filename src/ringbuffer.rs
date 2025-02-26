@@ -28,7 +28,7 @@ impl<E> RingBuffer<E> {
     ///
     /// `size` must be a non-zero power of two. Callers must uphold this constraint.
     pub(crate) fn from_factory(size: usize, mut factory: impl FnMut() -> E) -> Self {
-        debug_assert!(valid_rb_size(size));
+        debug_assert!(size > 0 && (size & (size - 1)) == 0);
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
         let mask = size as i64 - 1;
         RingBuffer { buf, mask }
@@ -39,7 +39,7 @@ impl<E> RingBuffer<E> {
     /// `size` must be a non-zero power of two. Callers must uphold this constraint.
     pub(crate) fn from_buffer(buf: Box<[E]>) -> Self {
         let size = buf.len();
-        debug_assert!(valid_rb_size(size));
+        debug_assert!(size > 0 && (size & (size - 1)) == 0);
         // SAFETY: UnsafeCell<E> has the same size and layout as E
         let buf: Box<[UnsafeCell<E>]> = unsafe { std::mem::transmute(buf) };
         let mask = size as i64 - 1;
@@ -94,27 +94,15 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!((size as usize) < self.size());
         let index = seq & self.mask;
-        // whether the requested batch wraps the buffer
-        let wraps = (index + size) as usize >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
-        if !wraps && cfg!(feature = "tree-borrows") {
-            // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
-            for _ in 0..size - 1 {
-                func(ptr, seq, false);
-                seq += 1;
-                ptr = unsafe { ptr.add(1) };
-            }
-            func(ptr, seq, true);
-        } else {
-            for _ in 0..size - 1 {
-                func(ptr, seq, false);
-                seq += 1;
-                ptr = unsafe { self.get(seq) };
-            }
-            func(ptr, seq, true);
+        for _ in 0..size - 1 {
+            func(ptr, seq, false);
+            seq += 1;
+            ptr = unsafe { self.get(seq) };
         }
+        func(ptr, seq, true);
     }
 
     /// See: [`RingBuffer::get`].
@@ -162,9 +150,4 @@ impl<E> RingBuffer<E> {
     pub(crate) const fn size(&self) -> usize {
         self.buf.len()
     }
-}
-
-#[inline]
-pub(crate) fn valid_rb_size(n: usize) -> bool {
-    n > 0 && (n & (n - 1)) == 0
 }

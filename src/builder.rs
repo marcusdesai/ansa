@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,7 +38,6 @@ pub struct DisruptorBuilder<F, E, W> {
     handles_map: U64Map<Handle>,
     /// Tracks whether ids have been reused.
     overlapping_ids: U64Set,
-    event_type: PhantomData<E>,
 }
 
 pub(crate) const BACKOFF_WAIT: WaitPhased<WaitSleep> = WaitPhased::new(
@@ -66,7 +64,6 @@ impl<E> DisruptorBuilder<fn() -> E, E, WaitPhased<WaitSleep>> {
             follows_lead: U64Set::default(),
             handles_map: U64Map::default(),
             overlapping_ids: U64Set::default(),
-            event_type: PhantomData,
         }
     }
 }
@@ -129,7 +126,6 @@ impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
             follows_lead: U64Set::default(),
             handles_map: U64Map::default(),
             overlapping_ids: U64Set::default(),
-            event_type: PhantomData,
         }
     }
 }
@@ -307,7 +303,6 @@ where
             follows_lead: self.follows_lead,
             handles_map: self.handles_map,
             overlapping_ids: self.overlapping_ids,
-            event_type: PhantomData,
         }
     }
 
@@ -377,7 +372,6 @@ where
         let mut cursor_map = U64Map::default();
 
         fn get_cursor(id: u64, map: &mut U64Map<Arc<Cursor>>) -> Arc<Cursor> {
-            // start cursors at -1 to make buffer accesses zero indexed from the start
             let cursor = map.entry(id).or_insert_with(|| Arc::new(Cursor::start()));
             Arc::clone(cursor)
         }

@@ -368,6 +368,7 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
+    #[inline]
     pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
         EventsMut(self.inner.wait(size))
     }
@@ -387,6 +388,7 @@ where
     /// producer.wait_range(10..); // waits for a batch of at least 10 events
     /// producer.wait_range(1..); // waits for any number of events
     /// ```
+    #[inline]
     pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
     where
         R: RangeBounds<u32>,
@@ -404,6 +406,7 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
+    #[inline]
     pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
         self.inner.try_wait(size).map(EventsMut)
     }
@@ -429,6 +432,7 @@ where
     /// producer.try_wait_range(1..)?; // waits for any number of events
     /// # Ok::<(), ansa::wait::TimedOut>(())
     /// ```
+    #[inline]
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<EventsMut<'_, E>, W::Error>
     where
         R: RangeBounds<u32>,
@@ -507,6 +511,7 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
+    #[inline]
     pub fn wait(&mut self, size: u32) -> Events<'_, E> {
         Events(self.inner.wait(size))
     }
@@ -544,6 +549,7 @@ where
     /// assert_eq!(events.size(), 20);
     /// ```
     /// Can be used to for non-blocking waits. .. is always non-blocking
+    #[inline]
     pub fn wait_range<R>(&mut self, range: R) -> Events<'_, E>
     where
         R: RangeBounds<u32>,
@@ -561,6 +567,7 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
+    #[inline]
     pub fn try_wait(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
         self.inner.try_wait(size).map(Events)
     }
@@ -589,6 +596,7 @@ where
     /// consumer.try_wait_range(1..)?; // waits for any number of events
     /// # Ok::<(), ansa::wait::TimedOut>(())
     /// ```
+    #[inline]
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<Events<'_, E>, W::Error>
     where
         R: RangeBounds<u32>,
@@ -731,6 +739,7 @@ struct AvailableBatch<'a, E> {
 }
 
 impl<E> AvailableBatch<'_, E> {
+    #[inline]
     fn apply<F>(self, f: F)
     where
         F: FnMut(*mut E, i64, bool),
@@ -744,6 +753,7 @@ impl<E> AvailableBatch<'_, E> {
         (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
     }
 
+    #[inline]
     fn try_apply<F, Err>(self, f: F) -> Result<(), Err>
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
@@ -758,6 +768,7 @@ impl<E> AvailableBatch<'_, E> {
         Ok(())
     }
 
+    #[inline]
     fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
@@ -787,6 +798,7 @@ pub struct EventsMut<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> EventsMut<'_, E> {
     /// Returns the size of this batch
+    #[inline]
     pub fn size(&self) -> i64 {
         self.0.size
     }
@@ -805,6 +817,7 @@ impl<E> EventsMut<'_, E> {
     ///
     /// producer.wait(10).apply_mut(|event, seq, _| *event = seq as u32);
     /// ```
+    #[inline]
     pub fn apply_mut<F>(self, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
@@ -856,6 +869,7 @@ impl<E> EventsMut<'_, E> {
     /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(producer.sequence(), -1);
     /// ```
+    #[inline]
     pub fn try_apply_mut<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -906,6 +920,7 @@ impl<E> EventsMut<'_, E> {
     /// assert_eq!(result, Err(5));
     /// assert_eq!(producer.sequence(), 4);
     /// ```
+    #[inline]
     pub fn try_commit_mut<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
@@ -924,6 +939,7 @@ pub struct Events<'a, E>(AvailableBatch<'a, E>);
 
 impl<E> Events<'_, E> {
     /// Returns the size of this batch
+    #[inline]
     pub fn size(&self) -> i64 {
         self.0.size
     }
@@ -945,6 +961,7 @@ impl<E> Events<'_, E> {
     ///
     /// consumer.wait(10).apply(|event, seq, _| println!("{seq}: {event}"));
     /// ```
+    #[inline]
     pub fn apply<F>(self, mut f: F)
     where
         F: FnMut(&E, i64, bool),
@@ -1001,6 +1018,7 @@ impl<E> Events<'_, E> {
     /// // sequence values start at -1, and the first event is at sequence 0
     /// assert_eq!(consumer.sequence(), -1);
     /// ```
+    #[inline]
     pub fn try_apply<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
@@ -1057,6 +1075,7 @@ impl<E> Events<'_, E> {
     /// assert_eq!(result, Err(5));
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
+    #[inline]
     pub fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
