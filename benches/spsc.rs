@@ -46,13 +46,13 @@ pub fn spsc_benchmark(c: &mut Criterion) {
     for burst_size in BURST_SIZES.into_iter() {
         group.throughput(Throughput::Elements(burst_size));
 
-        // base(&mut group, burst_size as i64);
+        base(&mut group, burst_size as i64);
 
         for pause_ms in PAUSES_MS.into_iter() {
             let inputs = (burst_size as i64, pause_ms);
             let param = format!("burst: {}, pause: {} ms", burst_size, pause_ms);
 
-            // crossbeam(&mut group, inputs, &param);
+            crossbeam(&mut group, inputs, &param);
             disruptor(&mut group, inputs, &param);
             ansa(&mut group, inputs, &param);
         }
@@ -108,11 +108,7 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
                 for _ in 0..size {
                     val = rng.random();
                     let event = Event { data: val };
-                    loop {
-                        if s.try_send(event).is_ok() {
-                            break;
-                        }
-                    }
+                    while s.try_send(event).is_err() {}
                 }
                 while sink.load(Ordering::Acquire) != val {}
             }

@@ -73,9 +73,8 @@ impl<E> RingBuffer<E> {
     #[inline]
     unsafe fn get(&self, sequence: i64) -> *mut E {
         debug_assert!(sequence >= 0);
-        // sequence may be greater than buffer size, so mod to bring it inbounds. Since size is a
-        // power of 2, the calculation is: `sequence & (size - 1)`, and we've already calculated
-        // `(size - 1)`
+        // sequence may be greater than buffer size, so mod to bring it inbounds. Size is a power
+        // of 2, so the calculation is `sequence & (size - 1)`, which is `sequence & self.mask`
         let index = sequence & self.mask;
         // SAFETY: index will be inbounds after mod
         let cell = unsafe { self.buf.get_unchecked(index as usize) };
@@ -94,31 +93,39 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!((size as usize) < self.size());
         let index = seq & self.mask;
+        // whether the requested batch wraps the buffer
+        let wraps = (index + size) as usize >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
-        for _ in 0..size - 1 {
+        let end = seq + size - 1;
+        loop {
+            if seq == end {
+                func(ptr, seq, true);
+                break;
+            }
             func(ptr, seq, false);
             seq += 1;
-            ptr = unsafe { self.get(seq) };
+            if !wraps && cfg!(feature = "tree-borrows") {
+                // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
+                ptr = unsafe { ptr.add(1) };
+            } else {
+                ptr = unsafe { self.get(seq) };
+            }
         }
-        func(ptr, seq, true);
     }
 
     /// See: [`RingBuffer::get`].
     #[inline]
-    pub(crate) unsafe fn try_apply<F, Err>(
-        &self,
-        mut seq: i64,
-        size: i64,
-        mut func: F,
-    ) -> Result<(), Err>
+    pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: i64, func: F) -> Result<(), Err>
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         if size == 0 {
             return Ok(());
         }
+        let mut seq = seq;
+        let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!((size as usize) < self.size());
         let index = seq & self.mask;
@@ -127,23 +134,21 @@ impl<E> RingBuffer<E> {
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
-        if !wraps && cfg!(feature = "tree-borrows") {
-            // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
-            for _ in 0..size - 1 {
-                func(ptr, seq, false)?;
-                seq += 1;
-                ptr = unsafe { ptr.add(1) };
+        let end = seq + size - 1;
+        loop {
+            if seq == end {
+                func(ptr, seq, true)?;
+                break Ok(());
             }
-            func(ptr, seq, true)?;
-        } else {
-            for _ in 0..size - 1 {
-                func(ptr, seq, false)?;
-                seq += 1;
+            func(ptr, seq, false)?;
+            seq += 1;
+            if !wraps && cfg!(feature = "tree-borrows") {
+                // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
+                ptr = unsafe { ptr.add(1) };
+            } else {
                 ptr = unsafe { self.get(seq) };
             }
-            func(ptr, seq, true)?;
         }
-        Ok(())
     }
 
     #[inline]

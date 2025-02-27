@@ -24,4 +24,4 @@ debug = true
 [[bench]]
 name = "spsc"
 harness = false
-required-features = ["cache-padded"]
+required-features = ["cache-padded", "tree-borrows"]

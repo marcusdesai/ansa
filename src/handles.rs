@@ -217,21 +217,6 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_events_mut(&mut self, from_seq: i64, batch_size: i64) -> EventsMut<'_, E> {
-        EventsMut(AvailableBatch {
-            cursor: &mut self.inner.cursor,
-            buffer: &self.inner.buffer,
-            current: from_seq,
-            size: batch_size,
-            set_cursor: |cursor, current, end, ordering| {
-                // Busy wait for the cursor to catch up to the start of claimed sequence.
-                while cursor.sequence.load(Ordering::Acquire) != current {}
-                cursor.sequence.store(end, ordering)
-            },
-        })
-    }
-
-    #[inline]
     fn update_cursor(&self, start: i64, end: i64) {
         while self.inner.cursor.sequence.load(Ordering::Acquire) != start {}
         self.inner.cursor.sequence.store(end, Ordering::Release)
@@ -245,7 +230,8 @@ where
     /// Wait until exactly `size` number of events are available.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    pub fn wait_apply<F>(&mut self, size: u32, f: F)
+    #[inline]
+    pub fn wait_apply<F>(&mut self, size: u32, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -253,7 +239,18 @@ where
         let (from_seq, till_seq) = self.wait_bounds(size as i64);
         self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
         debug_assert!(self.inner.barrier.sequence() >= till_seq);
-        self.as_events_mut(from_seq, size as i64).apply_mut(f)
+        fence(Ordering::Acquire);
+        // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
+        // before this handle has finished interacting with it. Construction of the disruptor
+        // guarantees producers don't overlap with other handles, thus no mutable aliasing.
+        unsafe {
+            self.inner.buffer.apply(from_seq + 1, size as i64, |ptr, seq, end| {
+                // SAFETY: deref guaranteed safe by ringbuffer initialisation
+                let event: &mut E = &mut *ptr;
+                f(event, seq, end)
+            })
+        };
+        self.update_cursor(from_seq, from_seq + size as i64)
     }
 }
 
@@ -268,7 +265,8 @@ where
     /// `size` values larger than the buffer will cause permanent stalls.
     ///
     /// Wait::Error must be convertible to returned error
-    pub fn try_wait_apply<F, Err>(&mut self, size: u32, f: F) -> Result<(), Err>
+    #[inline]
+    pub fn try_wait_apply<F, Err>(&mut self, size: u32, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
         Err: From<W::Error>,
@@ -278,11 +276,21 @@ where
         self.inner
             .wait_strategy
             .try_wait(till_seq, &self.inner.barrier)
-            .inspect_err(|_| self.update_cursor(from_seq, till_seq))?;
+            .inspect_err(|_| self.update_cursor(from_seq, from_seq + size as i64))?;
         debug_assert!(self.inner.barrier.sequence() >= till_seq);
-        self.as_events_mut(from_seq, size as i64)
-            .try_apply_mut(f)
-            .inspect_err(|_| self.update_cursor(from_seq, till_seq))
+        fence(Ordering::Acquire);
+        // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
+        // before this handle has finished interacting with it. Construction of the disruptor
+        // guarantees producers don't overlap with other handles, thus no mutable aliasing.
+        let result = unsafe {
+            self.inner.buffer.try_apply(from_seq + 1, size as i64, |ptr, seq, end| {
+                // SAFETY: deref guaranteed safe by ringbuffer initialisation
+                let event: &mut E = &mut *ptr;
+                f(event, seq, end)
+            })
+        };
+        self.update_cursor(from_seq, from_seq + size as i64);
+        result
     }
 }
 
@@ -653,7 +661,6 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             buffer: &self.buffer,
             current: from_seq,
             size: batch_size,
-            set_cursor: |cursor, _, end, ordering| cursor.sequence.store(end, ordering),
         }
     }
 }
@@ -735,7 +742,6 @@ struct AvailableBatch<'a, E> {
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
     size: i64,
-    set_cursor: fn(&Arc<Cursor>, i64, i64, Ordering),
 }
 
 impl<E> AvailableBatch<'_, E> {
@@ -750,7 +756,7 @@ impl<E> AvailableBatch<'_, E> {
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.apply(self.current + 1, self.size, f) };
         let seq_end = self.current + self.size;
-        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        self.cursor.sequence.store(seq_end, Ordering::Release);
     }
 
     #[inline]
@@ -764,7 +770,7 @@ impl<E> AvailableBatch<'_, E> {
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.try_apply(self.current + 1, self.size, f)? };
         let seq_end = self.current + self.size;
-        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        self.cursor.sequence.store(seq_end, Ordering::Release);
         Ok(())
     }
 
@@ -779,13 +785,12 @@ impl<E> AvailableBatch<'_, E> {
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
             self.buffer.try_apply(self.current + 1, self.size, |ptr, seq, end| {
-                f(ptr, seq, end).inspect_err(|_| {
-                    (self.set_cursor)(self.cursor, self.current, seq - 1, Ordering::Release);
-                })
+                f(ptr, seq, end)
+                    .inspect_err(|_| self.cursor.sequence.store(seq - 1, Ordering::Release))
             })?;
         }
         let seq_end = self.current + self.size;
-        (self.set_cursor)(self.cursor, self.current, seq_end, Ordering::Release);
+        self.cursor.sequence.store(seq_end, Ordering::Release);
         Ok(())
     }
 }
