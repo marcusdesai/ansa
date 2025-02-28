@@ -96,7 +96,7 @@ pub trait Waiting {
     /// }
     ///
     /// let timeout = MyWaiter.with_timeout(Duration::from_millis(1));
-    /// assert_eq!(timeout.duration(), 1_000_000); // duration in nanos
+    /// assert_eq!(timeout.nanos(), 1_000_000); // duration in nanos
     /// ```
     fn with_timeout(self, duration: Duration) -> Timeout<Self>
     where
@@ -402,7 +402,7 @@ impl WaitSleep {
     #[inline]
     pub const fn new(duration: Duration) -> Self {
         WaitSleep {
-            nanos: duration.as_nanos() as u64,
+            nanos: truncate_u128(duration.as_nanos()),
         }
     }
 }
@@ -447,8 +447,8 @@ impl<W> WaitPhased<W> {
     ///
     /// `spin_duration` and `yield_duration` are truncated to `u64::MAX` nanoseconds.
     pub const fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
-        let spin_nanos = spin_duration.as_nanos() as u64;
-        let yield_nanos = spin_nanos.saturating_add(yield_duration.as_nanos() as u64);
+        let spin_nanos = truncate_u128(spin_duration.as_nanos());
+        let yield_nanos = spin_nanos.saturating_add(truncate_u128(yield_duration.as_nanos()));
         WaitPhased {
             spin_nanos,
             yield_nanos,
@@ -549,15 +549,28 @@ impl<W> Timeout<W> {
     /// Timings should not be treated as exact.
     ///
     /// `duration` will be truncated to `u64::MAX` nanoseconds.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::wait::{Timeout, WaitBusy};
+    /// use std::time::Duration;
+    ///
+    /// // duration of way more than u64::MAX nanoseconds
+    /// let duration = Duration::from_secs(u64::MAX);
+    ///
+    /// let timeout = Timeout::new(duration, WaitBusy);
+    /// // duration till timeout truncated to u64::MAX nanoseconds
+    /// assert_eq!(timeout.nanos(), u64::MAX);
+    /// ```
     pub const fn new(duration: Duration, strategy: W) -> Self {
         Timeout {
-            nanos: duration.as_nanos() as u64,
+            nanos: truncate_u128(duration.as_nanos()),
             strategy,
         }
     }
 
     /// Returns the duration till timeout, in nanoseconds.
-    pub const fn duration(&self) -> u64 {
+    pub const fn nanos(&self) -> u64 {
         self.nanos
     }
 }
@@ -585,6 +598,14 @@ where
     }
 }
 
+#[inline]
+const fn truncate_u128(n: u128) -> u64 {
+    if n > u64::MAX as u128 {
+        return u64::MAX;
+    }
+    n as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +620,11 @@ mod tests {
         assert_eq!(size_of::<WaitSleep>(), 8);
         assert_eq!(size_of::<WaitPhased<WaitBusy>>(), 16);
         assert_eq!(size_of::<Timeout<WaitBusy>>(), 8);
+    }
+
+    #[test]
+    fn test() {
+        let duration = Duration::from_secs(u64::MAX);
+        assert_eq!(truncate_u128(duration.as_nanos()), u64::MAX);
     }
 }
