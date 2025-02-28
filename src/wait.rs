@@ -96,7 +96,7 @@ pub trait Waiting {
     /// }
     ///
     /// let timeout = MyWaiter.with_timeout(Duration::from_millis(1));
-    /// assert_eq!(timeout.nanos(), 1_000_000); // duration in nanos
+    /// assert_eq!(timeout.nanos_till(), 1_000_000); // duration in nanos
     /// ```
     fn with_timeout(self, duration: Duration) -> Timeout<Self>
     where
@@ -108,24 +108,19 @@ pub trait Waiting {
 
 /// Implement to provide a wait loop which runs as a handle waits for a sequence.
 ///
-/// Then list rules...
-///
 /// If a wait strategy does not require either control over loop behaviour, or carrying state
 /// across loop iterations, then prefer implementing [`Waiting`] instead, as it provides a safe
 /// interface.
 ///
-/// well-behaved, won't cause UB if not observed:
-/// should return as soon as barrier >= desired
-/// safety:
-/// must not return while barrier < desired
-/// must return with the last barrier seq value
+/// A well-behaved implementation should return as soon as `barrier sequence >= desired_seq`, but
+/// this is not a safety condition.
 ///
 /// # Safety
 ///
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. Valid implementations must satisfy
 /// the following conditions:
-/// 1) `wait` may only return when `barrier sequence >= desired_seq` is true.
+/// 1) `wait` must not return while `barrier sequence < desired_seq`.
 /// 2) `wait` must return the last read `barrier sequence`.
 ///
 /// If `wait` does not abide by these conditions, then writes to the ring buffer may overlap with
@@ -184,8 +179,10 @@ pub unsafe trait WaitStrategy {
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
     /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
+    /// Well-behaved implementations should return as soon as `barrier sequence >= desired_seq`.
+    ///
     /// Implementations must satisfy the following conditions:
-    /// 1) May only return when `barrier sequence >= desired_seq` is true.
+    /// 1) Must not return while `barrier sequence < desired_seq`.
     /// 2) Must return the last read `barrier sequence`.
     ///
     /// The return value may be used by handles to determine which buffer elements to access, but
@@ -216,12 +213,15 @@ where
 /// carrying state across loop iterations, then prefer implementing [`Waiting`] instead, as it
 /// provides a safe interface.
 ///
+/// A well-behaved implementation should return as soon as `barrier sequence >= desired_seq`, but
+/// this is not a safety condition.
+///
 /// # Safety
 ///
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. Valid implementations must
 /// satisfy the following conditions:
-/// 1) `try_wait` may only successfully return when `barrier sequence >= desired_seq` is true.
+/// 1) `try_wait` must not successfully return while `barrier sequence < desired_seq`.
 /// 2) `try_wait`, if successful, must return the last read `barrier sequence`.
 ///
 /// If `try_wait` does not abide by these conditions, then writes to the ring buffer may overlap
@@ -259,7 +259,9 @@ where
 /// }
 /// ```
 ///
-/// Implementing a no wait strategy is also possible (though not necessary, see: `wait_range`).
+/// Implementing a no wait strategy is also possible (though not necessary if using 
+/// [`Producer::wait_range`](crate::Producer::wait_range) or
+/// [`Consumer::wait_range`](crate::Consumer::wait_range)).
 /// ```
 /// use ansa::{Barrier, wait::TryWaitStrategy};
 ///
@@ -315,8 +317,10 @@ pub unsafe trait TryWaitStrategy {
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
     /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
+    /// Well-behaved implementations should return as soon as `barrier sequence >= desired_seq`.
+    ///
     /// Implementations must satisfy the following conditions:
-    /// 1) May only successfully return when `barrier sequence >= desired_seq` is true.
+    /// 1) Must not successfully return while `barrier sequence < desired_seq`.
     /// 2) If successful, must return the last read `barrier sequence`.
     ///
     /// No conditions are placed on returning errors.
@@ -399,11 +403,26 @@ impl WaitSleep {
     /// Construct a [`WaitSleep`] strategy which will sleep for the given `duration`.
     ///
     /// `duration` will be truncated to `u64::MAX` nanoseconds.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::wait::WaitSleep;
+    /// use std::time::Duration;
+    ///
+    /// let duration = Duration::from_millis(u64::MAX);
+    /// let strategy = WaitSleep::new(duration);
+    /// assert_eq!(strategy.sleep_nanos(), u64::MAX);
+    /// ```
     #[inline]
     pub const fn new(duration: Duration) -> Self {
         WaitSleep {
             nanos: truncate_u128(duration.as_nanos()),
         }
+    }
+
+    /// Returns the number of nanoseconds this strategy will sleep for when waiting.
+    pub const fn sleep_nanos(&self) -> u64 {
+        self.nanos
     }
 }
 
@@ -446,14 +465,47 @@ impl<W> WaitPhased<W> {
     /// for yielding to the OS.
     ///
     /// `spin_duration` and `yield_duration` are truncated to `u64::MAX` nanoseconds.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::wait::{WaitBusy, WaitPhased};
+    /// use std::time::Duration;
+    ///
+    /// let spin_duration = Duration::from_millis(1);
+    /// let yield_duration = Duration::from_secs(1);
+    ///
+    /// let strategy = WaitPhased::new(spin_duration, yield_duration, WaitBusy);
+    /// assert_eq!(strategy.spin_nanos(), 10_u64.pow(6));
+    /// assert_eq!(strategy.yield_nanos(), 10_u64.pow(9));
+    /// ```
     pub const fn new(spin_duration: Duration, yield_duration: Duration, fallback: W) -> Self {
         let spin_nanos = truncate_u128(spin_duration.as_nanos());
-        let yield_nanos = spin_nanos.saturating_add(truncate_u128(yield_duration.as_nanos()));
+        let yield_nanos = truncate_u128(yield_duration.as_nanos());
         WaitPhased {
             spin_nanos,
             yield_nanos,
             fallback,
         }
+    }
+
+    /// Return the number of nanoseconds the strategy will busy-spin for.
+    pub const fn spin_nanos(&self) -> u64 {
+        self.spin_nanos
+    }
+
+    /// Return the number of nanoseconds the strategy will yield for.
+    pub const fn yield_nanos(&self) -> u64 {
+        self.yield_nanos
+    }
+
+    /// Return a reference to the fallback strategy.
+    pub const fn fallback(&self) -> &W {
+        &self.fallback
+    }
+
+    /// Return the fallback strategy.
+    pub fn into_fallback(self) -> W {
+        self.fallback
     }
 }
 
@@ -465,7 +517,7 @@ where
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
         let timer = Instant::now();
         let spin_dur = Duration::from_nanos(self.spin_nanos);
-        let yield_dur = Duration::from_nanos(self.yield_nanos);
+        let yield_dur = Duration::from_nanos(self.yield_nanos) + spin_dur;
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -491,7 +543,7 @@ where
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let timer = Instant::now();
         let spin_dur = Duration::from_nanos(self.spin_nanos);
-        let yield_dur = Duration::from_nanos(self.yield_nanos);
+        let yield_dur = Duration::from_nanos(self.yield_nanos) + spin_dur;
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -560,7 +612,7 @@ impl<W> Timeout<W> {
     ///
     /// let timeout = Timeout::new(duration, WaitBusy);
     /// // duration till timeout truncated to u64::MAX nanoseconds
-    /// assert_eq!(timeout.nanos(), u64::MAX);
+    /// assert_eq!(timeout.nanos_till(), u64::MAX);
     /// ```
     pub const fn new(duration: Duration, strategy: W) -> Self {
         Timeout {
@@ -570,7 +622,7 @@ impl<W> Timeout<W> {
     }
 
     /// Returns the duration till timeout, in nanoseconds.
-    pub const fn nanos(&self) -> u64 {
+    pub const fn nanos_till(&self) -> u64 {
         self.nanos
     }
 }
