@@ -87,6 +87,11 @@ where
 }
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
+    /// Returns `true` if this producer is the lead producer.
+    pub const fn is_lead(&self) -> bool {
+        LEAD
+    }
+
     /// Returns the count of [`MultiProducer`]s associated with this cursor.
     ///
     /// **Important:** Care should be taken when performing actions based upon this number, as any
@@ -304,6 +309,11 @@ pub struct Producer<E, W, const LEAD: bool> {
 }
 
 impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
+    /// Returns `true` if this producer is the lead producer.
+    pub const fn is_lead(&self) -> bool {
+        LEAD
+    }
+
     /// Returns the current sequence value for this producer's cursor.
     ///
     /// # Examples
@@ -314,7 +324,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// assert_eq!(producer.sequence(), -1);
     ///
     /// // move the producer up by 10
-    /// producer.wait(10).apply_mut(|_, _, _| ());
+    /// producer.wait(10).for_each(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     /// ```
     #[inline]
@@ -470,11 +480,11 @@ impl<E, W> Consumer<E, W> {
     ///
     /// // move the producer up by 10, otherwise the consumer will block the
     /// // thread while waiting for available events
-    /// producer.wait(10).apply_mut(|_, _, _| ());
+    /// producer.wait(10).for_each(|_, _, _| ());
     /// assert_eq!(producer.sequence(), 9);
     ///
     /// // now we can move the consumer
-    /// consumer.wait(5).apply(|_, _, _| ());
+    /// consumer.wait(5).for_each(|_, _, _| ());
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
     #[inline]
@@ -545,7 +555,7 @@ where
     /// // consumer.wait_range(1..);
     ///
     /// // move the lead producer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
     /// let events = consumer.wait_range(..=10); // wait for a batch of at most 10 events
     /// assert_eq!(events.size(), 10);
@@ -594,7 +604,7 @@ where
     ///
     /// let (mut producer, consumer) = ansa::spsc(64, || 0);
     /// // move the lead producer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
     /// let timeout = Timeout::new(Duration::from_millis(1), WaitBusy);
     /// let mut consumer = consumer.set_wait_strategy(timeout);
@@ -820,10 +830,10 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).apply_mut(|event, seq, _| *event = seq as u32);
+    /// producer.wait(10).for_each(|event, seq, _| *event = seq as u32);
     /// ```
     #[inline]
-    pub fn apply_mut<F>(self, mut f: F)
+    pub fn for_each<F>(self, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
@@ -849,7 +859,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).try_apply_mut(|_, seq, _| {
+    /// producer.wait(10).try_for_each(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -863,7 +873,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// let result = producer.wait(10).try_apply_mut(|_, seq, _| {
+    /// let result = producer.wait(10).try_for_each(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -875,7 +885,7 @@ impl<E> EventsMut<'_, E> {
     /// assert_eq!(producer.sequence(), -1);
     /// ```
     #[inline]
-    pub fn try_apply_mut<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_for_each<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
@@ -901,7 +911,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// producer.wait(10).try_commit_mut(|_, seq, _| {
+    /// producer.wait(10).try_commit_each(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -915,7 +925,7 @@ impl<E> EventsMut<'_, E> {
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0u32);
     ///
-    /// let result = producer.wait(10).try_commit_mut(|_, seq, _| {
+    /// let result = producer.wait(10).try_commit_each(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -926,7 +936,7 @@ impl<E> EventsMut<'_, E> {
     /// assert_eq!(producer.sequence(), 4);
     /// ```
     #[inline]
-    pub fn try_commit_mut<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_commit_each<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
@@ -962,12 +972,12 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
-    /// consumer.wait(10).apply(|event, seq, _| println!("{seq}: {event}"));
+    /// consumer.wait(10).for_each(|event, seq, _| println!("{seq}: {event}"));
     /// ```
     #[inline]
-    pub fn apply<F>(self, mut f: F)
+    pub fn for_each<F>(self, mut f: F)
     where
         F: FnMut(&E, i64, bool),
     {
@@ -993,9 +1003,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
-    /// consumer.wait(10).try_apply(|_, seq, _| {
+    /// consumer.wait(10).try_for_each(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -1010,9 +1020,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
-    /// let result = consumer.wait(10).try_apply(|_, seq, _| {
+    /// let result = consumer.wait(10).try_for_each(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -1024,7 +1034,7 @@ impl<E> Events<'_, E> {
     /// assert_eq!(consumer.sequence(), -1);
     /// ```
     #[inline]
-    pub fn try_apply<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_for_each<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
@@ -1051,9 +1061,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
-    /// consumer.wait(10).try_commit(|_, seq, _| {
+    /// consumer.wait(10).try_commit_each(|_, seq, _| {
     ///     match seq {
     ///         100 => Err(seq),
     ///         _ => Ok(())
@@ -1068,9 +1078,9 @@ impl<E> Events<'_, E> {
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0u32);
     ///
     /// // move the producer so that events are available to the following consumer
-    /// producer.wait(20).apply_mut(|_, _, _| ());
+    /// producer.wait(20).for_each(|_, _, _| ());
     ///
-    /// let result = consumer.wait(10).try_commit(|_, seq, _| {
+    /// let result = consumer.wait(10).try_commit_each(|_, seq, _| {
     ///     match seq {
     ///         5 => Err(seq),
     ///         _ => Ok(())
@@ -1081,7 +1091,7 @@ impl<E> Events<'_, E> {
     /// assert_eq!(consumer.sequence(), 4);
     /// ```
     #[inline]
-    pub fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
+    pub fn try_commit_each<F, Err>(self, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {

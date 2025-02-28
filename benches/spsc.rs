@@ -163,7 +163,7 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
     let sink_clone = Arc::clone(&sink);
     let consumer_thread = thread::spawn(move || {
         while let Ok(events) = consumer.try_wait_range(1..) {
-            events.apply(|event, _, _| sink_clone.store(event.data, Ordering::Release))
+            events.for_each(|event, _, _| sink_clone.store(event.data, Ordering::Release))
         }
     });
 
@@ -174,7 +174,7 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                producer.wait(size as u32).apply_mut(|event, _, _| {
+                producer.wait(size as u32).for_each(|event, _, _| {
                     val = rng.random();
                     event.data = val
                 });
