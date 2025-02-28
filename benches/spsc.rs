@@ -2,8 +2,7 @@
 // https://github.com/nicholassm/disruptor-rs/blob/bd15292e34d2c4bb53cba5709e0cf23e9753ebb8/benches/spsc.rs
 // authored by: Nicholas Schultz-Møller
 
-use ansa::wait::{Timeout, WaitBusy};
-use ansa::{DisruptorBuilder, Follows, Handle};
+use ansa::wait::{WaitBusy, Waiting};
 use criterion::measurement::WallTime;
 use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
@@ -60,12 +59,11 @@ pub fn spsc_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-// Synthetic benchmark to measure the overhead of the measurement itself.
 fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
-    let benchmark_id = BenchmarkId::new("base", burst_size);
 
+    let benchmark_id = BenchmarkId::new("base", burst_size);
     group.bench_with_input(benchmark_id, &burst_size, move |b, &size| {
         b.iter_custom(|iters| {
             let start = Instant::now();
@@ -85,6 +83,7 @@ fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
 fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
+
     let (s, r) = bounded::<Event>(QUEUE_SIZE);
     let receiver = {
         let sink = Arc::clone(&sink);
@@ -98,7 +97,6 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
     };
 
     let benchmark_id = BenchmarkId::new("Crossbeam", &param);
-
     group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(pause_ms);
@@ -135,7 +133,6 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         .build();
 
     let benchmark_id = BenchmarkId::new("disruptor", &param);
-
     group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(pause_ms);
@@ -159,30 +156,18 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
 
-    let mut handles = DisruptorBuilder::new(QUEUE_SIZE, Event::default)
-        .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-        .wait_strategy(WaitBusy)
-        .build()
-        .unwrap();
+    let (producer, consumer) = ansa::spsc(QUEUE_SIZE, Event::default);
+    let mut producer = producer.set_wait_strategy(WaitBusy);
+    let mut consumer = consumer.set_wait_strategy(WaitBusy.with_timeout(Duration::from_millis(20)));
 
-    let consumer_thread = {
-        let sink = Arc::clone(&sink);
-        let consumer = handles.take_consumer(0).unwrap();
-        let mut consumer =
-            consumer.set_wait_strategy(Timeout::new(Duration::from_millis(20), WaitBusy));
-
-        thread::spawn(move || loop {
-            match consumer.try_wait_range(1..) {
-                Ok(events) => events.apply(|event, _, _| sink.store(event.data, Ordering::Release)),
-                Err(_) => break,
-            }
-        })
-    };
-
-    let mut producer = handles.take_lead().unwrap();
+    let sink_clone = Arc::clone(&sink);
+    let consumer_thread = thread::spawn(move || {
+        while let Ok(events) = consumer.try_wait_range(1..) {
+            events.apply(|event, _, _| sink_clone.store(event.data, Ordering::Release))
+        }
+    });
 
     let benchmark_id = BenchmarkId::new("ansa", &param);
-
     group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(pause_ms);

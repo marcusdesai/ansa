@@ -75,6 +75,35 @@ use std::time::{Duration, Instant};
 pub trait Waiting {
     /// Called on every iteration of the wait loop.
     fn waiting(&self);
+
+    /// Construct a `Timeout` using this strategy.
+    ///
+    /// `duration` sets the amount of time after which the strategy will time out. Timeout will not
+    /// occur before `duration` elapses, but may not occur immediately after that point either.
+    /// Timings should not be treated as exact.
+    ///
+    /// `duration` will be truncated to `u64::MAX` nanoseconds.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::time::Duration;
+    /// use ansa::wait::Waiting;
+    ///
+    /// struct MyWaiter;
+    ///
+    /// impl Waiting for MyWaiter {
+    ///     fn waiting(&self) {} // busy-spin
+    /// }
+    ///
+    /// let timeout = MyWaiter.with_timeout(Duration::from_millis(1));
+    /// assert_eq!(timeout.duration(), 1_000_000); // duration in nanos
+    /// ```
+    fn with_timeout(self, duration: Duration) -> Timeout<Self>
+    where
+        Self: Sized,
+    {
+        Timeout::new(duration, self)
+    }
 }
 
 /// Implement to provide a wait loop which runs as a handle waits for a sequence.
@@ -525,6 +554,11 @@ impl<W> Timeout<W> {
             nanos: duration.as_nanos() as u64,
             strategy,
         }
+    }
+
+    /// Returns the duration till timeout, in nanoseconds.
+    pub const fn duration(&self) -> u64 {
+        self.nanos
     }
 }
 
