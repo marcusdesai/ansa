@@ -17,11 +17,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUE_SIZE: usize = 1024;
-const BURST_SIZES: [u64; 1] = [128];
-// const BURST_SIZES: [u64; 3] = [1, 10, 100];
-const PAUSES_MS: [u64; 1] = [0];
-// const PAUSES_MS: [u64; 3] = [0, 1, 10];
-
+// const BURST_SIZES: [u64; 1] = [256];
+const BURST_SIZES: [u64; 4] = [1, 10, 100, 256];
+// const PAUSES_MS: [u64; 1] = [0];
+const PAUSES_MS: [u64; 3] = [0, 1, 10];
 const RNG_SEED: u64 = 10;
 
 #[derive(Copy, Clone, Default)]

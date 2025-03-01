@@ -91,10 +91,10 @@ impl<E> RingBuffer<E> {
             return;
         }
         debug_assert!(seq >= 0);
-        debug_assert!((size as usize) < self.size());
+        debug_assert!(size < self.size());
         let index = seq & self.mask;
         // whether the requested batch wraps the buffer
-        let wraps = (index + size) as usize >= self.size();
+        let wraps = index + size >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
@@ -127,10 +127,10 @@ impl<E> RingBuffer<E> {
         let mut seq = seq;
         let mut func = func;
         debug_assert!(seq >= 0);
-        debug_assert!((size as usize) < self.size());
+        debug_assert!(size < self.size());
         let index = seq & self.mask;
         // whether the requested batch wraps the buffer
-        let wraps = (index + size) as usize >= self.size();
+        let wraps = index + size >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
@@ -151,8 +151,10 @@ impl<E> RingBuffer<E> {
         }
     }
 
+    /// Returns the number of allocated buffer elements
     #[inline]
-    pub(crate) const fn size(&self) -> usize {
-        self.buf.len()
+    pub(crate) const fn size(&self) -> i64 {
+        // conversion fine as allocations cannot be larger than i64::MAX
+        self.buf.len() as i64
     }
 }

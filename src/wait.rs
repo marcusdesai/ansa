@@ -96,7 +96,7 @@ pub trait Waiting {
     /// }
     ///
     /// let timeout = MyWaiter.with_timeout(Duration::from_millis(1));
-    /// assert_eq!(timeout.nanos_till(), 1_000_000); // duration in nanos
+    /// assert_eq!(timeout.nanos_till(), 1_000_000); // 1 ms in nanos
     /// ```
     fn with_timeout(self, duration: Duration) -> Timeout<Self>
     where
@@ -259,7 +259,7 @@ where
 /// }
 /// ```
 ///
-/// Implementing a no wait strategy is also possible (though not necessary if using 
+/// Implementing a no wait strategy is also possible (though not necessary if using
 /// [`Producer::wait_range`](crate::Producer::wait_range) or
 /// [`Consumer::wait_range`](crate::Consumer::wait_range)).
 /// ```
@@ -515,9 +515,9 @@ where
     W: WaitStrategy,
 {
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64 {
-        let timer = Instant::now();
         let spin_dur = Duration::from_nanos(self.spin_nanos);
         let yield_dur = Duration::from_nanos(self.yield_nanos) + spin_dur;
+        let timer = Instant::now();
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -541,9 +541,9 @@ where
     type Error = W::Error;
 
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
-        let timer = Instant::now();
         let spin_dur = Duration::from_nanos(self.spin_nanos);
         let yield_dur = Duration::from_nanos(self.yield_nanos) + spin_dur;
+        let timer = Instant::now();
         loop {
             let barrier_seq = barrier.sequence();
             if barrier_seq >= desired_seq {
@@ -625,6 +625,11 @@ impl<W> Timeout<W> {
     pub const fn nanos_till(&self) -> u64 {
         self.nanos
     }
+
+    /// Returns the wrapped wait strategy.
+    pub fn into_inner(self) -> W {
+        self.strategy
+    }
 }
 
 // SAFETY: try_wait only successfully returns with barrier_seq once barrier_seq >= desired_seq
@@ -634,6 +639,7 @@ where
 {
     type Error = TimedOut;
 
+    #[inline]
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
         let duration = Duration::from_nanos(self.nanos);
         let timer = Instant::now();
@@ -675,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn test() {
+    fn test_truncate_u128() {
         let duration = Duration::from_secs(u64::MAX);
         assert_eq!(truncate_u128(duration.as_nanos()), u64::MAX);
     }
