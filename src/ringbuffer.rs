@@ -94,7 +94,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(size < self.size());
         let index = seq & self.mask;
         // whether the requested batch wraps the buffer
-        let wraps = index + size >= self.size();
+        let wraps = index + size - 1 >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 
@@ -130,7 +130,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(size < self.size());
         let index = seq & self.mask;
         // whether the requested batch wraps the buffer
-        let wraps = index + size >= self.size();
+        let wraps = index + size - 1 >= self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
         let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
 

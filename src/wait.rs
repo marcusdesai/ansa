@@ -524,7 +524,7 @@ where
                 break barrier_seq;
             }
             match timer.elapsed() {
-                dur if dur < spin_dur => (),
+                dur if dur < spin_dur => std::hint::spin_loop(),
                 dur if dur < yield_dur => std::thread::yield_now(),
                 _ => return self.fallback.wait(desired_seq, barrier),
             }
@@ -550,7 +550,7 @@ where
                 break Ok(barrier_seq);
             }
             match timer.elapsed() {
-                dur if dur < spin_dur => (),
+                dur if dur < spin_dur => std::hint::spin_loop(),
                 dur if dur < yield_dur => std::thread::yield_now(),
                 _ => return self.fallback.try_wait(desired_seq, barrier),
             }

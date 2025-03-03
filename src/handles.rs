@@ -705,7 +705,7 @@ where
     {
         let batch_min = match range.start_bound() {
             Bound::Included(b) => *b,
-            Bound::Excluded(b) => *b + 1,
+            Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
         debug_assert!((batch_min as i64) < self.buffer.size());
@@ -714,7 +714,7 @@ where
         debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
             Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min((*b - 1) as i64),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1) as i64),
             Bound::Unbounded => barrier_seq - from_seq,
         };
         self.as_available(from_seq, batch_max)
@@ -741,7 +741,7 @@ where
     {
         let batch_min = match range.start_bound() {
             Bound::Included(b) => *b,
-            Bound::Excluded(b) => *b + 1,
+            Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
         debug_assert!((batch_min as i64) < self.buffer.size());
@@ -750,7 +750,7 @@ where
         debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
             Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min((*b - 1) as i64),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1) as i64),
             Bound::Unbounded => barrier_seq - from_seq,
         };
         Ok(self.as_available(from_seq, batch_max))
@@ -875,24 +875,18 @@ impl<E> EventsMut<'_, E> {
     ///         _ => Ok(())
     ///     }
     /// })?;
-    ///
     /// assert_eq!(producer.sequence(), 9);
-    /// # Ok::<(), i64>(())
-    /// ```
-    /// On failure, the cursor will not be moved.
-    /// ```
-    /// let (mut producer, _) = ansa::spsc(64, || 0);
     ///
     /// let result = producer.wait(10).try_for_each(|_, seq, _| {
     ///     match seq {
-    ///         5 => Err(seq),
+    ///         15 => Err(seq),
     ///         _ => Ok(())
     ///     }
     /// });
-    ///
-    /// assert_eq!(result, Err(5));
-    /// // sequence values start at -1, and the first event is at sequence 0
-    /// assert_eq!(producer.sequence(), -1);
+    /// assert_eq!(result, Err(15));
+    /// // If an error is returned, the cursor will not be moved.
+    /// assert_eq!(producer.sequence(), 9);
+    /// # Ok::<(), i64>(())
     /// ```
     #[inline]
     pub fn try_for_each<F, Err>(self, mut f: F) -> Result<(), Err>
