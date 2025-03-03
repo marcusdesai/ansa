@@ -80,6 +80,7 @@ where
                 barrier: self.inner.barrier.clone(),
                 buffer: Arc::clone(&self.inner.buffer),
                 wait_strategy: self.inner.wait_strategy.clone(),
+                available: self.inner.available,
             },
             claim: Arc::clone(&self.claim),
         }
@@ -631,6 +632,7 @@ pub(crate) struct HandleInner<E, W, const LEAD: bool> {
     pub(crate) barrier: Barrier,
     pub(crate) buffer: Arc<RingBuffer<E>>,
     pub(crate) wait_strategy: W,
+    pub(crate) available: i64,
 }
 
 impl<E, W> HandleInner<E, W, false> {
@@ -659,6 +661,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             barrier: self.barrier,
             buffer: self.buffer,
             wait_strategy,
+            available: self.available,
         }
     }
 
@@ -675,7 +678,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_available(&mut self, from_seq: i64, batch_size: i64) -> Batch<'_, E> {
+    fn as_batch(&mut self, from_seq: i64, batch_size: i64) -> Batch<'_, E> {
         Batch {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
@@ -691,11 +694,14 @@ where
 {
     #[inline]
     fn wait(&mut self, size: u32) -> Batch<'_, E> {
-        debug_assert!((size as i64) < self.buffer.size());
+        debug_assert!(self.buffer.size() >= size.into());
         let (from_seq, till_seq) = self.wait_bounds(size.into());
-        self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= till_seq);
-        self.as_available(from_seq, size.into())
+        if till_seq <= self.available {
+            return self.as_batch(from_seq, size.into());
+        }
+        self.available = self.wait_strategy.wait(till_seq, &self.barrier);
+        debug_assert!(self.available >= till_seq);
+        self.as_batch(from_seq, size.into())
     }
 
     #[inline]
@@ -708,16 +714,16 @@ where
             Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
-        debug_assert!((batch_min as i64) < self.buffer.size());
-        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
+        debug_assert!(self.buffer.size() >= batch_min.into());
+        let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
         let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1) as i64),
+            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
             Bound::Unbounded => barrier_seq - from_seq,
         };
-        self.as_available(from_seq, batch_max)
+        self.as_batch(from_seq, batch_max)
     }
 }
 
@@ -727,11 +733,14 @@ where
 {
     #[inline]
     fn try_wait(&mut self, size: u32) -> Result<Batch<'_, E>, W::Error> {
-        debug_assert!((size as i64) < self.buffer.size());
+        debug_assert!(self.buffer.size() >= size.into());
         let (from_seq, till_seq) = self.wait_bounds(size.into());
-        self.wait_strategy.try_wait(till_seq, &self.barrier)?;
+        if till_seq <= self.available {
+            return Ok(self.as_batch(from_seq, size.into()));
+        }
+        self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
-        Ok(self.as_available(from_seq, size.into()))
+        Ok(self.as_batch(from_seq, size.into()))
     }
 
     #[inline]
@@ -744,16 +753,16 @@ where
             Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
-        debug_assert!((batch_min as i64) < self.buffer.size());
-        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
+        debug_assert!(self.buffer.size() >= batch_min.into());
+        let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
         let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min(*b as i64),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1) as i64),
+            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
             Bound::Unbounded => barrier_seq - from_seq,
         };
-        Ok(self.as_available(from_seq, batch_max))
+        Ok(self.as_batch(from_seq, batch_max))
     }
 }
 
@@ -1198,8 +1207,8 @@ mod tests {
     // change the values in this test.
     #[test]
     fn sizes() {
-        assert_eq!(size_of::<Consumer<u8, WaitBusy>>(), 32);
-        assert_eq!(size_of::<Producer<u8, WaitBusy, true>>(), 32);
-        assert_eq!(size_of::<MultiProducer<u8, WaitBusy, true>>(), 40);
+        assert_eq!(size_of::<Consumer<u8, WaitBusy>>(), 40);
+        assert_eq!(size_of::<Producer<u8, WaitBusy, true>>(), 40);
+        assert_eq!(size_of::<MultiProducer<u8, WaitBusy, true>>(), 48);
     }
 }

@@ -322,6 +322,7 @@ where
             barrier,
             buffer,
             wait_strategy: self.wait_strategy.clone(),
+            available: 0,
         };
 
         Ok(DisruptorHandles {
@@ -398,6 +399,7 @@ where
                 barrier,
                 buffer: Arc::clone(buffer),
                 wait_strategy: self.wait_strategy.clone(),
+                available: 0,
             };
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {

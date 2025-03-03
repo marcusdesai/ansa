@@ -184,9 +184,6 @@ pub unsafe trait WaitStrategy {
     /// Implementations must satisfy the following conditions:
     /// 1) Must not return while `barrier sequence < desired_seq`.
     /// 2) Must return the last read `barrier sequence`.
-    ///
-    /// The return value may be used by handles to determine which buffer elements to access, but
-    /// this behaviour is not guaranteed.
     fn wait(&self, desired_seq: i64, barrier: &Barrier) -> i64;
 }
 
@@ -324,9 +321,6 @@ pub unsafe trait TryWaitStrategy {
     /// 2) If successful, must return the last read `barrier sequence`.
     ///
     /// No conditions are placed on returning errors.
-    ///
-    /// The return value may be used by handles to read or write elements to the ring buffer, but
-    /// this behaviour is not guaranteed.
     fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error>;
 }
 
