@@ -13,7 +13,7 @@ cargo install --locked samply
 To build the example binary, run:
 
 ```commandline
-cargo build --profile profiling --features "cache-padded tree-borrows" --example spsc
+cargo build --profile profiling --features "cache-padded" --example spsc
 ```
 
 To profile, run:
@@ -27,5 +27,5 @@ samply record ./target/profiling/examples/spsc
 For a benchmark, `BENCH`, defined in `Cargo.toml`, run:
 
 ```commandline
-cargo bench --bench BENCH --features="cache-padded tree-borrows"
+cargo bench --bench BENCH --features="cache-padded"
 ```

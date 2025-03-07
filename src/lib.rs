@@ -39,16 +39,6 @@
 //! A handle `h` *cannot* overtake the handles `B` (for barrier) that it follows. This constraint
 //! is ensures buffer accesses do not invalidly overlap.
 //!
-//! # Aliasing Model Validity
-//!
-//! When checked with [miri](https://github.com/rust-lang/miri), this function is _valid_ under the
-//! Tree-Borrows aliasing model, but _invalid_ under Stacked-Borrows.
-//!
-//! If rust chooses to formally accept an aliasing model which declares this function invalid, then
-//! its signature will be kept as-is, but its implementation will be changed to satisfy the
-//! aliasing model. This may pessimize the function, but its API and semantics are guaranteed to
-//! remain unchanged.
-//!
 
 mod builder;
 mod handles;
