@@ -47,28 +47,33 @@ impl<E> RingBuffer<E> {
     }
 
     #[inline]
-    fn iter(&self, s: usize, e: usize, seq: i64) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
-        let slice = unsafe { self.buf.get_unchecked(s..e) };
+    unsafe fn iter(
+        &self,
+        start: usize,
+        end: usize,
+        seq: i64,
+    ) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
+        let slice = unsafe { self.buf.get_unchecked(start..end) };
         slice
             .iter()
             .enumerate()
-            .map(move |(i, elem)| (elem.get(), seq + i as i64, s + i == e - 1))
+            .map(move |(i, elem)| (elem.get(), seq + i as i64, start + i == end - 1))
     }
 
     /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
     ///
-    /// `sequence` must be non-negative.
+    /// `seq` must be non-negative.
     ///
-    /// `sequence` does not need to be an inbounds index of the buffer, the calculation:
-    /// `sequence mod buffer_size` is used to find which index to return an element pointer from.
+    /// `seq` does not need to be an inbounds index of the buffer, the calculation:
+    /// `seq mod buffer_size` is used to find which index to return an element pointer from.
     ///
-    /// The returned pointer is guaranteed to be properly aligned and initialised, so dereferencing
-    /// can always be done safely.
+    /// All pointers provided to the closure will be properly aligned and initialised, so
+    /// dereferencing them can always be done safely.
     ///
     /// # Safety
-    /// Creating a reference from the pointer returned from this function is UB if mutable
-    /// aliasing occurs as a result. Callers must satisfy both the following two conditions to
-    /// create a reference safely:
+    /// Creating a reference from a provided pointer is UB if mutable aliasing occurs as a result.
+    /// Callers must satisfy both the following two conditions to create a reference safely:
+    ///
     /// 1) Only **one** mutable reference to an element of the buffer may exist at any time.
     /// 2) No immutable reference may exist while a mutable reference to the same element exists.
     ///
@@ -90,19 +95,23 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         let index = seq as usize & self.mask;
-        if index + size > self.size() {
-            //the requested batch wraps the buffer
-            let diff = self.size() - index;
-            self.iter(index, self.size(), seq).for_each(&mut func);
-            self.iter(0, size - diff, seq + diff as i64).for_each(&mut func);
-        } else {
-            self.iter(index, index + size, seq).for_each(func)
+        // SAFETY: requirements deferred to caller
+        unsafe {
+            if index + size > self.size() {
+                //the requested batch wraps the buffer
+                let diff = self.size() - index;
+                self.iter(index, self.size(), seq).for_each(&mut func);
+                self.iter(0, size - diff, seq + diff as i64).for_each(&mut func);
+            } else {
+                self.iter(index, index + size, seq).for_each(func)
+            }
         }
     }
 
-    /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
+    /// Tries to apply a closure to `size` number of buffer elements, starting from the element at
+    /// `seq`.
     ///
-    /// SAFETY: see [`RingBuffer::get`].
+    /// See [`RingBuffer::apply`] for more, and for **Safety** requirements.
     #[inline]
     pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: usize, func: F) -> Result<(), Err>
     where
@@ -115,14 +124,16 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         let index = seq as usize & self.mask;
-
-        if index + size > self.size() {
-            //the requested batch wraps the buffer
-            let diff = self.size() - index;
-            self.iter(index, self.size(), seq).try_for_each(&mut func)?;
-            self.iter(0, size - diff, seq + diff as i64).try_for_each(&mut func)?;
-        } else {
-            self.iter(index, index + size, seq).try_for_each(func)?;
+        // SAFETY: requirements deferred to caller
+        unsafe {
+            if index + size > self.size() {
+                //the requested batch wraps the buffer
+                let diff = self.size() - index;
+                self.iter(index, self.size(), seq).try_for_each(&mut func)?;
+                self.iter(0, size - diff, seq + diff as i64).try_for_each(&mut func)?;
+            } else {
+                self.iter(index, index + size, seq).try_for_each(func)?;
+            }
         }
         Ok(())
     }
