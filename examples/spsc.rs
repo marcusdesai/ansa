@@ -25,7 +25,7 @@ fn main() {
         std::thread::spawn(move || {
             let mut end = false;
             while !end {
-                consumer.wait(batch as u32).for_each(|event, seq, _| {
+                consumer.wait(batch as usize).for_each(|event, seq, _| {
                     sink.store(event.data, Ordering::Release);
                     end = seq >= num - 1;
                 });
@@ -35,7 +35,7 @@ fn main() {
 
     let start = Instant::now();
     for _ in 0..(num + batch - 1) / batch {
-        producer.wait(batch as u32).for_each(|event, seq, _| event.data = seq);
+        producer.wait(batch as usize).for_each(|event, seq, _| event.data = seq);
     }
     while !consumer_thread.is_finished() {}
     let end = start.elapsed();

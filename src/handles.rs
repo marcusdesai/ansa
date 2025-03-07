@@ -215,7 +215,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
             claim_end = new_current + size;
         }
         let desired_seq = if LEAD {
-            claim_end - self.inner.buffer.size()
+            claim_end - self.inner.buffer.size() as i64
         } else {
             claim_end
         };
@@ -237,13 +237,12 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn wait_for_each<F>(&mut self, size: u32, mut f: F)
+    pub fn wait_for_each<F>(&mut self, size: usize, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
-        let size: i64 = size.into();
         debug_assert!(size <= self.inner.buffer.size());
-        let (from_seq, till_seq) = self.wait_bounds(size);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         if self.inner.available < till_seq {
             self.inner.available = self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
         }
@@ -259,7 +258,7 @@ where
                 f(event, seq, end)
             })
         };
-        self.update_cursor(from_seq, from_seq + size)
+        self.update_cursor(from_seq, from_seq + size as i64)
     }
 }
 
@@ -275,21 +274,20 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn try_wait_for_each<F, Err>(&mut self, size: u32, mut f: F) -> Result<(), Err>
+    pub fn try_wait_for_each<F, Err>(&mut self, size: usize, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
         Err: From<W::Error>,
     {
-        let size: i64 = size.into();
         debug_assert!(size <= self.inner.buffer.size());
-        let (from_seq, till_seq) = self.wait_bounds(size);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         fence(Ordering::Acquire);
         if self.inner.available < till_seq {
             self.inner.available = self
                 .inner
                 .wait_strategy
                 .try_wait(till_seq, &self.inner.barrier)
-                .inspect_err(|_| self.update_cursor(from_seq, from_seq + size))?;
+                .inspect_err(|_| self.update_cursor(from_seq, from_seq + size as i64))?;
         }
         debug_assert!(self.inner.available >= till_seq);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
@@ -302,7 +300,7 @@ where
                 f(event, seq, end)
             })
         };
-        self.update_cursor(from_seq, from_seq + size);
+        self.update_cursor(from_seq, from_seq + size as i64);
         result
     }
 }
@@ -395,7 +393,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn wait(&mut self, size: u32) -> EventsMut<'_, E> {
+    pub fn wait(&mut self, size: usize) -> EventsMut<'_, E> {
         EventsMut(self.inner.wait(size))
     }
 
@@ -417,7 +415,7 @@ where
     #[inline]
     pub fn wait_range<R>(&mut self, range: R) -> EventsMut<'_, E>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         EventsMut(self.inner.wait_range(range))
     }
@@ -433,7 +431,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn try_wait(&mut self, size: u32) -> Result<EventsMut<'_, E>, W::Error> {
+    pub fn try_wait(&mut self, size: usize) -> Result<EventsMut<'_, E>, W::Error> {
         self.inner.try_wait(size).map(EventsMut)
     }
 
@@ -461,7 +459,7 @@ where
     #[inline]
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<EventsMut<'_, E>, W::Error>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         self.inner.try_wait_range(range).map(EventsMut)
     }
@@ -538,7 +536,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn wait(&mut self, size: u32) -> Events<'_, E> {
+    pub fn wait(&mut self, size: usize) -> Events<'_, E> {
         Events(self.inner.wait(size))
     }
 
@@ -578,7 +576,7 @@ where
     #[inline]
     pub fn wait_range<R>(&mut self, range: R) -> Events<'_, E>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         Events(self.inner.wait_range(range))
     }
@@ -594,7 +592,7 @@ where
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn try_wait(&mut self, size: u32) -> Result<Events<'_, E>, W::Error> {
+    pub fn try_wait(&mut self, size: usize) -> Result<Events<'_, E>, W::Error> {
         self.inner.try_wait(size).map(Events)
     }
 
@@ -625,7 +623,7 @@ where
     #[inline]
     pub fn try_wait_range<R>(&mut self, range: R) -> Result<Events<'_, E>, W::Error>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         self.inner.try_wait_range(range).map(Events)
     }
@@ -655,9 +653,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
 
     #[inline]
     fn buffer_size(&self) -> usize {
-        // conversion fine, as allocation size will be less than usize max, regardless of running
-        // on a 32 or 64-bit system
-        self.buffer.size() as usize
+        self.buffer.size()
     }
 
     #[inline]
@@ -676,7 +672,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
         let sequence = self.cursor.sequence.load(Ordering::Relaxed);
         let batch_end = sequence + size;
         let desired_seq = if LEAD {
-            batch_end - self.buffer.size()
+            batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
@@ -684,7 +680,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
     }
 
     #[inline]
-    fn as_batch(&mut self, from_seq: i64, batch_size: i64) -> Batch<'_, E> {
+    fn as_batch(&mut self, from_seq: i64, batch_size: usize) -> Batch<'_, E> {
         Batch {
             cursor: &mut self.cursor,
             buffer: &self.buffer,
@@ -699,34 +695,35 @@ where
     W: WaitStrategy,
 {
     #[inline]
-    fn wait(&mut self, size: u32) -> Batch<'_, E> {
-        debug_assert!(self.buffer.size() >= size.into());
-        let (from_seq, till_seq) = self.wait_bounds(size.into());
+    fn wait(&mut self, size: usize) -> Batch<'_, E> {
+        debug_assert!(self.buffer.size() >= size);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         if self.available < till_seq {
             self.available = self.wait_strategy.wait(till_seq, &self.barrier);
         }
         debug_assert!(self.available >= till_seq);
-        self.as_batch(from_seq, size.into())
+        self.as_batch(from_seq, size)
     }
 
     #[inline]
     fn wait_range<R>(&mut self, range: R) -> Batch<'_, E>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         let batch_min = match range.start_bound() {
             Bound::Included(b) => *b,
             Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
-        debug_assert!(self.buffer.size() >= batch_min.into());
-        let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
+        debug_assert!(self.buffer.size() >= batch_min);
+        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
+        self.available = self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.barrier.sequence() >= till_seq);
+        let available_batch = (self.available - from_seq) as usize;
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
-            Bound::Unbounded => barrier_seq - from_seq,
+            Bound::Included(b) => available_batch.min(*b),
+            Bound::Excluded(b) => available_batch.min(b.saturating_sub(1)),
+            Bound::Unbounded => available_batch,
         };
         self.as_batch(from_seq, batch_max)
     }
@@ -737,34 +734,35 @@ where
     W: TryWaitStrategy,
 {
     #[inline]
-    fn try_wait(&mut self, size: u32) -> Result<Batch<'_, E>, W::Error> {
-        debug_assert!(self.buffer.size() >= size.into());
-        let (from_seq, till_seq) = self.wait_bounds(size.into());
+    fn try_wait(&mut self, size: usize) -> Result<Batch<'_, E>, W::Error> {
+        debug_assert!(self.buffer.size() >= size);
+        let (from_seq, till_seq) = self.wait_bounds(size as i64);
         if self.available < till_seq {
             self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         }
         debug_assert!(self.available >= till_seq);
-        Ok(self.as_batch(from_seq, size.into()))
+        Ok(self.as_batch(from_seq, size))
     }
 
     #[inline]
     fn try_wait_range<R>(&mut self, range: R) -> Result<Batch<'_, E>, W::Error>
     where
-        R: RangeBounds<u32>,
+        R: RangeBounds<usize>,
     {
         let batch_min = match range.start_bound() {
             Bound::Included(b) => *b,
             Bound::Excluded(b) => b.saturating_add(1),
             Bound::Unbounded => 0,
         };
-        debug_assert!(self.buffer.size() >= batch_min.into());
-        let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
+        debug_assert!(self.buffer.size() >= batch_min);
+        let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
+        self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         debug_assert!(self.barrier.sequence() >= till_seq);
+        let available_batch = (self.available - from_seq) as usize;
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
-            Bound::Unbounded => barrier_seq - from_seq,
+            Bound::Included(b) => available_batch.min(*b),
+            Bound::Excluded(b) => available_batch.min(b.saturating_sub(1)),
+            Bound::Unbounded => available_batch,
         };
         Ok(self.as_batch(from_seq, batch_max))
     }
@@ -774,7 +772,7 @@ struct Batch<'a, E> {
     cursor: &'a mut Arc<Cursor>, // mutable ref ensures handle cannot run another overlapping wait
     buffer: &'a Arc<RingBuffer<E>>,
     current: i64,
-    size: i64,
+    size: usize,
 }
 
 impl<E> Batch<'_, E> {
@@ -788,7 +786,7 @@ impl<E> Batch<'_, E> {
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.apply(self.current + 1, self.size, f) };
-        let seq_end = self.current + self.size;
+        let seq_end = self.current + self.size as i64;
         self.cursor.sequence.store(seq_end, Ordering::Release);
     }
 
@@ -802,7 +800,7 @@ impl<E> Batch<'_, E> {
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe { self.buffer.try_apply(self.current + 1, self.size, f)? };
-        let seq_end = self.current + self.size;
+        let seq_end = self.current + self.size as i64;
         self.cursor.sequence.store(seq_end, Ordering::Release);
         Ok(())
     }
@@ -822,7 +820,7 @@ impl<E> Batch<'_, E> {
                     .inspect_err(|_| self.cursor.sequence.store(seq - 1, Ordering::Release))
             })?;
         }
-        let seq_end = self.current + self.size;
+        let seq_end = self.current + self.size as i64;
         self.cursor.sequence.store(seq_end, Ordering::Release);
         Ok(())
     }
@@ -837,7 +835,7 @@ pub struct EventsMut<'a, E>(Batch<'a, E>);
 impl<E> EventsMut<'_, E> {
     /// Returns the size of this batch
     #[inline]
-    pub fn size(&self) -> i64 {
+    pub fn size(&self) -> usize {
         self.0.size
     }
 
@@ -975,7 +973,7 @@ pub struct Events<'a, E>(Batch<'a, E>);
 impl<E> Events<'_, E> {
     /// Returns the size of this batch
     #[inline]
-    pub fn size(&self) -> i64 {
+    pub fn size(&self) -> usize {
         self.0.size
     }
 

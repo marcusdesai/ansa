@@ -173,7 +173,7 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                producer.wait(size as u32).for_each(|event, _, _| {
+                producer.wait(size as usize).for_each(|event, _, _| {
                     val = rng.random();
                     event.data = val
                 });

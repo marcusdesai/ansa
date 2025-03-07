@@ -12,7 +12,7 @@ use core::cell::UnsafeCell;
 #[derive(Debug)]
 pub(crate) struct RingBuffer<E> {
     buf: Box<[UnsafeCell<E>]>,
-    mask: i64,
+    mask: usize,
 }
 
 // SAFETY: `RingBuffer` provides an API that does not, by itself, guarantee safe references to a
@@ -30,7 +30,7 @@ impl<E> RingBuffer<E> {
     pub(crate) fn from_factory(size: usize, mut factory: impl FnMut() -> E) -> Self {
         debug_assert!(size > 0 && (size & (size - 1)) == 0);
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
-        let mask = size as i64 - 1;
+        let mask = size - 1;
         RingBuffer { buf, mask }
     }
 
@@ -42,7 +42,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(size > 0 && (size & (size - 1)) == 0);
         // SAFETY: UnsafeCell<E> has the same size and layout as E
         let buf: Box<[UnsafeCell<E>]> = unsafe { std::mem::transmute(buf) };
-        let mask = size as i64 - 1;
+        let mask = size - 1;
         RingBuffer { buf, mask }
     }
 
@@ -75,9 +75,9 @@ impl<E> RingBuffer<E> {
         debug_assert!(sequence >= 0);
         // sequence may be greater than buffer size, so mod to bring it inbounds. Size is a power
         // of 2, so the calculation is `sequence & (size - 1)`, which is `sequence & self.mask`
-        let index = sequence & self.mask;
+        let index = sequence as usize & self.mask;
         // SAFETY: index will be inbounds after mod
-        let cell = unsafe { self.buf.get_unchecked(index as usize) };
+        let cell = unsafe { self.buf.get_unchecked(index) };
         cell.get()
     }
 
@@ -94,21 +94,20 @@ impl<E> RingBuffer<E> {
     ///
     /// SAFETY: see [`RingBuffer::get`].
     #[inline]
-    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: i64, mut func: F)
+    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
     where
         F: FnMut((*mut E, i64, bool)),
     {
         if size == 0 {
             return;
         }
-        let size = size as usize;
         debug_assert!(seq >= 0);
-        debug_assert!(size < self.buf.len());
-        let index = (seq & self.mask) as usize;
-        if index + size > self.buf.len() {
+        debug_assert!(size < self.size());
+        let index = seq as usize & self.mask;
+        if index + size > self.size() {
             //the requested batch wraps the buffer
-            let diff = self.buf.len() - index;
-            self.iter(index, self.buf.len(), seq).for_each(&mut func);
+            let diff = self.size() - index;
+            self.iter(index, self.size(), seq).for_each(&mut func);
             self.iter(0, size - diff, seq + diff as i64).for_each(&mut func);
         } else {
             self.iter(index, index + size, seq).for_each(func)
@@ -119,7 +118,7 @@ impl<E> RingBuffer<E> {
     ///
     /// SAFETY: see [`RingBuffer::get`].
     #[inline]
-    pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: i64, func: F) -> Result<(), Err>
+    pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: usize, func: F) -> Result<(), Err>
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
@@ -130,13 +129,13 @@ impl<E> RingBuffer<E> {
         let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        let index = seq & self.mask;
+        let index = seq as usize & self.mask;
         // whether the requested batch wraps the buffer
         let wraps = index + size > self.size();
         // SAFETY: index will always be inbounds after BitAnd with mask
-        let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
+        let mut ptr = unsafe { self.buf.get_unchecked(index).get() };
 
-        let end = seq + size - 1;
+        let end = seq + size as i64 - 1;
         loop {
             if seq == end {
                 func(ptr, seq, true)?;
@@ -155,8 +154,7 @@ impl<E> RingBuffer<E> {
 
     /// Returns the number of allocated buffer elements
     #[inline]
-    pub(crate) fn size(&self) -> i64 {
-        // SAFETY: conversion fine as allocations cannot be larger than i64::MAX
-        unsafe { self.buf.len().try_into().unwrap_unchecked() }
+    pub(crate) fn size(&self) -> usize {
+        self.buf.len()
     }
 }
