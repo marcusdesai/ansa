@@ -46,7 +46,16 @@ impl<E> RingBuffer<E> {
         RingBuffer { buf, mask }
     }
 
-    /// Returns a mutable pointer to a single element of the ring buffer.
+    #[inline]
+    fn iter(&self, s: usize, e: usize, seq: i64) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
+        let slice = unsafe { self.buf.get_unchecked(s..e) };
+        slice
+            .iter()
+            .enumerate()
+            .map(move |(i, elem)| (elem.get(), seq + i as i64, s + i == e - 1))
+    }
+
+    /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
     ///
     /// `sequence` must be non-negative.
     ///
@@ -70,29 +79,6 @@ impl<E> RingBuffer<E> {
     ///
     /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
     /// mutable pointers to exist simultaneously.
-    #[inline]
-    unsafe fn get(&self, sequence: i64) -> *mut E {
-        debug_assert!(sequence >= 0);
-        // sequence may be greater than buffer size, so mod to bring it inbounds. Size is a power
-        // of 2, so the calculation is `sequence & (size - 1)`, which is `sequence & self.mask`
-        let index = sequence as usize & self.mask;
-        // SAFETY: index will be inbounds after mod
-        let cell = unsafe { self.buf.get_unchecked(index) };
-        cell.get()
-    }
-
-    #[inline]
-    fn iter(&self, s: usize, e: usize, seq: i64) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
-        let slice = unsafe { self.buf.get_unchecked(s..e) };
-        slice
-            .iter()
-            .enumerate()
-            .map(move |(i, elem)| (elem.get(), seq + i as i64, s + i == e - 1))
-    }
-
-    /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
-    ///
-    /// SAFETY: see [`RingBuffer::get`].
     #[inline]
     pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
     where
@@ -120,36 +106,25 @@ impl<E> RingBuffer<E> {
     #[inline]
     pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: usize, func: F) -> Result<(), Err>
     where
-        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
+        F: FnMut((*mut E, i64, bool)) -> Result<(), Err>,
     {
         if size == 0 {
             return Ok(());
         }
-        let mut seq = seq;
         let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         let index = seq as usize & self.mask;
-        // whether the requested batch wraps the buffer
-        let wraps = index + size > self.size();
-        // SAFETY: index will always be inbounds after BitAnd with mask
-        let mut ptr = unsafe { self.buf.get_unchecked(index).get() };
 
-        let end = seq + size as i64 - 1;
-        loop {
-            if seq == end {
-                func(ptr, seq, true)?;
-                break Ok(());
-            }
-            func(ptr, seq, false)?;
-            seq += 1;
-            if !wraps && cfg!(feature = "tree-borrows") {
-                // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
-                ptr = unsafe { ptr.add(1) };
-            } else {
-                ptr = unsafe { self.get(seq) };
-            }
+        if index + size > self.size() {
+            //the requested batch wraps the buffer
+            let diff = self.size() - index;
+            self.iter(index, self.size(), seq).try_for_each(&mut func)?;
+            self.iter(0, size - diff, seq + diff as i64).try_for_each(&mut func)?;
+        } else {
+            self.iter(index, index + size, seq).try_for_each(func)?;
         }
+        Ok(())
     }
 
     /// Returns the number of allocated buffer elements
