@@ -53,6 +53,7 @@ impl<E> RingBuffer<E> {
         end: usize,
         seq: i64,
     ) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
+        // SAFETY: caller ensures that both start and end are in-range of the buffer
         let slice = unsafe { self.buf.get_unchecked(start..end) };
         slice
             .iter()
@@ -85,7 +86,7 @@ impl<E> RingBuffer<E> {
     /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
     /// mutable pointers to exist simultaneously.
     #[inline]
-    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
+    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, func: F)
     where
         F: FnMut((*mut E, i64, bool)),
     {
@@ -94,14 +95,16 @@ impl<E> RingBuffer<E> {
         }
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        let index = seq as usize & self.mask;
+        // if seq is cast to usize before masking, then it may be incorrectly truncated.
+        let index = (seq & self.mask as i64) as usize;
         // SAFETY: requirements deferred to caller
         unsafe {
             if index + size > self.size() {
-                //the requested batch wraps the buffer
+                // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                self.iter(index, self.size(), seq).for_each(&mut func);
-                self.iter(0, size - diff, seq + diff as i64).for_each(&mut func);
+                self.iter(index, self.size(), seq)
+                    .chain(self.iter(0, size - diff, seq + diff as i64))
+                    .for_each(func)
             } else {
                 self.iter(index, index + size, seq).for_each(func)
             }
@@ -120,22 +123,22 @@ impl<E> RingBuffer<E> {
         if size == 0 {
             return Ok(());
         }
-        let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        let index = seq as usize & self.mask;
+        // if seq is cast to usize before masking, then it may be incorrectly truncated.
+        let index = (seq & self.mask as i64) as usize;
         // SAFETY: requirements deferred to caller
         unsafe {
             if index + size > self.size() {
-                //the requested batch wraps the buffer
+                // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                self.iter(index, self.size(), seq).try_for_each(&mut func)?;
-                self.iter(0, size - diff, seq + diff as i64).try_for_each(&mut func)?;
+                self.iter(index, self.size(), seq)
+                    .chain(self.iter(0, size - diff, seq + diff as i64))
+                    .try_for_each(func)
             } else {
-                self.iter(index, index + size, seq).try_for_each(func)?;
+                self.iter(index, index + size, seq).try_for_each(func)
             }
         }
-        Ok(())
     }
 
     /// Returns the number of allocated buffer elements
