@@ -46,19 +46,14 @@ impl<E> RingBuffer<E> {
         RingBuffer { buf, mask }
     }
 
+    /// # Safety
+    ///
+    /// `start` and `end` must be inbounds of the ring buffer.
     #[inline]
-    unsafe fn iter(
-        &self,
-        start: usize,
-        end: usize,
-        seq: i64,
-    ) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
-        // SAFETY: caller ensures that both start and end are in-range of the buffer
+    unsafe fn iter(&self, start: usize, end: usize) -> std::slice::Iter<'_, UnsafeCell<E>> {
+        // SAFETY: caller must ensure that both start and end are inbounds of the buffer
         let slice = unsafe { self.buf.get_unchecked(start..end) };
-        slice
-            .iter()
-            .enumerate()
-            .map(move |(i, elem)| (elem.get(), seq + i as i64, start + i == end - 1))
+        slice.iter()
     }
 
     /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
@@ -86,27 +81,29 @@ impl<E> RingBuffer<E> {
     /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
     /// mutable pointers to exist simultaneously.
     #[inline]
-    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, func: F)
+    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
     where
-        F: FnMut((*mut E, i64, bool)),
+        F: FnMut(*mut E, i64, bool),
     {
         if size == 0 {
             return;
         }
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        // if seq is cast to usize before masking, then it may be incorrectly truncated.
+        // if seq is cast to usize before masking, it may be incorrectly truncated.
         let index = (seq & self.mask as i64) as usize;
-        // SAFETY: requirements deferred to caller
+        // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
+        // guaranteed inbounds by caller ensuring `size < self.size()`.
         unsafe {
+            let end = seq + size as i64 - 1;
             if index + size > self.size() {
                 // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                self.iter(index, self.size(), seq)
-                    .chain(self.iter(0, size - diff, seq + diff as i64))
-                    .for_each(func)
+                let iter = self.iter(index, self.size()).chain(self.iter(0, size - diff));
+                iter.zip(seq..).for_each(|(elem, s)| func(elem.get(), s, s == end))
             } else {
-                self.iter(index, index + size, seq).for_each(func)
+                let iter = self.iter(index, index + size);
+                iter.zip(seq..).for_each(|(elem, s)| func(elem.get(), s, s == end))
             }
         }
     }
@@ -118,25 +115,28 @@ impl<E> RingBuffer<E> {
     #[inline]
     pub(crate) unsafe fn try_apply<F, Err>(&self, seq: i64, size: usize, func: F) -> Result<(), Err>
     where
-        F: FnMut((*mut E, i64, bool)) -> Result<(), Err>,
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         if size == 0 {
             return Ok(());
         }
+        let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        // if seq is cast to usize before masking, then it may be incorrectly truncated.
+        // if seq is cast to usize before masking, it may be incorrectly truncated.
         let index = (seq & self.mask as i64) as usize;
-        // SAFETY: requirements deferred to caller
+        // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
+        // guaranteed inbounds by caller ensuring `size < self.size()`.
         unsafe {
+            let end = seq + size as i64 - 1;
             if index + size > self.size() {
                 // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                self.iter(index, self.size(), seq)
-                    .chain(self.iter(0, size - diff, seq + diff as i64))
-                    .try_for_each(func)
+                let iter = self.iter(index, self.size()).chain(self.iter(0, size - diff));
+                iter.zip(seq..).try_for_each(|(elem, s)| func(elem.get(), s, s == end))
             } else {
-                self.iter(index, index + size, seq).try_for_each(func)
+                let iter = self.iter(index, index + size);
+                iter.zip(seq..).try_for_each(|(elem, s)| func(elem.get(), s, s == end))
             }
         }
     }
@@ -145,5 +145,25 @@ impl<E> RingBuffer<E> {
     #[inline]
     pub(crate) fn size(&self) -> usize {
         self.buf.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wraps_batch_end_count() {
+        let buffer = RingBuffer::from_factory(8, || 0u8);
+        let mut end_count = 0;
+        // with a batch the wraps the buffer, make sure end == true only once
+        unsafe {
+            buffer.apply(6, 4, |_, _, end| {
+                if end {
+                    end_count += 1;
+                }
+            })
+        };
+        assert_eq!(end_count, 1);
     }
 }

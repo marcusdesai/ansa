@@ -24,12 +24,14 @@ fn main() {
         let sink = Arc::clone(&sink);
         std::thread::spawn(move || {
             let mut end = false;
+            let mut counter = 0;
             while !end {
                 consumer.wait(batch as usize).for_each(|event, seq, _| {
-                    sink.store(event.data, Ordering::Release);
+                    counter = event.data;
                     end = seq >= num - 1;
                 });
             }
+            sink.store(counter, Ordering::Release);
         })
     };
 
@@ -39,7 +41,9 @@ fn main() {
     }
     while !consumer_thread.is_finished() {}
     let end = start.elapsed();
+    let counter = sink.load(Ordering::Acquire);
 
+    assert!(counter >= num);
     println!("{}", end.as_millis());
-    println!("{}", sink.load(Ordering::Acquire));
+    println!("{}", counter);
 }

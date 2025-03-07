@@ -252,7 +252,7 @@ where
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
-            self.inner.buffer.apply(from_seq + 1, size, |(ptr, seq, end)| {
+            self.inner.buffer.apply(from_seq + 1, size, |ptr, seq, end| {
                 // SAFETY: deref guaranteed safe by ringbuffer initialisation
                 let event: &mut E = &mut *ptr;
                 f(event, seq, end)
@@ -294,7 +294,7 @@ where
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         let result = unsafe {
-            self.inner.buffer.try_apply(from_seq + 1, size, |(ptr, seq, end)| {
+            self.inner.buffer.try_apply(from_seq + 1, size, |ptr, seq, end| {
                 // SAFETY: deref guaranteed safe by ringbuffer initialisation
                 let event: &mut E = &mut *ptr;
                 f(event, seq, end)
@@ -779,7 +779,7 @@ impl<E> Batch<'_, E> {
     #[inline]
     fn apply<F>(self, f: F)
     where
-        F: FnMut((*mut E, i64, bool)),
+        F: FnMut(*mut E, i64, bool),
     {
         fence(Ordering::Acquire);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
@@ -793,7 +793,7 @@ impl<E> Batch<'_, E> {
     #[inline]
     fn try_apply<F, Err>(self, f: F) -> Result<(), Err>
     where
-        F: FnMut((*mut E, i64, bool)) -> Result<(), Err>,
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         fence(Ordering::Acquire);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
@@ -808,15 +808,15 @@ impl<E> Batch<'_, E> {
     #[inline]
     fn try_commit<F, Err>(self, mut f: F) -> Result<(), Err>
     where
-        F: FnMut((*mut E, i64, bool)) -> Result<(), Err>,
+        F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
         fence(Ordering::Acquire);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
-            self.buffer.try_apply(self.current + 1, self.size, |(ptr, seq, end)| {
-                f((ptr, seq, end))
+            self.buffer.try_apply(self.current + 1, self.size, |ptr, seq, end| {
+                f(ptr, seq, end)
                     .inspect_err(|_| self.cursor.sequence.store(seq - 1, Ordering::Release))
             })?;
         }
@@ -858,7 +858,7 @@ impl<E> EventsMut<'_, E> {
     where
         F: FnMut(&mut E, i64, bool),
     {
-        self.0.apply(|(ptr, seq, end)| {
+        self.0.apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
             f(event, seq, end)
@@ -905,7 +905,7 @@ impl<E> EventsMut<'_, E> {
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_apply(|(ptr, seq, end)| {
+        self.0.try_apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
             f(event, seq, end)
@@ -958,7 +958,7 @@ impl<E> EventsMut<'_, E> {
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_commit(|(ptr, seq, end)| {
+        self.0.try_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
             f(event, seq, end)
@@ -999,7 +999,7 @@ impl<E> Events<'_, E> {
     where
         F: FnMut(&E, i64, bool),
     {
-        self.0.apply(|(ptr, seq, end)| {
+        self.0.apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &*ptr };
             f(event, seq, end)
@@ -1056,7 +1056,7 @@ impl<E> Events<'_, E> {
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_apply(|(ptr, seq, end)| {
+        self.0.try_apply(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &*ptr };
             f(event, seq, end)
@@ -1113,7 +1113,7 @@ impl<E> Events<'_, E> {
     where
         F: FnMut(&E, i64, bool) -> Result<(), Err>,
     {
-        self.0.try_commit(|(ptr, seq, end)| {
+        self.0.try_commit(|ptr, seq, end| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &*ptr };
             f(event, seq, end)
