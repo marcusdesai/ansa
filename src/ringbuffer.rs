@@ -82,78 +82,36 @@ impl<E> RingBuffer<E> {
     }
 
     #[inline]
-    fn update<F>(&self, from: usize, till: usize, seq: i64, func: &mut F)
-    where
-        F: FnMut(*mut E, i64, bool),
-    {
-        let slice = unsafe { self.buf.get_unchecked(from..till) };
+    fn iter(&self, s: usize, e: usize, seq: i64) -> impl Iterator<Item = (*mut E, i64, bool)> + '_ {
+        let slice = unsafe { self.buf.get_unchecked(s..e) };
         slice
             .iter()
-            .zip((0i64..).into_iter())
-            .for_each(|(e, i)| func(e.get(), i + seq, from + i as usize == till - 1))
+            .enumerate()
+            .map(move |(i, elem)| (elem.get(), seq + i as i64, s + i == e - 1))
     }
 
     /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
     ///
     /// SAFETY: see [`RingBuffer::get`].
     #[inline]
-    pub(crate) unsafe fn apply<F>(&self, mut seq: i64, size: i64, mut func: F)
+    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: i64, mut func: F)
     where
-        F: FnMut(*mut E, i64, bool),
+        F: FnMut((*mut E, i64, bool)),
     {
         if size == 0 {
             return;
         }
+        let size = size as usize;
         debug_assert!(seq >= 0);
-        debug_assert!(size < self.size());
-        let index = seq & self.mask;
-        // whether the requested batch wraps the buffer
-        let wraps = index + size > self.size();
-
-        // SAFETY: index will always be inbounds after BitAnd with mask
-        let mut ptr = unsafe { self.buf.get_unchecked(index as usize).get() };
-
-        let end = seq + size - 1;
-        loop {
-            if seq == end {
-                func(ptr, seq, true);
-                break;
-            }
-            func(ptr, seq, false);
-            seq += 1;
-            if !wraps && cfg!(feature = "tree-borrows") {
-                // Only passes miri with MIRIFLAGS=-Zmiri-tree-borrows
-                ptr = unsafe { ptr.add(1) };
-            } else {
-                ptr = unsafe { self.get(seq) };
-            }
-        }
-    }
-
-    /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
-    ///
-    /// SAFETY: see [`RingBuffer::get`].
-    #[inline]
-    pub(crate) unsafe fn apply2<F>(&self, seq: i64, size: i64, mut func: F)
-    where
-        F: FnMut(*mut E, i64, bool),
-    {
-        if size == 0 {
-            return;
-        }
-        debug_assert!(seq >= 0);
-        debug_assert!(size < self.size());
-        let index = seq & self.mask;
-        // whether the requested batch wraps the buffer
-        let wraps = index + size > self.size();
-
-        if !wraps {
-            let idx = index as usize;
-            self.update(idx, idx + size as usize, seq, &mut func)
+        debug_assert!(size < self.buf.len());
+        let index = (seq & self.mask) as usize;
+        if index + size > self.buf.len() {
+            //the requested batch wraps the buffer
+            let diff = self.buf.len() - index;
+            self.iter(index, self.buf.len(), seq).for_each(&mut func);
+            self.iter(0, size - diff, seq + diff as i64).for_each(&mut func);
         } else {
-            let diff = self.size() - index;
-            self.update(index as usize, self.size() as usize, seq, &mut func);
-            self.update(0, (size - diff) as usize, seq + diff, &mut func);
+            self.iter(index, index + size, seq).for_each(func)
         }
     }
 
