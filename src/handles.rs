@@ -253,7 +253,7 @@ where
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
-            self.inner.buffer.apply(from_seq + 1, size, |ptr, seq, end| {
+            self.inner.buffer.apply(from_seq + 1, size, |(ptr, seq, end)| {
                 // SAFETY: deref guaranteed safe by ringbuffer initialisation
                 let event: &mut E = &mut *ptr;
                 f(event, seq, end)
@@ -721,15 +721,12 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min.into());
         let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        if self.available < till_seq {
-            self.available = self.wait_strategy.wait(till_seq, &self.barrier);
-        }
-        debug_assert!(self.available >= till_seq);
-        let available_size = self.available - from_seq;
+        let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
+        debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => available_size.min((*b).into()),
-            Bound::Excluded(b) => available_size.min(b.saturating_sub(1).into()),
-            Bound::Unbounded => available_size,
+            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
+            Bound::Unbounded => barrier_seq - from_seq,
         };
         self.as_batch(from_seq, batch_max)
     }
@@ -762,15 +759,12 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min.into());
         let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        if self.available < till_seq {
-            self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        }
-        debug_assert!(self.available >= till_seq);
-        let available_size = self.available - from_seq;
+        let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
+        debug_assert!(self.barrier.sequence() >= till_seq);
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => available_size.min((*b).into()),
-            Bound::Excluded(b) => available_size.min(b.saturating_sub(1).into()),
-            Bound::Unbounded => available_size,
+            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
+            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
+            Bound::Unbounded => barrier_seq - from_seq,
         };
         Ok(self.as_batch(from_seq, batch_max))
     }
@@ -787,7 +781,7 @@ impl<E> Batch<'_, E> {
     #[inline]
     fn apply<F>(self, f: F)
     where
-        F: FnMut(*mut E, i64, bool),
+        F: FnMut((*mut E, i64, bool)),
     {
         fence(Ordering::Acquire);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
@@ -866,7 +860,7 @@ impl<E> EventsMut<'_, E> {
     where
         F: FnMut(&mut E, i64, bool),
     {
-        self.0.apply(|ptr, seq, end| {
+        self.0.apply(|(ptr, seq, end)| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &mut E = unsafe { &mut *ptr };
             f(event, seq, end)
@@ -1007,7 +1001,7 @@ impl<E> Events<'_, E> {
     where
         F: FnMut(&E, i64, bool),
     {
-        self.0.apply(|ptr, seq, end| {
+        self.0.apply(|(ptr, seq, end)| {
             // SAFETY: deref guaranteed safe by ringbuffer initialisation
             let event: &E = unsafe { &*ptr };
             f(event, seq, end)
