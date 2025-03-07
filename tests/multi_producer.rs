@@ -10,7 +10,7 @@ fn test_lead_multi_producer() {
             [multi.clone(), multi.clone(), multi].into_iter().map(|mut clone| {
                 move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        clone.wait_apply(20, |i, seq, _| *i = seq)
+                        clone.wait_for_each(20, |i, seq, _| *i = seq)
                     }
                 }
             })
@@ -28,7 +28,7 @@ fn test_trailing_multi_producer() {
             [multi.clone(), multi.clone(), multi].into_iter().map(|mut clone| {
                 move || {
                     for _ in 0..num_of_events / (20 * 3) {
-                        clone.wait_apply(20, |i, _, _| *i = 0)
+                        clone.wait_for_each(20, |i, _, _| *i = 0)
                     }
                 }
             })

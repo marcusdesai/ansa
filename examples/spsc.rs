@@ -12,8 +12,8 @@ struct Event {
 fn main() {
     let sink = Arc::new(AtomicI64::new(0));
 
-    let batch = 256_i64;
-    let queue = 4096;
+    let batch = 1024_i64;
+    let queue = 2_usize.pow(18);
     let num = black_box(1_000_000_000);
 
     let (producer, consumer) = ansa::spsc(queue, Event::default);
@@ -25,9 +25,9 @@ fn main() {
         std::thread::spawn(move || {
             let mut end = false;
             while !end {
-                consumer.wait_range(1..).for_each(|event, seq, _| {
+                consumer.wait(batch as u32).for_each(|event, seq, _| {
                     sink.store(event.data, Ordering::Release);
-                    end = seq == num - 1;
+                    end = seq >= num - 1;
                 });
             }
         })

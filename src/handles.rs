@@ -128,12 +128,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// assert_eq!(multi.sequence(), -1);
     ///
     /// // move the producer cursor up by 10
-    /// multi.wait_apply(10, |_, _, _| ());
+    /// multi.wait_for_each(10, |_, _, _| ());
     /// assert_eq!(multi.sequence(), 9);
     ///
     /// // clone and move only the clone
     /// let mut clone = multi.clone();
-    /// clone.wait_apply(10, |_, _, _| ());
+    /// clone.wait_for_each(10, |_, _, _| ());
     ///
     /// // Both have moved because all clones share the same cursor
     /// assert_eq!(multi.sequence(), 19);
@@ -233,19 +233,21 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: WaitStrategy,
 {
-    /// Wait until exactly `size` number of events are available.
+    /// Wait for and process a batch of exactly `size` number of events.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
     #[inline]
-    pub fn wait_apply<F>(&mut self, size: u32, mut f: F)
+    pub fn wait_for_each<F>(&mut self, size: u32, mut f: F)
     where
         F: FnMut(&mut E, i64, bool),
     {
         let size: i64 = size.into();
         debug_assert!(size <= self.inner.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size);
-        self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
-        debug_assert!(self.inner.barrier.sequence() >= till_seq);
+        if self.inner.available < till_seq {
+            self.inner.available = self.inner.wait_strategy.wait(till_seq, &self.inner.barrier);
+        }
+        debug_assert!(self.inner.available >= till_seq);
         fence(Ordering::Acquire);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
@@ -265,15 +267,15 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD>
 where
     W: TryWaitStrategy,
 {
-    /// Wait until exactly `size` number of events are available.
+    /// Wait for and process a batch of exactly `size` number of events.
     ///
-    /// Otherwise, return the wait strategy error.
+    /// If waiting fails, returns `W::Error`, which must be convertible to `Err`.
+    ///
+    /// If processing the batch fails, returns `Err`.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
-    ///
-    /// Wait::Error must be convertible to returned error
     #[inline]
-    pub fn try_wait_apply<F, Err>(&mut self, size: u32, mut f: F) -> Result<(), Err>
+    pub fn try_wait_for_each<F, Err>(&mut self, size: u32, mut f: F) -> Result<(), Err>
     where
         F: FnMut(&mut E, i64, bool) -> Result<(), Err>,
         Err: From<W::Error>,
@@ -281,12 +283,15 @@ where
         let size: i64 = size.into();
         debug_assert!(size <= self.inner.buffer.size());
         let (from_seq, till_seq) = self.wait_bounds(size);
-        self.inner
-            .wait_strategy
-            .try_wait(till_seq, &self.inner.barrier)
-            .inspect_err(|_| self.update_cursor(from_seq, from_seq + size))?;
-        debug_assert!(self.inner.barrier.sequence() >= till_seq);
         fence(Ordering::Acquire);
+        if self.inner.available < till_seq {
+            self.inner.available = self
+                .inner
+                .wait_strategy
+                .try_wait(till_seq, &self.inner.barrier)
+                .inspect_err(|_| self.update_cursor(from_seq, from_seq + size))?;
+        }
+        debug_assert!(self.inner.available >= till_seq);
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
@@ -650,7 +655,8 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
 
     #[inline]
     fn buffer_size(&self) -> usize {
-        // conversion fine as allocation size will be less than usize, regardless of 32 or 64-bit
+        // conversion fine, as allocation size will be less than usize max, regardless of running
+        // on a 32 or 64-bit system
         self.buffer.size() as usize
     }
 
@@ -696,10 +702,9 @@ where
     fn wait(&mut self, size: u32) -> Batch<'_, E> {
         debug_assert!(self.buffer.size() >= size.into());
         let (from_seq, till_seq) = self.wait_bounds(size.into());
-        if till_seq <= self.available {
-            return self.as_batch(from_seq, size.into());
+        if self.available < till_seq {
+            self.available = self.wait_strategy.wait(till_seq, &self.barrier);
         }
-        self.available = self.wait_strategy.wait(till_seq, &self.barrier);
         debug_assert!(self.available >= till_seq);
         self.as_batch(from_seq, size.into())
     }
@@ -716,12 +721,15 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min.into());
         let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        let barrier_seq = self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= till_seq);
+        if self.available < till_seq {
+            self.available = self.wait_strategy.wait(till_seq, &self.barrier);
+        }
+        debug_assert!(self.available >= till_seq);
+        let available_size = self.available - from_seq;
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
-            Bound::Unbounded => barrier_seq - from_seq,
+            Bound::Included(b) => available_size.min((*b).into()),
+            Bound::Excluded(b) => available_size.min(b.saturating_sub(1).into()),
+            Bound::Unbounded => available_size,
         };
         self.as_batch(from_seq, batch_max)
     }
@@ -735,11 +743,10 @@ where
     fn try_wait(&mut self, size: u32) -> Result<Batch<'_, E>, W::Error> {
         debug_assert!(self.buffer.size() >= size.into());
         let (from_seq, till_seq) = self.wait_bounds(size.into());
-        if till_seq <= self.available {
-            return Ok(self.as_batch(from_seq, size.into()));
+        if self.available < till_seq {
+            self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         }
-        self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= till_seq);
+        debug_assert!(self.available >= till_seq);
         Ok(self.as_batch(from_seq, size.into()))
     }
 
@@ -755,12 +762,15 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min.into());
         let (from_seq, till_seq) = self.wait_bounds(batch_min.into());
-        let barrier_seq = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= till_seq);
+        if self.available < till_seq {
+            self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
+        }
+        debug_assert!(self.available >= till_seq);
+        let available_size = self.available - from_seq;
         let batch_max = match range.end_bound() {
-            Bound::Included(b) => (barrier_seq - from_seq).min((*b).into()),
-            Bound::Excluded(b) => (barrier_seq - from_seq).min(b.saturating_sub(1).into()),
-            Bound::Unbounded => barrier_seq - from_seq,
+            Bound::Included(b) => available_size.min((*b).into()),
+            Bound::Excluded(b) => available_size.min(b.saturating_sub(1).into()),
+            Bound::Unbounded => available_size,
         };
         Ok(self.as_batch(from_seq, batch_max))
     }
@@ -837,7 +847,7 @@ impl<E> EventsMut<'_, E> {
         self.0.size
     }
 
-    /// Process a batch of mutable events on the buffer.
+    /// Process a batch of mutable events on the buffer using the closure `f`.
     ///
     /// The parameters of `f` are:
     ///
@@ -863,10 +873,11 @@ impl<E> EventsMut<'_, E> {
         })
     }
 
-    /// Process a batch of mutable events on the buffer.
+    /// Try to process a batch of mutable events on the buffer using the closure `f`.
     ///
     /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
-    /// **Important**: does _not_ undo successful writes.
+    ///
+    /// **Important**: does _not_ undo any mutations to events if an error occurs.
     ///
     /// The parameters of `f` are:
     ///
@@ -909,10 +920,12 @@ impl<E> EventsMut<'_, E> {
         })
     }
 
-    /// Process a batch of mutable events on the buffer.
+    /// Try to process a batch of mutable events on the buffer using the closure `f`.
     ///
     /// When an error occurs, returns the error and updates the cursor sequence to the position of
-    /// the last successfully processed event. In effect, commits successful portion of the batch.
+    /// the last successfully processed event. In effect, commits the successful portion of the batch.
+    ///
+    /// **Important**: does _not_ undo any mutations to events if an error occurs.
     ///
     /// The parameters of `f` are:
     ///
@@ -972,7 +985,7 @@ impl<E> Events<'_, E> {
         self.0.size
     }
 
-    /// Process a batch of immutable events on the buffer.
+    /// Process a batch of immutable events on the buffer using the closure `f`.
     ///
     /// The parameters of `f` are:
     ///
@@ -1001,7 +1014,7 @@ impl<E> Events<'_, E> {
         })
     }
 
-    /// Process a batch of immutable events on the buffer.
+    /// Try to process a batch of immutable events on the buffer using the closure `f`.
     ///
     /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
     ///
@@ -1058,10 +1071,10 @@ impl<E> Events<'_, E> {
         })
     }
 
-    /// Process a batch of immutable events on the buffer.
+    /// Try to process a batch of immutable events on the buffer using the closure `f`.
     ///
     /// When an error occurs, returns the error and updates the cursor sequence to the position of
-    /// the last successfully processed event. In effect, commits successful portion of the batch.
+    /// the last successfully processed event. In effect, commits the successful portion of the batch.
     ///
     /// The parameters of `f` are:
     ///

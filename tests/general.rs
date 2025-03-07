@@ -151,7 +151,7 @@ fn test_producer_conversions() {
             for mut multi_producer in [multi.clone(), multi] {
                 let join = std::thread::spawn(move || {
                     for _ in 0..5 {
-                        multi_producer.wait_apply(10, |event, seq, _| event.seq = seq)
+                        multi_producer.wait_for_each(10, |event, seq, _| event.seq = seq)
                     }
                     multi_producer
                 });
@@ -175,7 +175,7 @@ fn test_producer_conversions() {
                 let join = std::thread::spawn(move || {
                     for _ in 0..5 {
                         multi_producer
-                            .wait_apply(10, |event, _, _| event.seq_times_2 = event.seq * 2)
+                            .wait_for_each(10, |event, _, _| event.seq_times_2 = event.seq * 2)
                     }
                     multi_producer
                 });

@@ -393,7 +393,7 @@ where
                     Barrier::many(follows_cursors)
                 }
             };
-            // unwrap okay as this entry in handles_map is guaranteed to exist for this id
+
             let handle = HandleInner {
                 cursor,
                 barrier,
@@ -401,6 +401,8 @@ where
                 wait_strategy: self.wait_strategy.clone(),
                 available: 0,
             };
+
+            // unwrap okay as this entry in handles_map is guaranteed to exist for this id
             match self.handles_map.get(&id).unwrap() {
                 Handle::Producer => {
                     producers.insert(id, handle.into_producer());
