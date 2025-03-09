@@ -41,7 +41,7 @@ impl<E> RingBuffer<E> {
         let size = buf.len();
         debug_assert!(size > 0 && (size & (size - 1)) == 0);
         // SAFETY: UnsafeCell<E> has the same size and layout as E
-        let buf: Box<[UnsafeCell<E>]> = unsafe { std::mem::transmute(buf) };
+        let buf: Box<[UnsafeCell<E>]> = unsafe { core::mem::transmute(buf) };
         let mask = size - 1;
         RingBuffer { buf, mask }
     }
@@ -50,7 +50,7 @@ impl<E> RingBuffer<E> {
     ///
     /// `start` and `end` must be inbounds of the ring buffer.
     #[inline]
-    unsafe fn iter(&self, start: usize, end: usize) -> std::slice::Iter<'_, UnsafeCell<E>> {
+    unsafe fn iter(&self, start: usize, end: usize) -> core::slice::Iter<'_, UnsafeCell<E>> {
         // SAFETY: caller must ensure that both start and end are inbounds of the buffer
         let slice = unsafe { self.buf.get_unchecked(start..end) };
         slice.iter()
@@ -99,11 +99,17 @@ impl<E> RingBuffer<E> {
             if index + size > self.size() {
                 // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                let iter = self.iter(index, self.size()).chain(self.iter(0, size - diff));
-                iter.zip(seq..).for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.iter(index, self.size())
+                    .zip(seq..)
+                    .for_each(|(elem, s)| func(elem.get(), s, false));
+
+                self.iter(0, size - diff)
+                    .zip(seq + diff as i64..)
+                    .for_each(|(elem, s)| func(elem.get(), s, s == end))
             } else {
-                let iter = self.iter(index, index + size);
-                iter.zip(seq..).for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.iter(index, index + size)
+                    .zip(seq..)
+                    .for_each(|(elem, s)| func(elem.get(), s, s == end))
             }
         }
     }
@@ -132,18 +138,24 @@ impl<E> RingBuffer<E> {
             if index + size > self.size() {
                 // the requested batch wraps the buffer
                 let diff = self.size() - index;
-                let iter = self.iter(index, self.size()).chain(self.iter(0, size - diff));
-                iter.zip(seq..).try_for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.iter(index, self.size())
+                    .zip(seq..)
+                    .try_for_each(|(elem, s)| func(elem.get(), s, false))?;
+
+                self.iter(0, size - diff)
+                    .zip(seq + diff as i64..)
+                    .try_for_each(|(elem, s)| func(elem.get(), s, s == end))
             } else {
-                let iter = self.iter(index, index + size);
-                iter.zip(seq..).try_for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.iter(index, index + size)
+                    .zip(seq..)
+                    .try_for_each(|(elem, s)| func(elem.get(), s, s == end))
             }
         }
     }
 
     /// Returns the number of allocated buffer elements
     #[inline]
-    pub(crate) fn size(&self) -> usize {
+    pub(crate) const fn size(&self) -> usize {
         self.buf.len()
     }
 }
