@@ -669,14 +669,14 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
 
     #[inline]
     fn wait_bounds(&self, size: i64) -> (i64, i64) {
-        let sequence = self.cursor.sequence.load(Ordering::Relaxed);
-        let batch_end = sequence + size;
-        let desired_seq = if LEAD {
+        let from_sequence = self.cursor.sequence.load(Ordering::Relaxed);
+        let batch_end = from_sequence + size;
+        let till_sequence = if LEAD {
             batch_end - self.buffer.size() as i64
         } else {
             batch_end
         };
-        (sequence, desired_seq)
+        (from_sequence, till_sequence)
     }
 
     #[inline]
@@ -686,6 +686,20 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             buffer: &self.buffer,
             current: from_seq,
             size: batch_size,
+        }
+    }
+
+    fn range_batch_size(&self, from_seq: i64, end_bound: Bound<&usize>) -> usize {
+        let from = if LEAD {
+            from_seq - self.buffer.size() as i64
+        } else {
+            from_seq
+        };
+        let available_batch = (self.available - from).abs() as usize;
+        match end_bound {
+            Bound::Included(b) => available_batch.min(*b),
+            Bound::Excluded(b) => available_batch.min(b.saturating_sub(1)),
+            Bound::Unbounded => available_batch,
         }
     }
 }
@@ -717,14 +731,11 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min);
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
-        self.available = self.wait_strategy.wait(till_seq, &self.barrier);
-        debug_assert!(self.barrier.sequence() >= till_seq);
-        let available_batch = (self.available - from_seq) as usize;
-        let batch_max = match range.end_bound() {
-            Bound::Included(b) => available_batch.min(*b),
-            Bound::Excluded(b) => available_batch.min(b.saturating_sub(1)),
-            Bound::Unbounded => available_batch,
-        };
+        if self.available < till_seq.max(1) {
+            self.available = self.wait_strategy.wait(till_seq, &self.barrier);
+        }
+        debug_assert!(self.available >= till_seq);
+        let batch_max = self.range_batch_size(from_seq, range.end_bound());
         self.as_batch(from_seq, batch_max)
     }
 }
@@ -756,14 +767,11 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min);
         let (from_seq, till_seq) = self.wait_bounds(batch_min as i64);
-        self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
-        debug_assert!(self.barrier.sequence() >= till_seq);
-        let available_batch = (self.available - from_seq) as usize;
-        let batch_max = match range.end_bound() {
-            Bound::Included(b) => available_batch.min(*b),
-            Bound::Excluded(b) => available_batch.min(b.saturating_sub(1)),
-            Bound::Unbounded => available_batch,
-        };
+        if self.available < till_seq.max(1) {
+            self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
+        }
+        debug_assert!(self.available >= till_seq);
+        let batch_max = self.range_batch_size(from_seq, range.end_bound());
         Ok(self.as_batch(from_seq, batch_max))
     }
 }
@@ -1130,6 +1138,8 @@ pub(crate) struct Cursor {
     sequence: crossbeam_utils::CachePadded<AtomicI64>,
 }
 
+pub(crate) const CURSOR_START: i64 = -1;
+
 impl Cursor {
     pub(crate) const fn new(seq: i64) -> Self {
         Cursor {
@@ -1143,7 +1153,7 @@ impl Cursor {
     /// Create a cursor at the start of the sequence. All accesses begin on the _next_ position in
     /// the sequence, thus cursors start at `-1`, so that accesses start at `0`.
     pub(crate) const fn start() -> Self {
-        Cursor::new(-1)
+        Cursor::new(CURSOR_START)
     }
 }
 
@@ -1215,5 +1225,36 @@ mod tests {
         assert_eq!(size_of::<Consumer<u8, WaitBusy>>(), 40);
         assert_eq!(size_of::<Producer<u8, WaitBusy, true>>(), 40);
         assert_eq!(size_of::<MultiProducer<u8, WaitBusy, true>>(), 48);
+    }
+
+    #[test]
+    fn test_wait_range() {
+        let buffer = Arc::new(RingBuffer::from_factory(16, || 0));
+        let lead_cursor = Arc::new(Cursor::new(8));
+        let follows_cursor = Arc::new(Cursor::new(4));
+
+        let mut lead_handle: HandleInner<_, _, true> = HandleInner {
+            cursor: Arc::clone(&lead_cursor),
+            barrier: Barrier::one(Arc::clone(&follows_cursor)),
+            buffer: Arc::clone(&buffer),
+            wait_strategy: WaitBusy,
+            available: -(buffer.size() as i64),
+        };
+
+        let mut follows_handle: HandleInner<_, _, false> = HandleInner {
+            cursor: Arc::clone(&follows_cursor),
+            barrier: Barrier::one(Arc::clone(&lead_cursor)),
+            buffer: Arc::clone(&buffer),
+            wait_strategy: WaitBusy,
+            available: 0,
+        };
+
+        let lead_batch = lead_handle.wait_range(1..);
+        assert_eq!(lead_batch.current, 8);
+        assert_eq!(lead_batch.size, 12);
+
+        let follows_batch = follows_handle.wait_range(1..);
+        assert_eq!(follows_batch.current, 4);
+        assert_eq!(follows_batch.size, 4);
     }
 }

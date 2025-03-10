@@ -1,4 +1,4 @@
-use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer};
+use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer, CURSOR_START};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitPhased, WaitSleep};
 use std::collections::{HashMap, HashSet};
@@ -322,7 +322,7 @@ where
             barrier,
             buffer,
             wait_strategy: self.wait_strategy.clone(),
-            available: 0,
+            available: CURSOR_START - (self.buffer_size as i64),
         };
 
         Ok(DisruptorHandles {
@@ -399,7 +399,7 @@ where
                 barrier,
                 buffer: Arc::clone(buffer),
                 wait_strategy: self.wait_strategy.clone(),
-                available: 0,
+                available: CURSOR_START,
             };
 
             // unwrap okay as this entry in handles_map is guaranteed to exist for this id
