@@ -689,6 +689,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
         }
     }
 
+    #[inline]
     fn range_batch_size(&self, from_seq: i64, end_bound: Bound<&usize>) -> usize {
         let from = if LEAD {
             from_seq - self.buffer.size() as i64

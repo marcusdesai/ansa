@@ -17,21 +17,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUE_SIZE: usize = 1024;
-// const BURST_SIZES: [u64; 1] = [256];
-const BURST_SIZES: [u64; 4] = [1, 10, 100, 256];
-// const PAUSES_MS: [u64; 1] = [0];
-const PAUSES_MS: [u64; 3] = [0, 1, 10];
+const BATCH_SIZES: [usize; 4] = [1, 10, 100, 256];
 const RNG_SEED: u64 = 10;
 
 #[derive(Copy, Clone, Default)]
 struct Event {
     data: i64,
-}
-
-fn pause(millis: u64) {
-    if millis > 0 {
-        thread::sleep(Duration::from_millis(millis));
-    }
 }
 
 fn new_sink() -> Arc<AtomicI64> {
@@ -40,46 +31,19 @@ fn new_sink() -> Arc<AtomicI64> {
 
 pub fn spsc_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc");
+    group.measurement_time(Duration::from_secs(15)).sample_size(500);
 
-    for burst_size in BURST_SIZES.into_iter() {
-        group.throughput(Throughput::Elements(burst_size));
-
-        base(&mut group, burst_size as i64);
-
-        for pause_ms in PAUSES_MS.into_iter() {
-            let inputs = (burst_size as i64, pause_ms);
-            let param = format!("burst: {}, pause: {} ms", burst_size, pause_ms);
-
-            crossbeam(&mut group, inputs, &param);
-            disruptor(&mut group, inputs, &param);
-            ansa(&mut group, inputs, &param);
-        }
+    for batch_size in BATCH_SIZES.into_iter() {
+        group.throughput(Throughput::Elements(batch_size as u64));
+        let param = format!("batch size: {}", batch_size);
+        crossbeam(&mut group, batch_size, &param);
+        disruptor(&mut group, batch_size, &param);
+        ansa(&mut group, batch_size, &param);
     }
     group.finish();
 }
 
-fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
-    let mut rng = SmallRng::seed_from_u64(RNG_SEED);
-    let sink = new_sink();
-
-    let benchmark_id = BenchmarkId::new("base", burst_size);
-    group.bench_with_input(benchmark_id, &burst_size, move |b, &size| {
-        b.iter_custom(|iters| {
-            let start = Instant::now();
-            for _ in 0..iters {
-                let mut val = 0;
-                for _ in 0..size {
-                    val = rng.random();
-                    sink.store(val, Ordering::Release);
-                }
-                while sink.load(Ordering::Acquire) != val {}
-            }
-            start.elapsed()
-        })
-    });
-}
-
-fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
+fn crossbeam(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
 
@@ -96,13 +60,12 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
     };
 
     let benchmark_id = BenchmarkId::new("Crossbeam", &param);
-    group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
+    group.bench_with_input(benchmark_id, &batch, move |b, &batch_size| {
         b.iter_custom(|iters| {
-            pause(pause_ms);
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                for _ in 0..size {
+                for _ in 0..batch_size {
                     val = rng.random();
                     let event = Event { data: val };
                     while s.try_send(event).is_err() {}
@@ -116,7 +79,7 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
     receiver.join().expect("Should not have panicked.");
 }
 
-fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
+fn disruptor(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
 
@@ -132,13 +95,12 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         .build();
 
     let benchmark_id = BenchmarkId::new("disruptor", &param);
-    group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
+    group.bench_with_input(benchmark_id, &batch, move |b, &batch_size| {
         b.iter_custom(|iters| {
-            pause(pause_ms);
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                producer.batch_publish(size as usize, |iter| {
+                producer.batch_publish(batch_size, |iter| {
                     iter.for_each(|event| {
                         val = rng.random();
                         event.data = val
@@ -151,13 +113,13 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
     });
 }
 
-fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
+fn ansa(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
 
     let (producer, consumer) = ansa::spsc(QUEUE_SIZE, Event::default);
     let mut producer = producer.set_wait_strategy(WaitBusy);
-    let mut consumer = consumer.set_wait_strategy(WaitBusy.with_timeout(Duration::from_millis(20)));
+    let mut consumer = consumer.set_wait_strategy(WaitBusy.with_timeout(Duration::from_millis(5)));
 
     let sink_clone = Arc::clone(&sink);
     let consumer_thread = thread::spawn(move || {
@@ -167,13 +129,12 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
     });
 
     let benchmark_id = BenchmarkId::new("ansa", &param);
-    group.bench_with_input(benchmark_id, &inputs, move |b, &(size, pause_ms)| {
+    group.bench_with_input(benchmark_id, &batch, move |b, &batch_size| {
         b.iter_custom(|iters| {
-            pause(pause_ms);
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                producer.wait(size as usize).for_each(|event, _, _| {
+                producer.wait(batch_size).for_each(|event, _, _| {
                     val = rng.random();
                     event.data = val
                 });
