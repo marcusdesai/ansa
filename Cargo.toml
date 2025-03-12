@@ -24,3 +24,8 @@ debug = true
 name = "spsc"
 harness = false
 required-features = ["cache-padded"]
+
+[[bench]]
+name = "counting"
+harness = false
+required-features = ["cache-padded"]
