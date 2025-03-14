@@ -18,12 +18,12 @@
 //!
 //! | Handle                                           | size |
 //! |--------------------------------------------------|------|
-//! | [`Consumer`](crate::handles::Consumer)           | 32   |
-//! | [`Producer`](crate::handles::Producer)           | 32   |
-//! | [`MultiProducer`](crate::handles::MultiProducer) | 40   |
+//! | [`Consumer`](crate::handles::Consumer)           | 40   |
+//! | [`Producer`](crate::handles::Producer)           | 40   |
+//! | [`MultiProducer`](crate::handles::MultiProducer) | 48   |
 //!
-//! And here are the minimum sizes of the provided strategies (on a 64-bit system), again assuming
-//! nested strategies are zero-sized. Changes in these sizes are also considered breaking.
+//! And here are the minimum sizes of the provided strategies (on a 64-bit system), assuming
+//! `size_of::<W>() == 0`. Changes in these sizes are also considered breaking.
 //!
 //! | Strategy                      | size |
 //! |-------------------------------|------|
@@ -33,9 +33,6 @@
 //! | [`WaitSleep`]                 | 8    |
 //! | [`WaitPhased<W>`](WaitPhased) | 16   |
 //! | [`Timeout<W>`](Timeout)       | 8    |
-//!
-//! The sizes of both [`WaitPhased`] and [`Timeout`] of course ultimately depend on their included
-//! strategy.
 //!
 //! Various provided strategies are limited to wait durations of `u64::MAX` nanoseconds, which is
 //! done in order to keep their sizes small. Storing a [`Duration`] instead would double the
@@ -650,6 +647,7 @@ where
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 #[inline]
 const fn truncate_u128(n: u128) -> u64 {
     if n > u64::MAX as u128 {

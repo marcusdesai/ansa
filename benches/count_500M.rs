@@ -25,7 +25,7 @@ fn format_param() -> String {
 }
 
 fn bench_count(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Counting");
+    let mut group = c.benchmark_group("Count 500M");
     group.measurement_time(Duration::from_secs(30));
 
     ansa(&mut group);
@@ -34,7 +34,7 @@ fn bench_count(c: &mut Criterion) {
 }
 
 fn ansa(group: &mut BenchmarkGroup<WallTime>) {
-    const BATCH: i64 = 1024;
+    const BATCH: i64 = 2048;
     const QUEUE: usize = 2_usize.pow(18);
 
     let id = BenchmarkId::new("ansa", format_param());

@@ -28,7 +28,7 @@ impl<E> RingBuffer<E> {
     ///
     /// `size` must be a non-zero power of two. Callers must uphold this constraint.
     pub(crate) fn from_factory(size: usize, mut factory: impl FnMut() -> E) -> Self {
-        debug_assert!(size > 0 && (size & (size - 1)) == 0);
+        debug_assert!(size > 0 && size.is_power_of_two());
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
         let mask = size - 1;
         RingBuffer { buf, mask }
@@ -36,10 +36,10 @@ impl<E> RingBuffer<E> {
 
     /// Create a [`RingBuffer`] from an existing buffer.
     ///
-    /// `size` must be a non-zero power of two. Callers must uphold this constraint.
+    /// `buffer.len()` must be a non-zero power of two. Callers must uphold this constraint.
     pub(crate) fn from_buffer(buf: Box<[E]>) -> Self {
         let size = buf.len();
-        debug_assert!(size > 0 && (size & (size - 1)) == 0);
+        debug_assert!(size > 0 && size.is_power_of_two());
         // SAFETY: UnsafeCell<E> has the same size and layout as E
         let buf: Box<[UnsafeCell<E>]> = unsafe { core::mem::transmute(buf) };
         let mask = size - 1;
@@ -85,9 +85,6 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut(*mut E, i64, bool),
     {
-        if size == 0 {
-            return;
-        }
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         // if seq is cast to usize before masking, it may be incorrectly truncated.
@@ -123,9 +120,6 @@ impl<E> RingBuffer<E> {
     where
         F: FnMut(*mut E, i64, bool) -> Result<(), Err>,
     {
-        if size == 0 {
-            return Ok(());
-        }
         let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());

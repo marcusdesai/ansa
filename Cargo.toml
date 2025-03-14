@@ -26,6 +26,6 @@ harness = false
 required-features = ["cache-padded"]
 
 [[bench]]
-name = "counting"
+name = "count_500M"
 harness = false
 required-features = ["cache-padded"]

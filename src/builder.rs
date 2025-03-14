@@ -1,4 +1,4 @@
-use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer, CURSOR_START};
+use crate::handles::{Barrier, Consumer, Cursor, HandleInner, Producer};
 use crate::ringbuffer::RingBuffer;
 use crate::wait::{WaitPhased, WaitSleep};
 use std::collections::{HashMap, HashSet};
@@ -23,14 +23,14 @@ pub struct DisruptorBuilder<F, E, W> {
     /// Factory function for populating the buffer with events. Wrapped in an option only to
     /// facilitate moving the value out of the builder while the builder is still in use.
     event_factory: Option<F>,
-    /// Directly provided storage for the RingBuffer.
+    /// Directly provided storage for the `RingBuffer`.
     provided_buffer: Option<Box<[E]>>,
-    /// Factory function for building instances of the wait strategy, defaults to WaitSleep.
+    /// Factory function for building instances of the wait strategy, defaults to `WaitSleep`.
     wait_strategy: W,
     /// Maps ids of consumers in a "followed by" relationship. For example, the pair  `(3, [5, 7])`
     /// indicates that the consumer with id `3` is followed by the consumers with ids `5` and `7`.
     followed_by: U64Map<Vec<u64>>,
-    /// The inverse of followed_by, useful for conveniently constructing barriers for handles.
+    /// The inverse of `followed_by`, useful for conveniently constructing barriers for handles.
     follows: U64Map<Follows>,
     /// All the ids which follow the lead producer. These are the roots of the graph.
     follows_lead: U64Set,
@@ -266,7 +266,7 @@ where
     ///```
     pub fn extend_handles(self, iter: impl IntoIterator<Item = (u64, Handle, Follows)>) -> Self {
         let mut this = self;
-        for (id, handle, follows) in iter.into_iter() {
+        for (id, handle, follows) in iter {
             this = this.add_handle(id, handle, follows);
         }
         this
@@ -316,17 +316,9 @@ where
         let lead_cursor = Arc::new(Cursor::start());
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
-
-        let handle = HandleInner {
-            cursor: lead_cursor,
-            barrier,
-            buffer,
-            wait_strategy: self.wait_strategy.clone(),
-            available: CURSOR_START - (self.buffer_size as i64),
-        };
-
+        let lead = HandleInner::new(lead_cursor, barrier, buffer, self.wait_strategy.clone());
         Ok(DisruptorHandles {
-            lead: Some(handle.into_producer()),
+            lead: Some(lead.into_producer()),
             producers,
             consumers,
         })
@@ -377,9 +369,9 @@ where
             Arc::clone(cursor)
         }
 
-        for (&id, follows) in self.follows.iter() {
+        for (&id, follows) in &self.follows {
             let cursor = get_cursor(id, &mut cursor_map);
-
+            let buf = Arc::clone(buffer);
             let barrier = match follows {
                 Follows::LeadProducer => Barrier::one(Arc::clone(lead_cursor)),
                 Follows::Handles(ids) if ids.len() == 1 => {
@@ -394,13 +386,7 @@ where
                 }
             };
 
-            let handle = HandleInner {
-                cursor,
-                barrier,
-                buffer: Arc::clone(buffer),
-                wait_strategy: self.wait_strategy.clone(),
-                available: CURSOR_START,
-            };
+            let handle = HandleInner::new(cursor, barrier, buf, self.wait_strategy.clone());
 
             // unwrap okay as this entry in handles_map is guaranteed to exist for this id
             match self.handles_map.get(&id).unwrap() {
@@ -425,9 +411,8 @@ where
                 return Err(BuildError::UnregisteredID(*id));
             }
         }
-        let size = self.buffer_size;
-        if size == 0 || (size & (size - 1)) != 0 {
-            return Err(BuildError::BufferSize(size));
+        if self.buffer_size == 0 || !self.buffer_size.is_power_of_two() {
+            return Err(BuildError::BufferSize(self.buffer_size));
         }
         if !self.overlapping_ids.is_empty() {
             return Err(BuildError::OverlappingIDs(
@@ -581,7 +566,7 @@ impl Display for BuildError {
             BuildError::GraphCycle(id) => format!("Cycle in graph for id: {id}"),
             BuildError::DisconnectedNode(id) => format!("id: {id} disconnected from graph"),
         };
-        write!(f, "{}", str)
+        write!(f, "{str}")
     }
 }
 
@@ -600,7 +585,7 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
     let mut chains = Vec::new();
     for node in roots {
         let result = visit(*node, &mut visiting, &mut visited, Vec::new(), graph)?;
-        chains.extend(result)
+        chains.extend(result);
     }
     for node in graph.keys() {
         if !visited.contains(node) {
@@ -613,7 +598,7 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
 /// Helper function for recursively visiting the graph nodes using DFS.
 ///
 /// Uses DFS as usually purposed for topological sort, see:
-/// https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search
+/// <https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search>
 fn visit(
     node: u64,
     visiting: &mut U64Set,
@@ -630,7 +615,7 @@ fn visit(
     let mut chains = Vec::new();
     let children = graph.get(&node).ok_or(BuildError::UnregisteredID(node))?;
     if children.is_empty() {
-        chains.push(chain)
+        chains.push(chain);
     } else {
         for child in children {
             let result = visit(*child, visiting, visited, chain.clone(), graph)?;
