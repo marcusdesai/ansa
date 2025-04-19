@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 /// A handle with mutable access to events on the ring buffer.
 ///
-/// Cannot access events concurrently with other handles.
-///
 /// `MultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
 /// non-overlapping ranges of sequence values, which can be writen to in parallel.
 ///
@@ -38,7 +36,7 @@ use std::sync::Arc;
 ///
 /// # Limitations
 ///
-/// The `MultiProducer` API is quite minimal in comparison to either [`Producers`](Producer) or
+/// The `MultiProducer` API is quite limited in comparison to either [`Producers`](Producer) or
 /// [`Consumers`](Consumer). This is due to the mechanism used to coordinate `MultiProducer` clones.
 ///
 /// TL;DR, the `MultiProducer` limitations are:
@@ -52,17 +50,18 @@ use std::sync::Arc;
 /// waiting for or processing the batch is successful or not.
 ///
 /// This commitment requires that batches always be completed (and the cursor moved), even for
-/// fallible methods where might errors occur. Importantly, this means that handles which follow a
+/// fallible methods where errors might occur. Importantly, this means that handles which follow a
 /// `MultiProducer` cannot assume, e.g., that an event was successfully written based only on its
 /// sequence becoming available.
 ///
 /// Another consequence is that batches cannot be sized dynamically depending on what sequences are
-/// actually available, as the claim bounds must be used. So `wait_range` cannot be implemented.
+/// actually available, as the bounds of the claim must be used. Hence, `wait_range` cannot be
+/// implemented.
 ///
 /// Lastly, separate `wait` methods cannot be provided, because [`EventsMut`] structs cannot be
 /// guaranteed to operate correctly in user code. If an `EventsMut` is dropped without an apply
-/// method being called, then the claim it was generated from will go unused, causing permanent
-/// disruptor stalls. Instead, combined wait and apply methods are provided.
+/// method being called, then the claim it was generated from will go unused, ultimately causing
+/// permanent disruptor stalls. Instead, combined wait and apply methods are provided.
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
     inner: HandleInner<E, W, LEAD>,
@@ -89,6 +88,22 @@ where
 
 impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// Returns `true` if this producer is the lead producer.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::*;
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
+    ///     .build()?;
+    ///
+    /// let lead_multi = handles.take_lead().unwrap().into_multi();
+    /// let follow_multi = handles.take_producer(0).unwrap().into_multi();
+    ///
+    /// assert_eq!(lead_multi.is_lead(), true);
+    /// assert_eq!(follow_multi.is_lead(), false);
+    /// # Ok::<(), BuildError>(())
+    /// ```
     pub const fn is_lead(&self) -> bool {
         LEAD
     }
@@ -258,6 +273,7 @@ where
                 f(event, seq, end)
             })
         };
+        // Ordering::Release performed by this method
         self.update_cursor(from_seq, from_seq + saturate_i64(size))
     }
 }
@@ -268,7 +284,7 @@ where
 {
     /// Wait for and process a batch of exactly `size` number of events.
     ///
-    /// If waiting fails, returns `W::Error`, which must be convertible to `Err`.
+    /// If waiting fails, returns the wait error, `W::Error`, which must be convertible to `Err`.
     ///
     /// If processing the batch fails, returns `Err`.
     ///
@@ -300,6 +316,7 @@ where
                 f(event, seq, end)
             })
         };
+        // Ordering::Release performed by this method
         self.update_cursor(from_seq, from_seq + saturate_i64(size));
         result
     }

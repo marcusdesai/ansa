@@ -573,8 +573,8 @@ pub struct TimedOut;
 /// let _ = DisruptorBuilder::new(64, || 0)
 ///     .wait_strategy(strategy)
 ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-///     .build()
-///     .unwrap();
+///     .build()?;
+/// # Ok::<(), BuildError>(())
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Timeout<W> {
