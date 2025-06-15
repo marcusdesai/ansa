@@ -3,6 +3,8 @@ name = "ansa"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.80.1"
+license = "MIT OR Apache-2.0"
+description = "Disruptor pattern in rust"
 
 [dependencies]
 crossbeam-utils = { version = "0.8", optional = true }
