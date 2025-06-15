@@ -55,7 +55,7 @@ use crate::wait::{WaitPhased, WaitSleep};
 /// `size` must be a non-zero power of two. `event_factory` is used to populate the buffer.
 ///
 /// Uses a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1 millisecond, then
-/// spins and yields the thread for 1 millisecond, and finally spins and sleeps for 50 microseconds.
+/// spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50 microsecond increments.
 ///
 /// See: [`DisruptorBuilder`] for configurable disruptor construction.
 ///
@@ -108,6 +108,7 @@ where
 /// # Examples
 /// ```
 /// let (multi_producer, consumer) = ansa::mpsc(64, || 0);
+/// let multi_clone = multi_producer.clone();
 /// ```
 pub fn mpsc<E>(
     size: usize,
@@ -189,6 +190,7 @@ where
 /// ```
 /// let num_consumers = 5;
 /// let (multi_producer, consumers) = ansa::mpmc(64, num_consumers, || 0);
+/// let multi_clone = multi_producer.clone();
 /// assert_eq!(consumers.len(), 5);
 /// ```
 #[allow(clippy::type_complexity)]

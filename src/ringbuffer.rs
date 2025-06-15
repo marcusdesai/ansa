@@ -58,6 +58,8 @@ impl<E> RingBuffer<E> {
 
     /// Applies a closure to `size` number of buffer elements, starting from the element at `seq`.
     ///
+    /// `size` must be less than the size of the buffer.
+    ///
     /// `seq` must be non-negative.
     ///
     /// `seq` does not need to be an inbounds index of the buffer, the calculation:
@@ -78,8 +80,8 @@ impl<E> RingBuffer<E> {
     /// number of immutable references can exist simultaneously, so long as no mutable ref exists
     /// during the lifetimes of those immutable refs.
     ///
-    /// Also note that the aliasing rules do not apply to pointers, so it is permitted for multiple
-    /// mutable pointers to exist simultaneously.
+    /// It is permitted for multiple mutable pointers to exist simultaneously, as the aliasing
+    /// rules do not apply to pointers.
     #[inline]
     pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
     where
@@ -90,7 +92,7 @@ impl<E> RingBuffer<E> {
         // if seq is cast to usize before masking, it may be incorrectly truncated.
         let index = (seq & self.mask as i64) as usize;
         // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
-        // guaranteed inbounds by caller ensuring `size < self.size()`.
+        // guaranteed inbounds by the caller ensuring `size < self.size()`.
         unsafe {
             let end = seq + size as i64 - 1;
             if index + size > self.size() {

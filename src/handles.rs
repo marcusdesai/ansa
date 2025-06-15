@@ -239,7 +239,9 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
 
     #[inline]
     fn update_cursor(&self, start: i64, end: i64) {
-        while self.inner.cursor.sequence.load(Ordering::Acquire) != start {}
+        while self.inner.cursor.sequence.load(Ordering::Acquire) != start {
+            std::hint::spin_loop();
+        }
         self.inner.cursor.sequence.store(end, Ordering::Release)
     }
 }
@@ -367,7 +369,9 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
         self.inner.buffer_size()
     }
 
-    /// Set the wait strategy for this handle.
+    /// Returns a new handle with the given `wait_strategy`, consuming this handle.
+    ///
+    /// All other properties of the original handle remain unchanged in the new handle.
     ///
     /// Does not alter the wait strategy for any other handle.
     ///
@@ -418,8 +422,6 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
-    ///
     /// # Examples
     ///
     /// ```
@@ -455,8 +457,6 @@ where
     /// Wait until a number of events within the given range are available.
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
-    ///
-    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
     /// # Examples
     ///
@@ -527,7 +527,9 @@ impl<E, W> Consumer<E, W> {
         self.inner.buffer_size()
     }
 
-    /// Set the wait strategy for this handle.
+    /// Returns a new handle with the given `wait_strategy`, consuming this handle.
+    ///
+    /// All other properties of the original handle remain unchanged in the new handle.
     ///
     /// Does not alter the wait strategy for any other handle.
     ///
@@ -561,8 +563,6 @@ where
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
-    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
-    ///
     /// Any range which starts from 0 or is unbounded enables non-blocking waits for
     /// [`well-behaved`] [`WaitStrategy`] implementations
     ///
@@ -574,7 +574,7 @@ where
     /// let events = consumer.wait_range(..); // wait for any number of events
     /// assert_eq!(events.size(), 0);
     ///
-    /// // this would block the thread waiting for the producer to move
+    /// // Whereas this would block the thread waiting for the producer to move.
     /// // consumer.wait_range(1..);
     ///
     /// // move the lead producer
@@ -608,6 +608,29 @@ where
     /// Otherwise, return the wait strategy error.
     ///
     /// `size` values larger than the buffer will cause permanent stalls.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use ansa::wait::{Timeout, WaitBusy};
+    ///
+    /// let (mut producer, consumer) = ansa::spsc(64, || 0u32);
+    /// let timeout = Timeout::new(Duration::from_millis(10), WaitBusy);
+    /// let mut consumer = consumer.set_wait_strategy(timeout);
+    ///
+    /// // Try to wait for 5 events, but timeout if they're not available
+    /// match consumer.try_wait(5) {
+    ///     Ok(events) => {
+    ///         // Events were available within the timeout
+    ///         events.for_each(|event, seq, _| println!("Event {}: {}", seq, event));
+    ///     }
+    ///     Err(_timeout) => {
+    ///         // Timeout occurred - no events were available in time
+    ///         println!("No events available within timeout");
+    ///     }
+    /// }
+    /// ```
     #[inline]
     pub fn try_wait(&mut self, size: usize) -> Result<Events<'_, E>, W::Error> {
         self.inner.try_wait(size).map(Events)
@@ -616,8 +639,6 @@ where
     /// Wait until a number of events within the given range are available.
     ///
     /// If a lower bound is provided, it must be less than the buffer size.
-    ///
-    /// All ranges will return a batch with a size in the interval: `[0, barrier sequence]`.
     ///
     /// # Examples
     ///
@@ -911,7 +932,7 @@ impl<E> EventsMut<'_, E> {
 
     /// Try to process a batch of mutable events on the buffer using the closure `f`.
     ///
-    /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
+    /// If an error occurs, leaves the cursor sequence unchanged and returns the error.
     ///
     /// **Important**: does _not_ undo any mutations to events if an error occurs.
     ///
@@ -958,7 +979,7 @@ impl<E> EventsMut<'_, E> {
 
     /// Try to process a batch of mutable events on the buffer using the closure `f`.
     ///
-    /// When an error occurs, returns the error and updates the cursor sequence to the position of
+    /// If an error occurs, returns the error and updates the cursor sequence to the position of
     /// the last successfully processed event. In effect, commits the successful portion of the batch.
     ///
     /// **Important**: does _not_ undo any mutations to events if an error occurs.
@@ -1052,7 +1073,7 @@ impl<E> Events<'_, E> {
 
     /// Try to process a batch of immutable events on the buffer using the closure `f`.
     ///
-    /// When an error occurs, leaves the cursor sequence unchanged and returns the error.
+    /// If an error occurs, leaves the cursor sequence unchanged and returns the error.
     ///
     /// The parameters of `f` are:
     ///
@@ -1109,7 +1130,7 @@ impl<E> Events<'_, E> {
 
     /// Try to process a batch of immutable events on the buffer using the closure `f`.
     ///
-    /// When an error occurs, returns the error and updates the cursor sequence to the position of
+    /// If an error occurs, returns the error and updates the cursor sequence to the position of
     /// the last successfully processed event. In effect, commits the successful portion of the batch.
     ///
     /// The parameters of `f` are:
@@ -1253,8 +1274,8 @@ impl Drop for Barrier {
 #[allow(clippy::cast_possible_wrap)]
 #[inline]
 const fn saturate_i64(u: usize) -> i64 {
-    if const { size_of::<usize>() >= 64 } {
-        // the 64th bit must be zero to avoid negative wrapping when cast to i64
+    if const { size_of::<usize>() >= 8 } {
+        // the 64th bit must be zero to avoid negative wrapping when casting to i64
         (u & i64::MAX as usize) as i64
     } else {
         // all usize values fit in i64

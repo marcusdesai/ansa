@@ -13,9 +13,8 @@ use std::time::Duration;
 /// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
 /// is called.
 ///
-/// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1
-/// millisecond, then spin-yields the thread for 1 millisecond, and finally spin-sleeps with a
-/// 50 microsecond sleep duration.
+/// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1 millisecond,
+/// then spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50 microsecond increments.
 #[derive(Debug)]
 pub struct DisruptorBuilder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
