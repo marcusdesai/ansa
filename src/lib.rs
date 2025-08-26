@@ -160,7 +160,7 @@ where
         size > 0 && size.is_power_of_two(),
         "size ({size}) must be non-zero power of two"
     );
-    let mut builder = DisruptorBuilder::new(size, event_factory).wait_strategy(BACKOFF_WAIT);
+    let mut builder = DisruptorBuilder::new(size, event_factory);
     for id in 0..num_consumers {
         builder = builder.add_handle(id, Handle::Consumer, Follows::LeadProducer);
     }

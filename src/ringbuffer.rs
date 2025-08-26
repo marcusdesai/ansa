@@ -37,7 +37,7 @@ impl<E> RingBuffer<E> {
     /// Create a [`RingBuffer`] from an existing buffer.
     ///
     /// `buffer.len()` must be a non-zero power of two. Callers must uphold this constraint.
-    pub(crate) fn from_buffer(buf: Box<[E]>) -> Self {
+    pub(crate) const fn from_buffer(buf: Box<[E]>) -> Self {
         let size = buf.len();
         debug_assert!(size > 0 && size.is_power_of_two());
         // SAFETY: UnsafeCell<E> has the same size and layout as E

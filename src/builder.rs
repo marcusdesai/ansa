@@ -13,8 +13,9 @@ use std::time::Duration;
 /// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
 /// is called.
 ///
-/// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1 millisecond,
-/// then spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50 microsecond increments.
+/// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1
+/// millisecond, then spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50
+/// microsecond increments.
 #[derive(Debug)]
 pub struct DisruptorBuilder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
@@ -49,6 +50,15 @@ impl<E> DisruptorBuilder<fn() -> E, E, WaitPhased<WaitSleep>> {
     /// Returns a new [`DisruptorBuilder`].
     ///
     /// The size of `buffer` must be a non-zero power of 2.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::DisruptorBuilder;
+    ///
+    /// let buffer = vec![0u8; 1024];
+    ///
+    /// let builder = DisruptorBuilder::with_buffer(buffer.into_boxed_slice());
+    /// ```
     pub fn with_buffer(buffer: Box<[E]>) -> Self
     where
         E: Sync,
@@ -139,9 +149,9 @@ where
     /// Each handle must be associated with a unique `id`, and must be either a consumer or
     /// producer.
     ///
-    /// Every handle must describe how it relates to other handles by indicating which handles it
-    /// follows. In the disruptor pattern, management of ring buffer accesses works by ordering
-    /// handles according to a precedence, or "follows", relationship.
+    /// In the disruptor pattern, management of ring buffer accesses works by ordering handles
+    /// according to a precedence, or "follows", relationship. Every handle must describe how it
+    /// relates to other handles by indicating which handles it follows.
     ///
     /// If handle `B` follows handle `A`, then `B` accesses events on the ring buffer exclusively
     /// after `A`. See: [`Follows`] for more.
@@ -170,8 +180,8 @@ where
     ///     .build()?;
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    /// But consumer handles are not required to follow one another, which allows for multiple
-    /// consumers to read the ring buffer concurrently.
+    /// But consumer handles do not require exclusive access to the buffer, which allows for
+    /// multiple consumers to read the ring buffer concurrently.
     /// ```
     /// use ansa::{DisruptorBuilder, Follows, Handle};
     ///
@@ -309,6 +319,16 @@ where
     /// [`BuildError`].
     ///
     /// For full details on error states, please see [`BuildError`].
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let _ = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()?;
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
         self.validate()?;
         let buffer = Arc::new(self.construct_buffer());
@@ -671,27 +691,31 @@ fn validate_order(handles_map: &U64Map<Handle>, chains: Vec<Vec<u64>>) -> Result
 /// // ordered directly after the handles with ids `0`, `1` and `2`
 /// let _ = Follows::Handles(vec![0, 1, 2]);
 /// ```
-/// When one handles is 'ordered directly' after another, it will interact with a sequence on the
-/// buffer only after all handles it follows have concluded their interactions with that sequence.
+/// When one handle is 'ordered' after another, it will interact with a sequence on the buffer only
+/// after all handles it follows have concluded their interactions with that sequence.
 ///
 /// In disruptor terms: a handle's barrier includes the cursors for all handles it directly follows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Follows {
+    /// Following the lead producer, which has no id.
     LeadProducer,
+    /// The list of ids of handles to follow
     Handles(Vec<u64>),
 }
 
-/// Describes the type of handle.
+/// Describes the type of handle being added to the disruptor.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Handle {
+    /// A handle which can write to the buffer.
     Producer,
+    /// A read-only handle.
     Consumer,
 }
 
 /// Holds the producers and consumers for a single disruptor.
 ///
-/// **Warning**: It is likely a programming error to not use all the producers and consumers held
-/// by this store. If any single producer or consumer fails to move on the ring buffer, then the
+/// **Warning**: It is likely a programming error to leave unused any producers and consumers held
+/// by this object. If any single producer or consumer fails to move on the ring buffer, then the
 /// disruptor as a whole will eventually permanently stall.
 ///
 /// When `debug_assertions` are enabled, a warning is printed if this struct is not empty when
@@ -705,18 +729,66 @@ pub struct DisruptorHandles<E, W> {
 
 impl<E, W> DisruptorHandles<E, W> {
     /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()?;
+    ///
+    /// let lead = handles.take_lead();
+    /// assert!(matches!(lead, Some(Producer { .. })));
+    ///
+    /// let take_again = handles.take_lead();
+    /// assert!(take_again.is_none());
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     #[must_use = "Disruptor will stall if any handle is not used "]
     pub fn take_lead(&mut self) -> Option<Producer<E, W, true>> {
         self.lead.take()
     }
 
-    /// Returns the producer with this `id`. Returns `None` if this `id` has already been taken.
+    /// Returns the producer with this `id`, or `None` if this `id` has already been taken.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
+    ///     .build()?;
+    ///
+    /// let producer = handles.take_producer(0);
+    /// assert!(matches!(producer, Some(Producer { .. })));
+    ///
+    /// let take_again = handles.take_producer(0);
+    /// assert!(take_again.is_none());
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn take_producer(&mut self, id: u64) -> Option<Producer<E, W, false>> {
         self.producers.remove(&id)
     }
 
-    /// Returns the consumer with this `id`. Returns `None` if this `id` has already been taken.
+    /// Returns the consumer with this `id`, or `None` if this `id` has already been taken.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Consumer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()?;
+    ///
+    /// let consumer = handles.take_consumer(0);
+    /// assert!(matches!(consumer, Some(Consumer { .. })));
+    ///
+    /// let take_again = handles.take_consumer(0);
+    /// assert!(take_again.is_none());
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn take_consumer(&mut self, id: u64) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
@@ -724,8 +796,27 @@ impl<E, W> DisruptorHandles<E, W> {
 
     /// Returns an iterator of all producers. Returns an empty iterator on all subsequent calls.
     ///
-    /// **Warning**: If the returned iterator is dropped before being fully consumed, it
-    /// drops the remaining key-value pairs. Dropped handles will cause the disruptor to stall.
+    /// **Warning**: If the returned iterator is dropped before being fully consumed, it drops the
+    /// remaining (id, producer) pairs. Dropped handles will cause the disruptor to stall.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Producer, Follows::Handles(vec![0]))
+    ///     .build()?;
+    ///
+    /// let producers: Vec<_> = handles.drain_producers().collect();
+    ///
+    /// let (id_0, _) = &producers[0];
+    /// assert_eq!(*id_0, 0);
+    ///
+    /// let (id_1, _) = &producers[1];
+    /// assert_eq!(*id_1, 1);
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_producers(&mut self) -> impl Iterator<Item = (u64, Producer<E, W, false>)> + '_ {
         self.producers.drain()
@@ -733,14 +824,51 @@ impl<E, W> DisruptorHandles<E, W> {
 
     /// Returns an iterator of all consumers. Returns an empty iterator on all subsequent calls.
     ///
-    /// **Warning**: If the returned iterator is dropped before being fully consumed, it
-    /// drops the remaining key-value pairs. Dropped handles will cause the disruptor to stall.
+    /// **Warning**: If the returned iterator is dropped before being fully consumed, it drops the
+    /// remaining (id, consumer) pairs. Dropped handles will cause the disruptor to stall.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
+    ///     .build()?;
+    ///
+    /// let consumers: Vec<_> = handles.drain_consumers().collect();
+    ///
+    /// let (id_0, _) = &consumers[0];
+    /// assert_eq!(*id_0, 0);
+    ///
+    /// let (id_1, _) = &consumers[1];
+    /// assert_eq!(*id_1, 1);
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     #[must_use = "Disruptor will stall if any handle is not used"]
     pub fn drain_consumers(&mut self) -> impl Iterator<Item = (u64, Consumer<E, W>)> + '_ {
         self.consumers.drain()
     }
 
-    /// Returns `true` when no handles are left to take from this struct.
+    /// Returns `true` when no handles are left to take from this object.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    ///
+    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
+    ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+    ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
+    ///     .build()?;
+    ///
+    /// let _ = handles.take_lead();
+    /// let _ = handles.drain_producers();
+    /// let _ = handles.drain_consumers();
+    ///
+    /// assert_eq!(handles.is_empty(), true);
+    /// # Ok::<(), ansa::BuildError>(())
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.lead.is_none() && self.consumers.is_empty() && self.producers.is_empty()
     }
