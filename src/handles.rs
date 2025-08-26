@@ -17,15 +17,15 @@ use std::sync::Arc;
 ///
 /// # Examples
 /// ```
-/// use ansa::{DisruptorBuilder, Follows, Handle};
+/// use ansa::{Builder, Follows, Handle};
 ///
-/// let mut handles = DisruptorBuilder::new(64, || 0)
+/// let mut disruptor = Builder::new(64, || 0)
 ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
 ///     .build()?;
 ///
 /// // lead and trailing are separate handles with separate cursors and clones
-/// let lead = handles.take_lead().unwrap().into_multi();
-/// let trailing = handles.take_producer(0).unwrap().into_multi();
+/// let lead = disruptor.take_lead().unwrap().into_multi();
+/// let trailing = disruptor.take_producer(0).unwrap().into_multi();
 ///
 /// let lead_clone = lead.clone();
 ///
@@ -93,12 +93,12 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     /// ```
     /// use ansa::*;
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
     ///     .build()?;
     ///
-    /// let lead_multi = handles.take_lead().unwrap().into_multi();
-    /// let follow_multi = handles.take_producer(0).unwrap().into_multi();
+    /// let lead_multi = disruptor.take_lead().unwrap().into_multi();
+    /// let follow_multi = disruptor.take_producer(0).unwrap().into_multi();
     ///
     /// assert_eq!(lead_multi.is_lead(), true);
     /// assert_eq!(follow_multi.is_lead(), false);
@@ -337,9 +337,9 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let mut builder = DisruptorBuilder::new(64, || 0)
+    /// let mut builder = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
     ///     .build()?;
     ///
@@ -1082,8 +1082,8 @@ impl<E> EventsMut<'_, E> {
         })
     }
 
-    /// Consume the batch without accessing its events. Moves the handle forward without applying
-    /// a function.
+    /// Moves the handle forward without applying a function, which consumes the batch without
+    /// accessing its events.
     ///
     /// # Examples
     /// ```
@@ -1268,8 +1268,8 @@ impl<E> Events<'_, E> {
         })
     }
 
-    /// Consume the batch without accessing its events. Moves the handle forward without applying
-    /// a function.
+    /// Moves the handle forward without applying a function, which consumes the batch without
+    /// accessing its events.
     ///
     /// # Examples
     /// ```

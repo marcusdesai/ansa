@@ -11,7 +11,7 @@ fn test_complex_consumer_dag() {
         seq: i64,
     }
 
-    let mut handles = DisruptorBuilder::new(128, Event::default)
+    let mut disruptor = Builder::new(128, Event::default)
         .add_handle(0, Handle::Consumer, Follows::LeadProducer)
         .add_handle(1, Handle::Consumer, Follows::LeadProducer)
         .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
@@ -32,7 +32,7 @@ fn test_complex_consumer_dag() {
     let num_of_events = 300;
 
     std::thread::scope(|s| {
-        let mut producer = handles.take_lead().unwrap();
+        let mut producer = disruptor.take_lead().unwrap();
         s.spawn(move || {
             let mut should_continue = true;
             while should_continue {
@@ -46,7 +46,7 @@ fn test_complex_consumer_dag() {
             }
         });
 
-        let mut consumer_0 = handles.take_consumer(0).unwrap();
+        let mut consumer_0 = disruptor.take_consumer(0).unwrap();
         let out = &mut consumer_0_out;
         s.spawn(move || {
             let mut should_continue = true;
@@ -58,7 +58,7 @@ fn test_complex_consumer_dag() {
             }
         });
 
-        let mut consumer_1 = handles.take_consumer(1).unwrap();
+        let mut consumer_1 = disruptor.take_consumer(1).unwrap();
         let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
         s.spawn(move || {
             let mut should_continue = true;
@@ -72,7 +72,7 @@ fn test_complex_consumer_dag() {
             }
         });
 
-        let mut consumer_2 = handles.take_consumer(2).unwrap();
+        let mut consumer_2 = disruptor.take_consumer(2).unwrap();
         let c2_counter = Arc::clone(&consumer_2_call_counter);
         s.spawn(move || {
             let mut should_continue = true;
@@ -84,7 +84,7 @@ fn test_complex_consumer_dag() {
             }
         });
 
-        let mut consumer_3 = handles.take_consumer(3).unwrap();
+        let mut consumer_3 = disruptor.take_consumer(3).unwrap();
         let c1_counter = Arc::clone(&consumer_1_seq_increment_counter);
         let c2_counter = Arc::clone(&consumer_2_call_counter);
         let c3_flag = &mut consumer_3_check_flag;
@@ -129,7 +129,7 @@ fn test_producer_conversions() {
         seq_times_2: i64,
     }
 
-    let mut handles = DisruptorBuilder::new(128, Event::default)
+    let mut disruptor = Builder::new(128, Event::default)
         .add_handle(0, Handle::Producer, Follows::LeadProducer)
         .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
         .wait_strategy(WaitBusy)
@@ -140,7 +140,7 @@ fn test_producer_conversions() {
     let mut is_times_2 = true;
 
     std::thread::scope(|s| {
-        let lead = handles.take_lead().unwrap();
+        let lead = disruptor.take_lead().unwrap();
         s.spawn(move || {
             let mut producer = lead;
             for _ in 0..2 {
@@ -167,7 +167,7 @@ fn test_producer_conversions() {
             }
         });
 
-        let trailing = handles.take_producer(0).unwrap();
+        let trailing = disruptor.take_producer(0).unwrap();
         s.spawn(move || {
             let multi = trailing.into_multi();
             let mut joins = vec![];
@@ -191,7 +191,7 @@ fn test_producer_conversions() {
             }
         });
 
-        let mut consumer = handles.take_consumer(1).unwrap();
+        let mut consumer = disruptor.take_consumer(1).unwrap();
         s.spawn(move || {
             let mut counter = 0;
             while counter < num_of_events {

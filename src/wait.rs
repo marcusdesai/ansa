@@ -570,7 +570,7 @@ pub struct TimedOut;
 ///
 /// let strategy = Timeout::new(Duration::from_millis(1), WaitBusy);
 ///
-/// let _ = DisruptorBuilder::new(64, || 0)
+/// let _ = Builder::new(64, || 0)
 ///     .wait_strategy(strategy)
 ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
 ///     .build()?;

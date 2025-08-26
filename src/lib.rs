@@ -57,7 +57,7 @@ use crate::wait::{WaitPhased, WaitSleep};
 /// Uses a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1 millisecond, then
 /// spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50 microsecond increments.
 ///
-/// See: [`DisruptorBuilder`] for configurable disruptor construction.
+/// See: [`Builder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -81,12 +81,12 @@ where
         size > 0 && size.is_power_of_two(),
         "size ({size}) must be non-zero power of two"
     );
-    let mut handles = DisruptorBuilder::new(size, event_factory)
+    let mut disruptor = Builder::new(size, event_factory)
         .add_handle(0, Handle::Consumer, Follows::LeadProducer)
         .build()
         .unwrap();
-    let producer = handles.take_lead().unwrap();
-    let consumer = handles.take_consumer(0).unwrap();
+    let producer = disruptor.take_lead().unwrap();
+    let consumer = disruptor.take_consumer(0).unwrap();
     (producer, consumer)
 }
 
@@ -99,7 +99,7 @@ where
 ///
 /// The returned multi producer can be cloned to enable distributed writes.
 ///
-/// See: [`DisruptorBuilder`] for configurable disruptor construction.
+/// See: [`Builder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -132,7 +132,7 @@ where
 /// Uses a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1 millisecond, then
 /// spins and yields the thread for 1 millisecond, and finally spins and sleeps for 50 microseconds.
 ///
-/// See: [`DisruptorBuilder`] for configurable disruptor construction.
+/// See: [`Builder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///
@@ -160,13 +160,13 @@ where
         size > 0 && size.is_power_of_two(),
         "size ({size}) must be non-zero power of two"
     );
-    let mut builder = DisruptorBuilder::new(size, event_factory);
+    let mut builder = Builder::new(size, event_factory);
     for id in 0..num_consumers {
         builder = builder.add_handle(id, Handle::Consumer, Follows::LeadProducer);
     }
-    let mut handles = builder.build().unwrap();
-    let producer = handles.take_lead().unwrap();
-    let consumers = handles.drain_consumers().map(|(_, c)| c).collect();
+    let mut disruptor = builder.build().unwrap();
+    let producer = disruptor.take_lead().unwrap();
+    let consumers = disruptor.drain_consumers().map(|(_, c)| c).collect();
     (producer, consumers)
 }
 
@@ -180,7 +180,7 @@ where
 ///
 /// The returned multi producer can be cloned to enable distributed writes.
 ///
-/// See: [`DisruptorBuilder`] for configurable disruptor construction.
+/// See: [`Builder`] for configurable disruptor construction.
 ///
 /// # Panics
 ///

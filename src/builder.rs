@@ -10,14 +10,14 @@ use std::time::Duration;
 
 /// Configures and builds the buffer and handles for a single disruptor.
 ///
-/// The configuration of the disruptor is only evaluated when [`build`](DisruptorBuilder::build)
+/// The configuration of the disruptor is only evaluated when [`build`](Builder::build)
 /// is called.
 ///
 /// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1
 /// millisecond, then spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50
 /// microsecond increments.
 #[derive(Debug)]
-pub struct DisruptorBuilder<F, E, W> {
+pub struct Builder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
     buffer_size: usize,
     /// Factory function for populating the buffer with events. Wrapped in an option only to
@@ -46,24 +46,24 @@ pub(crate) const BACKOFF_WAIT: WaitPhased<WaitSleep> = WaitPhased::new(
     WaitSleep::new(Duration::from_micros(50)),
 );
 
-impl<E> DisruptorBuilder<fn() -> E, E, WaitPhased<WaitSleep>> {
-    /// Returns a new [`DisruptorBuilder`].
+impl<E> Builder<fn() -> E, E, WaitPhased<WaitSleep>> {
+    /// Returns a new [`Builder`].
     ///
     /// The size of `buffer` must be a non-zero power of 2.
     ///
     /// # Examples
     /// ```
-    /// use ansa::DisruptorBuilder;
+    /// use ansa::Builder;
     ///
     /// let buffer = vec![0u8; 1024];
     ///
-    /// let builder = DisruptorBuilder::with_buffer(buffer.into_boxed_slice());
+    /// let builder = Builder::with_buffer(buffer.into_boxed_slice());
     /// ```
     pub fn with_buffer(buffer: Box<[E]>) -> Self
     where
         E: Sync,
     {
-        DisruptorBuilder {
+        Builder {
             buffer_size: buffer.len(),
             event_factory: None,
             provided_buffer: Some(buffer),
@@ -77,17 +77,17 @@ impl<E> DisruptorBuilder<fn() -> E, E, WaitPhased<WaitSleep>> {
     }
 }
 
-impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
-    /// Returns a new [`DisruptorBuilder`].
+impl<F, E> Builder<F, E, WaitPhased<WaitSleep>> {
+    /// Returns a new [`Builder`].
     ///
     /// `size` must be a non-zero power of 2. `event_factory` is used to populate the buffer.
     ///
     /// # Examples
     /// ```
-    /// use ansa::DisruptorBuilder;
+    /// use ansa::Builder;
     ///
     /// // with a very simple event_factory
-    /// let builder = DisruptorBuilder::new(64, || 0i64);
+    /// let builder = Builder::new(64, || 0i64);
     ///
     /// // using a closure to capture state
     /// let mut counter = -1_i64;
@@ -96,11 +96,11 @@ impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
     ///     counter
     /// };
     ///
-    /// let builder = DisruptorBuilder::new(64, factory);
+    /// let builder = Builder::new(64, factory);
     /// ```
     /// Of course, the above event types are a bit trivial.
     /// ```
-    /// use ansa::DisruptorBuilder;
+    /// use ansa::Builder;
     ///
     /// #[derive(Default)]
     /// enum Currency {
@@ -118,14 +118,14 @@ impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
     ///     currency: Currency,
     /// }
     ///
-    /// let builder = DisruptorBuilder::new(256, Event::default);
+    /// let builder = Builder::new(256, Event::default);
     /// ```
     pub fn new(size: usize, event_factory: F) -> Self
     where
         E: Sync,
         F: FnMut() -> E,
     {
-        DisruptorBuilder {
+        Builder {
             buffer_size: size,
             event_factory: Some(event_factory),
             provided_buffer: None,
@@ -139,7 +139,7 @@ impl<F, E> DisruptorBuilder<F, E, WaitPhased<WaitSleep>> {
     }
 }
 
-impl<F, E, W> DisruptorBuilder<F, E, W>
+impl<F, E, W> Builder<F, E, W>
 where
     F: FnMut() -> E,
     W: Clone,
@@ -171,10 +171,10 @@ where
     ///
     /// Consumers can follow each other.
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::{Builder, Follows, Handle};
     ///
     /// // lead ─► 0 ─► 1
-    /// let _ = DisruptorBuilder::new(64, || 0)
+    /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .build()?;
@@ -183,13 +183,13 @@ where
     /// But consumer handles do not require exclusive access to the buffer, which allows for
     /// multiple consumers to read the ring buffer concurrently.
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::{Builder, Follows, Handle};
     ///
     /// // lead ─► 0
     /// //    |
     /// //    ▼
     /// //    1
-    /// let _ = DisruptorBuilder::new(64, || 0)
+    /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
     ///     .build()?;
@@ -213,13 +213,13 @@ where
     ///
     /// Below is an example of a validly ordered producer in a graph.
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::{Builder, Follows, Handle};
     ///
     /// // lead ─► 0 ─► 2
     /// //         |    |
     /// //         ▼    ▼
     /// //         1 ─► 3P ─► 4
-    /// let _ = DisruptorBuilder::new(64, || 0)
+    /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
@@ -232,7 +232,7 @@ where
     ///
     /// See: [`BuildError`] for full details on error states encountered when building the
     /// disruptor. Such errors are likely to be caused by calls to this function or
-    /// [`extend_handles`](DisruptorBuilder::extend_handles) creating an invalid graph.
+    /// [`extend_handles`](Builder::extend_handles) creating an invalid graph.
     pub fn add_handle(mut self, id: u64, handle: Handle, follows: Follows) -> Self {
         if self.follows.contains_key(&id) {
             self.overlapping_ids.insert(id);
@@ -256,15 +256,15 @@ where
 
     /// Extend the handles graph with an iterator.
     ///
-    /// The implementation simply calls [`add_handle`](DisruptorBuilder::add_handle) on each
+    /// The implementation simply calls [`add_handle`](Builder::add_handle) on each
     /// element of the iterator.
     ///
     /// # Examples
     ///
     ///```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::{Builder, Follows, Handle};
     ///
-    /// let _ = DisruptorBuilder::new(64, || 0)
+    /// let _ = Builder::new(64, || 0)
     ///    .extend_handles([
     ///        (0, Handle::Consumer, Follows::LeadProducer),
     ///        (1, Handle::Consumer, Follows::LeadProducer),
@@ -288,21 +288,21 @@ where
     /// # Examples
     ///
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle};
+    /// use ansa::{Builder, Follows, Handle};
     /// use ansa::wait::WaitSleep;
     /// use std::time::Duration;
     ///
-    /// let _ = DisruptorBuilder::new(32, || 0)
+    /// let _ = Builder::new(32, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .wait_strategy(WaitSleep::new(Duration::from_nanos(500)))
     ///     .build()?;
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    pub fn wait_strategy<W2>(self, strategy: W2) -> DisruptorBuilder<F, E, W2>
+    pub fn wait_strategy<W2>(self, strategy: W2) -> Builder<F, E, W2>
     where
         W2: Clone,
     {
-        DisruptorBuilder {
+        Builder {
             buffer_size: self.buffer_size,
             event_factory: self.event_factory,
             provided_buffer: None,
@@ -315,28 +315,28 @@ where
         }
     }
 
-    /// Returns the constructed [`DisruptorHandles`] struct if successful, otherwise returns
+    /// Returns the constructed [`Disruptor`] struct if successful, otherwise returns
     /// [`BuildError`].
     ///
     /// For full details on error states, please see [`BuildError`].
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let _ = DisruptorBuilder::new(64, || 0)
+    /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .build()?;
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    pub fn build(mut self) -> Result<DisruptorHandles<E, W>, BuildError> {
+    pub fn build(mut self) -> Result<Disruptor<E, W>, BuildError> {
         self.validate()?;
         let buffer = Arc::new(self.construct_buffer());
         let lead_cursor = Arc::new(Cursor::start());
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
         let lead = HandleInner::new(lead_cursor, barrier, buffer, self.wait_strategy.clone());
-        Ok(DisruptorHandles {
+        Ok(Disruptor {
             lead: Some(lead.into_producer()),
             producers,
             consumers,
@@ -345,11 +345,9 @@ where
 
     fn construct_buffer(&mut self) -> RingBuffer<E> {
         match (self.event_factory.take(), self.provided_buffer.take()) {
-            (Some(event_factory), None) => {
-                RingBuffer::from_factory(self.buffer_size, event_factory)
-            }
+            (Some(factory), None) => RingBuffer::from_factory(self.buffer_size, factory),
             (None, Some(buffer)) => RingBuffer::from_buffer(buffer),
-            _ => unreachable!("guaranteed by DisruptorBuilder construction methods"),
+            _ => unreachable!("guaranteed by Builder construction methods"),
         }
     }
 
@@ -459,9 +457,9 @@ pub enum BuildError {
     ///
     /// ## Example Causes
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(2, Handle::Producer, Follows::Handles(vec![0]))
@@ -474,9 +472,9 @@ pub enum BuildError {
     /// for producer `2`.
     ///
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .extend_handles([
@@ -494,14 +492,14 @@ pub enum BuildError {
     /// `5`.
     ///
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
     /// // defines the following graph:
     /// // lead ─► 0 ─► 1P ─► 2 ─► 3 ─► 7
     /// //         |                    ▲
     /// //         ▼                    |
     /// //         4 ─► 5 ─► 6 ─-------─┘
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .extend_handles([
     ///         (0, Handle::Consumer, Follows::LeadProducer),
     ///         (1, Handle::Producer, Follows::Handles(vec![0])),
@@ -527,9 +525,9 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0, 2])) // <- here
     ///     .build();
@@ -541,9 +539,9 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![1, 3])) // <- here
@@ -558,9 +556,9 @@ pub enum BuildError {
     ///
     /// ## Example Cause
     /// ```
-    /// use ansa::{BuildError, DisruptorBuilder, Follows, Handle};
+    /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// let result = DisruptorBuilder::new(64, || 0)
+    /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![])) // <- here
     ///     .build();
@@ -718,34 +716,36 @@ pub enum Handle {
 /// by this object. If any single producer or consumer fails to move on the ring buffer, then the
 /// disruptor as a whole will eventually permanently stall.
 ///
-/// When `debug_assertions` are enabled, a warning is printed if this struct is not empty when
+/// Once empty, this object can be freely dropped.
+///
+/// When `debug_assertions` are enabled, a warning is printed if this object is not empty when
 /// dropped, i.e., there are still further producers or consumers to extract.
 #[derive(Debug)]
-pub struct DisruptorHandles<E, W> {
+pub struct Disruptor<E, W> {
     lead: Option<Producer<E, W, true>>,
     producers: U64Map<Producer<E, W, false>>,
     consumers: U64Map<Consumer<E, W>>,
 }
 
-impl<E, W> DisruptorHandles<E, W> {
+impl<E, W> Disruptor<E, W> {
     /// Returns the lead producer when first called, and returns `None` on all subsequent calls.
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .build()?;
     ///
-    /// let lead = handles.take_lead();
+    /// let lead = disruptor.take_lead();
     /// assert!(matches!(lead, Some(Producer { .. })));
     ///
-    /// let take_again = handles.take_lead();
+    /// let take_again = disruptor.take_lead();
     /// assert!(take_again.is_none());
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    #[must_use = "Disruptor will stall if any handle is not used "]
+    #[must_use = "Disruptor will stall if any handle is left unused"]
     pub fn take_lead(&mut self) -> Option<Producer<E, W, true>> {
         self.lead.take()
     }
@@ -754,20 +754,20 @@ impl<E, W> DisruptorHandles<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
     ///     .build()?;
     ///
-    /// let producer = handles.take_producer(0);
+    /// let producer = disruptor.take_producer(0);
     /// assert!(matches!(producer, Some(Producer { .. })));
     ///
-    /// let take_again = handles.take_producer(0);
+    /// let take_again = disruptor.take_producer(0);
     /// assert!(take_again.is_none());
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    #[must_use = "Disruptor will stall if any handle is not used"]
+    #[must_use = "Disruptor will stall if any handle is left unused"]
     pub fn take_producer(&mut self, id: u64) -> Option<Producer<E, W, false>> {
         self.producers.remove(&id)
     }
@@ -776,20 +776,20 @@ impl<E, W> DisruptorHandles<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Consumer};
+    /// use ansa::{Builder, Follows, Handle, Consumer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .build()?;
     ///
-    /// let consumer = handles.take_consumer(0);
+    /// let consumer = disruptor.take_consumer(0);
     /// assert!(matches!(consumer, Some(Consumer { .. })));
     ///
-    /// let take_again = handles.take_consumer(0);
+    /// let take_again = disruptor.take_consumer(0);
     /// assert!(take_again.is_none());
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    #[must_use = "Disruptor will stall if any handle is not used"]
+    #[must_use = "Disruptor will stall if any handle is left unused"]
     pub fn take_consumer(&mut self, id: u64) -> Option<Consumer<E, W>> {
         self.consumers.remove(&id)
     }
@@ -801,14 +801,14 @@ impl<E, W> DisruptorHandles<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Producer, Follows::Handles(vec![0]))
     ///     .build()?;
     ///
-    /// let producers: Vec<_> = handles.drain_producers().collect();
+    /// let producers: Vec<_> = disruptor.drain_producers().collect();
     ///
     /// let (id_0, _) = &producers[0];
     /// assert_eq!(*id_0, 0);
@@ -817,7 +817,7 @@ impl<E, W> DisruptorHandles<E, W> {
     /// assert_eq!(*id_1, 1);
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    #[must_use = "Disruptor will stall if any handle is not used"]
+    #[must_use = "Disruptor will stall if any handle is left unused"]
     pub fn drain_producers(&mut self) -> impl Iterator<Item = (u64, Producer<E, W, false>)> + '_ {
         self.producers.drain()
     }
@@ -829,14 +829,14 @@ impl<E, W> DisruptorHandles<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
     ///     .build()?;
     ///
-    /// let consumers: Vec<_> = handles.drain_consumers().collect();
+    /// let consumers: Vec<_> = disruptor.drain_consumers().collect();
     ///
     /// let (id_0, _) = &consumers[0];
     /// assert_eq!(*id_0, 0);
@@ -845,7 +845,7 @@ impl<E, W> DisruptorHandles<E, W> {
     /// assert_eq!(*id_1, 1);
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
-    #[must_use = "Disruptor will stall if any handle is not used"]
+    #[must_use = "Disruptor will stall if any handle is left unused"]
     pub fn drain_consumers(&mut self) -> impl Iterator<Item = (u64, Consumer<E, W>)> + '_ {
         self.consumers.drain()
     }
@@ -854,19 +854,19 @@ impl<E, W> DisruptorHandles<E, W> {
     ///
     /// # Examples
     /// ```
-    /// use ansa::{DisruptorBuilder, Follows, Handle, Producer};
+    /// use ansa::{Builder, Follows, Handle, Producer};
     ///
-    /// let mut handles = DisruptorBuilder::new(64, || 0)
+    /// let mut disruptor = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Producer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![0]))
     ///     .build()?;
     ///
-    /// let _ = handles.take_lead();
-    /// let _ = handles.drain_producers();
-    /// let _ = handles.drain_consumers();
+    /// let _ = disruptor.take_lead();
+    /// let _ = disruptor.drain_producers();
+    /// let _ = disruptor.drain_consumers();
     ///
-    /// assert_eq!(handles.is_empty(), true);
+    /// assert_eq!(disruptor.is_empty(), true);
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
     pub fn is_empty(&self) -> bool {
@@ -875,10 +875,10 @@ impl<E, W> DisruptorHandles<E, W> {
 }
 
 #[cfg(debug_assertions)]
-impl<E, W> Drop for DisruptorHandles<E, W> {
+impl<E, W> Drop for Disruptor<E, W> {
     fn drop(&mut self) {
         if !self.is_empty() {
-            println!("WARNING: DisruptorHandles not empty when dropped");
+            println!("WARNING: Disruptor not empty when dropped");
         }
     }
 }
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn test_find_cycle() {
-        let result = DisruptorBuilder::new(64, || 0)
+        let result = Builder::new(64, || 0)
             .extend_handles([
                 (0, Handle::Consumer, Follows::LeadProducer),
                 (1, Handle::Consumer, Follows::Handles(vec![0, 3])),
@@ -920,7 +920,7 @@ mod tests {
             .build();
         assert_eq!(result.err().unwrap(), BuildError::GraphCycle(1));
 
-        let result = DisruptorBuilder::new(64, || 0)
+        let result = Builder::new(64, || 0)
             .extend_handles([
                 (0, Handle::Consumer, Follows::LeadProducer),
                 (1, Handle::Consumer, Follows::Handles(vec![0])),
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_builder_empty_follows_disconnected_err() {
-        let result = DisruptorBuilder::new(32, || 0)
+        let result = Builder::new(32, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![]))
             .build();
@@ -1172,13 +1172,13 @@ mod tests {
     #[test]
     fn test_builder_buffer_size_error() {
         // buffer size cannot be 0
-        let result = DisruptorBuilder::new(0, || 0)
+        let result = Builder::new(0, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .build();
         assert_eq!(result.err().unwrap(), BuildError::BufferSize(0));
 
         // buffer size must be power of 2
-        let result2 = DisruptorBuilder::new(12, || 0)
+        let result2 = Builder::new(12, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .build();
         assert_eq!(result2.err().unwrap(), BuildError::BufferSize(12))
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_builder_overlapping_ids() {
-        let result = DisruptorBuilder::new(32, || 0)
+        let result = Builder::new(32, || 0)
             .add_handle(0, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::LeadProducer)
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
@@ -1197,13 +1197,13 @@ mod tests {
 
     #[test]
     fn test_builder_empty_graph() {
-        let result = DisruptorBuilder::new(32, || 0).build();
+        let result = Builder::new(32, || 0).build();
         assert_eq!(result.err().unwrap(), BuildError::EmptyGraph)
     }
 
     #[test]
     fn test_builder_lead_not_followed() {
-        let result = DisruptorBuilder::new(32, || 0)
+        let result = Builder::new(32, || 0)
             .add_handle(0, Handle::Consumer, Follows::Handles(vec![8]))
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .build();

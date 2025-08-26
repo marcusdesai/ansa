@@ -1,5 +1,5 @@
 use ansa::wait::WaitStrategy;
-use ansa::{Barrier, DisruptorBuilder, DisruptorHandles, Follows, Handle};
+use ansa::{Barrier, Builder, Disruptor, Follows, Handle};
 use std::time::{Duration, Instant};
 
 // Any test that doesn't finish within this limit is likely infinitely looping, and thus has failed
@@ -31,14 +31,14 @@ unsafe impl WaitStrategy for WaitPanic {
 /// All producers must write the sequence number to each event.
 pub fn run_test_lead<P: Send, I, F>(
     num_of_events: u32,
-    make_producer: impl FnOnce(&mut DisruptorHandles<i64, WaitPanic>) -> P,
+    make_producer: impl FnOnce(&mut Disruptor<i64, WaitPanic>) -> P,
     producer_funcs: impl Fn(P) -> I,
 ) where
     I: IntoIterator<Item = F>,
     F: FnMut() + Send,
 {
     assert_eq!(num_of_events % 20, 0);
-    let mut handles = DisruptorBuilder::new(64, || 0i64)
+    let mut disruptor = Builder::new(64, || 0i64)
         .add_handle(0, Handle::Consumer, Follows::LeadProducer)
         .wait_strategy(WaitPanic)
         .build()
@@ -48,14 +48,14 @@ pub fn run_test_lead<P: Send, I, F>(
     std::thread::scope(|s| {
         let mut join_handles = Vec::new();
 
-        let lead = make_producer(&mut handles);
+        let lead = make_producer(&mut disruptor);
         for mut func in producer_funcs(lead) {
             let jh = s.spawn(move || func());
             join_handles.push(jh);
         }
 
         let out = &mut result;
-        let mut consumer = handles.take_consumer(0).unwrap();
+        let mut consumer = disruptor.take_consumer(0).unwrap();
         let jh = s.spawn(move || {
             for _ in 0..num_of_events / 20 {
                 consumer.wait(20).for_each(|i, _, _| out.push(*i))
@@ -82,7 +82,7 @@ pub fn run_test_lead<P: Send, I, F>(
 /// All producers must write zero to each event.
 pub fn run_test_trailing<P: Send, I, F>(
     num_of_events: u32,
-    make_producer: impl FnOnce(u64, &mut DisruptorHandles<i64, WaitPanic>) -> P,
+    make_producer: impl FnOnce(u64, &mut Disruptor<i64, WaitPanic>) -> P,
     producer_funcs: impl Fn(P) -> I,
 ) where
     I: IntoIterator<Item = F>,
@@ -90,7 +90,7 @@ pub fn run_test_trailing<P: Send, I, F>(
 {
     assert_eq!(num_of_events % 20, 0);
     let trailing_id = 1;
-    let mut handles = DisruptorBuilder::new(64, || 0i64)
+    let mut disruptor = Builder::new(64, || 0i64)
         .add_handle(0, Handle::Consumer, Follows::LeadProducer)
         .add_handle(trailing_id, Handle::Producer, Follows::Handles(vec![0]))
         .add_handle(2, Handle::Consumer, Follows::Handles(vec![1]))
@@ -103,7 +103,7 @@ pub fn run_test_trailing<P: Send, I, F>(
     std::thread::scope(|s| {
         let mut join_handles = Vec::new();
 
-        let mut lead = handles.take_lead().unwrap();
+        let mut lead = disruptor.take_lead().unwrap();
         let jh = s.spawn(move || {
             for _ in 0..num_of_events / 20 {
                 lead.wait(20).for_each(|i, seq, _| *i = seq)
@@ -111,15 +111,15 @@ pub fn run_test_trailing<P: Send, I, F>(
         });
         join_handles.push(jh);
 
-        let trailing = make_producer(trailing_id, &mut handles);
+        let trailing = make_producer(trailing_id, &mut disruptor);
         for mut func in producer_funcs(trailing) {
             let jh = s.spawn(move || func());
             join_handles.push(jh);
         }
 
         let consumers = [
-            (&mut results_seq, handles.take_consumer(0).unwrap()),
-            (&mut results_blank, handles.take_consumer(2).unwrap()),
+            (&mut results_seq, disruptor.take_consumer(0).unwrap()),
+            (&mut results_blank, disruptor.take_consumer(2).unwrap()),
         ];
         for (out, mut consumer) in consumers {
             let jh = s.spawn(move || {
