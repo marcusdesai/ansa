@@ -16,6 +16,7 @@ use std::sync::Arc;
 /// `MultiProducer`.
 ///
 /// # Examples
+///
 /// ```
 /// use ansa::{Builder, Follows, Handle};
 ///
@@ -46,8 +47,8 @@ use std::sync::Arc;
 ///    even if an error occurs.
 ///
 /// As soon as a `MultiProducer` clone claims and waits for available sequences, it is commited to
-/// moving the shared cursor up to the end of the claimed batch, regardless of whether either
-/// waiting for or processing the batch is successful or not.
+/// moving the cursor shared by all associated `MultiProducer` clones up to the end of the claimed
+/// batch, regardless of whether either waiting for or processing the batch is successful or not.
 ///
 /// This commitment requires that batches always be completed (and the cursor moved), even for
 /// fallible methods where errors might occur. Importantly, this means that handles which follow a
@@ -58,14 +59,15 @@ use std::sync::Arc;
 /// actually available, as the bounds of the claim must be used. Hence, `wait_range` cannot be
 /// implemented.
 ///
-/// Lastly, separate `wait` methods cannot be provided, because [`EventsMut`] structs cannot be
-/// guaranteed to operate correctly in user code. If an `EventsMut` is dropped without an apply
-/// method being called, then the claim it was generated from will go unused, ultimately causing
-/// permanent disruptor stalls. Instead, combined wait and apply methods are provided.
+/// Lastly, separate `wait` methods cannot be provided, because [`EventsMut`] objects created by a
+/// `MultiProducer` cannot be guaranteed to operate correctly in user code. If an `EventsMut` is
+/// dropped without an apply method being called, then the claim it was generated from will go
+/// unused, ultimately causing permanent disruptor stalls. Instead, combined wait and apply methods
+/// are provided.
 #[derive(Debug)]
 pub struct MultiProducer<E, W, const LEAD: bool> {
-    inner: HandleInner<E, W, LEAD>,
     claim: Arc<Cursor>, // shared between all clones of this multi producer
+    inner: HandleInner<E, W, LEAD>,
 }
 
 impl<E, W, const LEAD: bool> Clone for MultiProducer<E, W, LEAD>
@@ -74,14 +76,14 @@ where
 {
     fn clone(&self) -> Self {
         MultiProducer {
+            claim: Arc::clone(&self.claim),
             inner: HandleInner {
                 cursor: Arc::clone(&self.inner.cursor),
                 barrier: self.inner.barrier.clone(),
                 buffer: Arc::clone(&self.inner.buffer),
-                wait_strategy: self.inner.wait_strategy.clone(),
                 available: self.inner.available,
+                wait_strategy: self.inner.wait_strategy.clone(),
             },
-            claim: Arc::clone(&self.claim),
         }
     }
 }
@@ -191,14 +193,14 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     #[inline]
     pub fn set_wait_strategy<W2>(self, wait_strategy: W2) -> MultiProducer<E, W2, LEAD> {
         MultiProducer {
-            inner: self.inner.set_wait_strategy(wait_strategy),
             claim: self.claim,
+            inner: self.inner.set_wait_strategy(wait_strategy),
         }
     }
 
     /// Return a [`Producer`] if exactly one `MultiProducer` exists for this cursor.
     ///
-    /// Otherwise, return `None` and drops this producer.
+    /// Otherwise, return `None` and drops this `MultiProducer`.
     ///
     /// If this function is called when only one `MultiProducer` exists, then it is guaranteed to
     /// return a `Producer`.
@@ -416,8 +418,8 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     pub fn into_multi(self) -> MultiProducer<E, W, LEAD> {
         let producer_seq = self.sequence();
         MultiProducer {
-            inner: self.inner,
             claim: Arc::new(Cursor::new(producer_seq)),
+            inner: self.inner,
         }
     }
 }
@@ -707,11 +709,11 @@ where
 
 #[derive(Debug)]
 pub(crate) struct HandleInner<E, W, const LEAD: bool> {
-    pub(crate) cursor: Arc<Cursor>,
-    pub(crate) barrier: Barrier,
-    pub(crate) buffer: Arc<RingBuffer<E>>,
-    pub(crate) wait_strategy: W,
-    pub(crate) available: i64,
+    cursor: Arc<Cursor>, // todo: store cursor value locally to avoid cache miss on atomic loads?
+    barrier: Barrier,
+    buffer: Arc<RingBuffer<E>>,
+    available: i64,
+    wait_strategy: W,
 }
 
 impl<E, W> HandleInner<E, W, false> {
@@ -729,8 +731,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
         wait_strategy: W,
     ) -> Self {
         let available = if LEAD {
-            // buffer size can always be cast to i64, as allocations cannot be larger than i64::MAX
-            CURSOR_START - (buffer.size() as i64)
+            CURSOR_START - to_i64_saturated(buffer.size())
         } else {
             CURSOR_START
         };
@@ -738,8 +739,8 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             cursor,
             barrier,
             buffer,
-            wait_strategy,
             available,
+            wait_strategy,
         }
     }
 
@@ -759,8 +760,8 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             cursor: self.cursor,
             barrier: self.barrier,
             buffer: self.buffer,
-            wait_strategy,
             available: self.available,
+            wait_strategy,
         }
     }
 
@@ -816,6 +817,8 @@ where
         debug_assert!(self.available >= till_seq);
         self.as_batch(from_seq, size)
     }
+
+    // todo: wait for specific sequence to create a batch with
 
     // todo: check that range: 0.. always returns immediately if no sequence available
     #[inline]
@@ -986,7 +989,7 @@ impl<E> EventsMut<'_, E> {
     ///
     /// If an error occurs, leaves the cursor sequence unchanged and returns the error.
     ///
-    /// **Important**: does _not_ undo any mutations to events if an error occurs.
+    /// **Important**: event mutations are _not_ reverted if an error occurs.
     ///
     /// The parameters of `f` are:
     ///
@@ -1034,7 +1037,7 @@ impl<E> EventsMut<'_, E> {
     /// If an error occurs, returns the error and updates the cursor sequence to the position of
     /// the last successfully processed event. In effect, commits the successful portion of the batch.
     ///
-    /// **Important**: does _not_ undo any mutations to events if an error occurs.
+    /// **Important**: event mutations are _not_ reverted if an error occurs.
     ///
     /// The parameters of `f` are:
     ///
@@ -1056,7 +1059,7 @@ impl<E> EventsMut<'_, E> {
     /// assert_eq!(producer.sequence(), 9);
     /// # Ok::<(), i64>(())
     /// ```
-    /// On failure, the cursor will be moved to the last successful sequence.
+    /// On failure, the cursor will be moved to the sequence of the last successful application.
     /// ```
     /// let (mut producer, _) = ansa::spsc(64, || 0);
     ///
@@ -1239,7 +1242,7 @@ impl<E> Events<'_, E> {
     /// assert_eq!(consumer.sequence(), 9);
     /// # Ok::<(), i64>(())
     /// ```
-    /// On failure, the cursor will be moved to the last successful sequence.
+    /// On failure, the cursor will be moved to the sequence of the last successful application.
     /// ```
     /// let (mut producer, mut consumer) = ansa::spsc(64, || 0);
     ///
@@ -1320,6 +1323,9 @@ impl Cursor {
 /// A collection of cursors that determine which sequence is available to a handle.
 ///
 /// Every handle has a barrier, and no handle may overtake its barrier.
+///
+/// Barriers are automatically constructed and assigned to each handle. There is no public method
+/// to construct a barrier.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Barrier(BarrierInner);

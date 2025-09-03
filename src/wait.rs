@@ -1,4 +1,4 @@
-//! Provides strategies used by handles when waiting for sequences on the ring buffer.
+//! Provides strategies used by handles when waiting for available events on the ring buffer.
 //!
 //! Also provided are three traits for implementing your own wait logic.
 //!
@@ -11,10 +11,8 @@
 //! Each handle struct includes a wait strategy. So the size of the strategy may impact performance
 //! if, for example, that additional size prevents the handle from fitting into a single cache line.
 //!
-//! Cache lines are commonly `64`, or `128` bytes.
-//!
 //! When the wait strategy is zero-sized, each handle has the following size (in bytes, on a 64-bit
-//! system). Changes in these sizes, if compiled for a single system, are considered breaking.
+//! system). Changes in these sizes, across compiles for a single system, are considered breaking.
 //!
 //! | Handle                                           | size |
 //! |--------------------------------------------------|------|
@@ -109,7 +107,7 @@ pub trait Waiting {
 /// across loop iterations, then prefer implementing [`Waiting`] instead, as it provides a safe
 /// interface.
 ///
-/// A well-behaved implementation should return as soon as `barrier sequence >= desired_seq`, but
+/// A _well-behaved_ implementation should return as soon as `barrier sequence >= desired_seq`, but
 /// this is not a safety condition.
 ///
 /// # Safety
@@ -117,11 +115,11 @@ pub trait Waiting {
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`wait`](WaitStrategy::wait) causing Undefined Behaviour. Valid implementations must satisfy
 /// the following conditions:
-/// 1) `wait` must not return while `barrier sequence < desired_seq`.
-/// 2) `wait` must return the last read `barrier sequence`.
+/// 1) `wait` **must not** return while `barrier sequence < desired_seq`.
+/// 2) `wait` **must** return the last read `barrier sequence`.
 ///
 /// If `wait` does not abide by these conditions, then writes to the ring buffer may overlap with
-/// other accesses, causing Undefined Behaviour due to mutable aliasing.
+/// accesses in another process, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// # Examples
 /// ```
@@ -145,7 +143,7 @@ pub trait Waiting {
 /// }
 /// ```
 ///
-/// The following example shows only _some_ of the possible implementation mistakes that will
+/// The following example shows only _some_ of the possible implementations that will
 /// cause UB.
 /// ```
 /// use ansa::{Barrier, wait::WaitStrategy};
@@ -176,7 +174,7 @@ pub unsafe trait WaitStrategy {
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
     /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
-    /// Well-behaved implementations should return as soon as `barrier sequence >= desired_seq`.
+    /// _Well-behaved_ implementations should return as soon as `barrier sequence >= desired_seq`.
     ///
     /// Implementations must satisfy the following conditions:
     /// 1) Must not return while `barrier sequence < desired_seq`.
@@ -207,7 +205,7 @@ where
 /// carrying state across loop iterations, then prefer implementing [`Waiting`] instead, as it
 /// provides a safe interface.
 ///
-/// A well-behaved implementation should return as soon as `barrier sequence >= desired_seq`, but
+/// A _well-behaved_ implementation should return as soon as `barrier sequence >= desired_seq`, but
 /// this is not a safety condition.
 ///
 /// # Safety
@@ -215,11 +213,11 @@ where
 /// This trait is unsafe as there is no guard against invalid implementations of
 /// [`try_wait`](TryWaitStrategy::try_wait) causing Undefined Behaviour. Valid implementations must
 /// satisfy the following conditions:
-/// 1) `try_wait` must not successfully return while `barrier sequence < desired_seq`.
-/// 2) `try_wait`, if successful, must return the last read `barrier sequence`.
+/// 1) `try_wait` **must not** successfully return while `barrier sequence < desired_seq`.
+/// 2) `try_wait`, if successful, **must** return the last read `barrier sequence`.
 ///
 /// If `try_wait` does not abide by these conditions, then writes to the ring buffer may overlap
-/// with other accesses, causing Undefined Behaviour due to mutable aliasing.
+/// with accesses in another process, causing Undefined Behaviour due to mutable aliasing.
 ///
 /// Note that no conditions limit when `try_wait` can return an error.
 ///
@@ -276,7 +274,7 @@ where
 /// }
 /// ```
 ///
-/// The following example shows only _some_ of the possible implementation mistakes that will
+/// The following example shows only _some_ of the possible implementations that will
 /// cause UB.
 /// ```
 /// use ansa::{Barrier, wait::TryWaitStrategy};
@@ -311,7 +309,7 @@ pub unsafe trait TryWaitStrategy {
     /// `desired_seq` represents a value which the barrier must exceed before the wait loop can end.
     /// Call [`Barrier::sequence`] to view updates of the barrier's position.
     ///
-    /// Well-behaved implementations should return as soon as `barrier sequence >= desired_seq`.
+    /// _Well-behaved_ implementations should return as soon as `barrier sequence >= desired_seq`.
     ///
     /// Implementations must satisfy the following conditions:
     /// 1) Must not successfully return while `barrier sequence < desired_seq`.
@@ -568,12 +566,22 @@ pub struct TimedOut;
 /// use ansa::wait::*;
 /// use std::time::Duration;
 ///
-/// let strategy = Timeout::new(Duration::from_millis(1), WaitBusy);
+/// let strategy = Timeout::new(Duration::from_micros(1), WaitBusy);
 ///
-/// let _ = Builder::new(64, || 0)
+/// let mut disruptor = Builder::new(64, || 0)
 ///     .wait_strategy(strategy)
 ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
 ///     .build()?;
+///
+/// let mut consumer = disruptor.take_consumer(0).unwrap();
+/// // consumer will time out waiting, as no events are available
+/// assert!(matches!(consumer.try_wait(5), Err(TimedOut)));
+///
+/// let mut producer = disruptor.take_lead().unwrap();
+/// // make some events available
+/// producer.try_wait(10).unwrap().consume();
+///
+/// assert!(consumer.try_wait(5).is_ok());
 /// # Ok::<(), BuildError>(())
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -613,11 +621,30 @@ impl<W> Timeout<W> {
     }
 
     /// Returns the duration till timeout, in nanoseconds.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::wait::{Timeout, WaitBusy};
+    /// use std::time::Duration;
+    ///
+    /// let timeout = Timeout::new(Duration::from_micros(1), WaitBusy);
+    /// assert_eq!(timeout.nanos_till(), 1000);
+    /// ```
     pub const fn nanos_till(&self) -> u64 {
         self.nanos
     }
 
     /// Returns the wrapped wait strategy.
+    ///
+    /// # Examples
+    /// ```
+    /// use ansa::wait::{Timeout, WaitBusy};
+    /// use std::time::Duration;
+    ///
+    /// let timeout = Timeout::new(Duration::from_micros(1), WaitBusy);
+    ///
+    /// let _inner: WaitBusy = timeout.into_inner();
+    /// ```
     pub fn into_inner(self) -> W {
         self.strategy
     }

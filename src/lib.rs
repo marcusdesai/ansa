@@ -13,6 +13,8 @@
 //! - examples
 //! - terminology (ring buffer, handle, etc...)
 //!
+//! - enable custom graph topologies, including trailing producers and parallel consumers
+//!
 //! # Disruptor
 //!
 //! This crate implements the Disruptor pattern as described in the original [whitepaper][disruptor].

@@ -69,6 +69,7 @@ impl<E> RingBuffer<E> {
     /// dereferencing them can always be done safely.
     ///
     /// # Safety
+    ///
     /// Creating a reference from a provided pointer is UB if mutable aliasing occurs as a result.
     /// Callers must satisfy both the following two conditions to create a reference safely:
     ///
