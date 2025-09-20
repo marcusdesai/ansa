@@ -10,6 +10,8 @@ use std::sync::Arc;
 /// `MultiProducer`s can be cloned to enable distributed writes. Clones coordinate by claiming
 /// non-overlapping ranges of sequence values, which can be writen to in parallel.
 ///
+/// `MultiProducer` implements [`Send`], so its clones can safely be sent to other threads.
+///
 /// Clones of this `MultiProducer` share this producer's cursor.
 ///
 /// See: **\[INSERT LINK]** for alternative methods of parallelizing producers without using
@@ -114,7 +116,8 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
     ///
     /// **Important:** Care should be taken when performing actions based upon this number, as any
     /// thread which holds an associated [`MultiProducer`] may clone it at any time, thereby
-    /// changing the count.
+    /// increasing the count. Similarly, any thread may drop an associated [`MultiProducer`] at any
+    /// time, thereby decreasing the count.
     ///
     /// # Examples
     /// ```
@@ -200,7 +203,7 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
 
     /// Return a [`Producer`] if exactly one `MultiProducer` exists for this cursor.
     ///
-    /// Otherwise, return `None` and drops this `MultiProducer`.
+    /// Otherwise, returns `None` and drops this `MultiProducer`.
     ///
     /// If this function is called when only one `MultiProducer` exists, then it is guaranteed to
     /// return a `Producer`.
@@ -964,7 +967,7 @@ impl<E> EventsMut<'_, E> {
     /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -994,7 +997,7 @@ impl<E> EventsMut<'_, E> {
     /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -1034,15 +1037,15 @@ impl<E> EventsMut<'_, E> {
 
     /// Try to process a batch of mutable events on the buffer using the closure `f`.
     ///
-    /// If an error occurs, returns the error and updates the cursor sequence to the position of
-    /// the last successfully processed event. In effect, commits the successful portion of the batch.
+    /// If an error occurs, returns the error and updates the cursor sequence to that of the last
+    /// successfully processed event. In effect, commits the successful portion of the batch.
     ///
     /// **Important**: event mutations are _not_ reverted if an error occurs.
     ///
     /// The parameters of `f` are:
     ///
     /// - `event: &mut E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -1133,7 +1136,7 @@ impl<E> Events<'_, E> {
     /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -1164,7 +1167,7 @@ impl<E> Events<'_, E> {
     /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -1216,13 +1219,13 @@ impl<E> Events<'_, E> {
 
     /// Try to process a batch of immutable events on the buffer using the closure `f`.
     ///
-    /// If an error occurs, returns the error and updates the cursor sequence to the position of
-    /// the last successfully processed event. In effect, commits the successful portion of the batch.
+    /// If an error occurs, returns the error and updates the cursor sequence to that of the last
+    /// successfully processed event. In effect, commits the successful portion of the batch.
     ///
     /// The parameters of `f` are:
     ///
     /// - `event: &E`, a reference to the buffer element being accessed.
-    /// - `sequence: i64`, the position of this event in the sequence.
+    /// - `sequence: i64`, the sequence number of this event.
     /// - `batch_end: bool`, indicating whether this is the last event in the requested batch.
     ///
     /// # Examples
@@ -1313,7 +1316,7 @@ impl Cursor {
         }
     }
 
-    /// Create a cursor at the start of the sequence. All accesses begin on the _next_ position in
+    /// Create a cursor at the start of the sequence. All accesses begin on the _next_ number in
     /// the sequence, thus cursors start at `-1`, so that accesses start at `0`.
     pub(crate) const fn start() -> Self {
         Cursor::new(CURSOR_START)
@@ -1321,6 +1324,9 @@ impl Cursor {
 }
 
 /// A collection of cursors that determine which sequence is available to a handle.
+///
+/// Each cursor in the barrier shows the current sequence of a handle in the disruptor. A handle's
+/// barrier contains only the cursors of those handles which it follows.
 ///
 /// Every handle has a barrier, and no handle may overtake its barrier.
 ///
@@ -1345,7 +1351,9 @@ impl Barrier {
         Barrier(BarrierInner::Many(cursors))
     }
 
-    /// The position of the barrier.
+    /// The sequence of the barrier.
+    ///
+    /// The returned sequence is the minimum off all cursors which make up the barrier.
     ///
     /// # Examples
     /// ```

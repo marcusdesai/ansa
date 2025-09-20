@@ -41,6 +41,10 @@
 //! A handle `h` *cannot* overtake the handles `B` (for barrier) that it follows. This constraint
 //! is ensures buffer accesses do not invalidly overlap.
 //!
+//! The "sequence" or "sequence value" is the sequence number of the last event processed or
+//! published by the handle. In the implementation, the sequence is used to determine the position
+//! of a handle on the ring buffer, but this is not exposed to the user.
+//!
 
 mod builder;
 mod handles;

@@ -31,10 +31,10 @@ fn main() {
     for _ in 0..(num + batch - 1) / batch {
         producer.wait(batch as usize).for_each(|event, seq, _| event.data = seq as u32);
     }
-    let counter = consumer_thread.join().expect("should not panic");
+    let seq_reached = consumer_thread.join().expect("should not panic");
     let elapsed = start.elapsed();
 
-    assert!(counter >= num);
-    println!("elapsed: {}", elapsed.as_millis());
-    println!("counter: {}", counter);
+    assert!(seq_reached >= num);
+    println!("      elapsed ms: {}", elapsed.as_millis());
+    println!("sequence reached: {}", seq_reached);
 }

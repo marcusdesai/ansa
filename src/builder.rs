@@ -8,14 +8,17 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Configures and builds the buffer and handles for a single disruptor.
+/// Configures and builds a disruptor.
 ///
-/// The configuration of the disruptor is only evaluated when [`build`](Builder::build)
-/// is called.
+/// Allows users to create custom handle graphs, including trailing producers and concurrent
+/// consumers.
 ///
 /// Defaults to a [`WaitPhased<WaitSleep>`](WaitPhased) strategy which busy-spins for 1
 /// millisecond, then spin-yields the thread for 1 millisecond, and finally spin-sleeps in 50
 /// microsecond increments.
+///
+/// The configuration of the disruptor is only evaluated when [`build`](Builder::build)
+/// is called.
 #[derive(Debug)]
 pub struct Builder<F, E, W> {
     /// Size of the ring buffer, must be power of 2.
@@ -49,7 +52,8 @@ pub(crate) const BACKOFF_WAIT: WaitPhased<WaitSleep> = WaitPhased::new(
 impl<E> Builder<fn() -> E, E, WaitPhased<WaitSleep>> {
     /// Returns a new [`Builder`].
     ///
-    /// The size of `buffer` must be a non-zero power of 2.
+    /// The size of `buffer` should be a non-zero power of 2, or the call to
+    /// [`build`](Builder::build) will fail.
     ///
     /// # Examples
     /// ```
@@ -80,9 +84,13 @@ impl<E> Builder<fn() -> E, E, WaitPhased<WaitSleep>> {
 impl<F, E> Builder<F, E, WaitPhased<WaitSleep>> {
     /// Returns a new [`Builder`].
     ///
-    /// `size` must be a non-zero power of 2. `event_factory` is used to populate the buffer.
+    /// `event_factory` is used to populate the buffer.
+    ///
+    /// `size` must be a non-zero power of 2, or the call to [`build`](Builder::build) will fail.
     ///
     /// # Examples
+    ///
+    /// Using `i64` as the event type:
     /// ```
     /// use ansa::Builder;
     ///
@@ -98,7 +106,7 @@ impl<F, E> Builder<F, E, WaitPhased<WaitSleep>> {
     ///
     /// let builder = Builder::new(64, factory);
     /// ```
-    /// Of course, the above event types are a bit trivial.
+    /// With a complex event type:
     /// ```
     /// use ansa::Builder;
     ///
@@ -146,8 +154,8 @@ where
 {
     /// Add a handle to the disruptor.
     ///
-    /// Each handle must be associated with a unique `id`, and must be either a consumer or
-    /// producer.
+    /// Each handle must be associated with a unique `id`, and must be either a [`Consumer`] or
+    /// [`Producer`].
     ///
     /// In the disruptor pattern, management of ring buffer accesses works by ordering handles
     /// according to a precedence, or "follows", relationship. Every handle must describe how it
@@ -156,14 +164,15 @@ where
     /// If handle `B` follows handle `A`, then `B` accesses events on the ring buffer exclusively
     /// after `A`. See: [`Follows`] for more.
     ///
-    /// These precedence relationships must form a [directed acyclic graph][dag], where handles
-    /// follow the lead producer or other handles. No loops are allowed.
+    /// These precedence relationships must form a [directed acyclic graph][dag] (no loops allowed),
+    /// where handles follow the lead producer or other handles. Furthermore, every handle must
+    /// follow or be followed by every producer. See below for more details about ordering handles.
     ///
     /// [dag]: https://en.wikipedia.org/wiki/Directed_acyclic_graph
     ///
-    /// The "lead producer" is an automatically defined handle. It is always a producer, and it
-    /// serves as the root of the graph. Every other handle must follow the lead either directly or
-    /// indirectly.
+    /// The "lead producer" is automatically defined for every disruptor. It is always a producer,
+    /// and it serves as the root of the graph. Every other handle must follow the lead either
+    /// directly or indirectly.
     ///
     /// # Ordering Handles
     ///
@@ -173,7 +182,7 @@ where
     /// ```
     /// use ansa::{Builder, Follows, Handle};
     ///
-    /// // lead ─► 0 ─► 1
+    /// // lead ◄─ 0 ◄─ 1
     /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
@@ -185,9 +194,9 @@ where
     /// ```
     /// use ansa::{Builder, Follows, Handle};
     ///
-    /// // lead ─► 0
-    /// //    |
-    /// //    ▼
+    /// // lead ◄─ 0
+    /// //    ▲
+    /// //    │
     /// //    1
     /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
@@ -207,7 +216,7 @@ where
     /// with respect to all producer handles.
     ///
     /// If this restriction was not in place, overlapping writes to the buffer (read: mutable
-    /// aliasing) would be possible.
+    /// aliasing and so undefined behaviour) would be possible.
     ///
     /// For examples of invalid producer ordering, see: [`BuildError::UnorderedProducer`].
     ///
@@ -215,10 +224,10 @@ where
     /// ```
     /// use ansa::{Builder, Follows, Handle};
     ///
-    /// // lead ─► 0 ─► 2
-    /// //         |    |
-    /// //         ▼    ▼
-    /// //         1 ─► 3P ─► 4
+    /// // lead ◄─ 0 ◄─ 2
+    /// //         ▲    ▲
+    /// //         │    │
+    /// //         1 ◄─ 3P ◄─ 4
     /// let _ = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
@@ -315,8 +324,7 @@ where
         }
     }
 
-    /// Returns the constructed [`Disruptor`] struct if successful, otherwise returns
-    /// [`BuildError`].
+    /// Returns the constructed [`Disruptor`] if successful, otherwise returns [`BuildError`].
     ///
     /// For full details on error states, please see [`BuildError`].
     ///
@@ -329,6 +337,7 @@ where
     ///     .build()?;
     /// # Ok::<(), ansa::BuildError>(())
     /// ```
+    #[track_caller]
     pub fn build(mut self) -> Result<Disruptor<E, W>, BuildError> {
         self.validate()?;
         let buffer = Arc::new(self.construct_buffer());
@@ -336,10 +345,23 @@ where
         let (producers, consumers, cursor_map) = self.construct_handles(&lead_cursor, &buffer);
         let barrier = self.construct_lead_barrier(cursor_map);
         let lead = HandleInner::new(lead_cursor, barrier, buffer, self.wait_strategy.clone());
+
         Ok(Disruptor {
             lead: Some(lead.into_producer()),
             producers,
             consumers,
+
+            #[cfg(debug_assertions)]
+            build_position: {
+                use std::panic::Location;
+                let location = Location::caller();
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            },
         })
     }
 
@@ -352,7 +374,7 @@ where
     }
 
     fn construct_lead_barrier(&self, cursor_map: U64Map<Arc<Cursor>>) -> Barrier {
-        let mut cursors: Vec<_> = self
+        let mut tail_cursors: Vec<_> = self
             .followed_by
             .iter()
             .filter(|(_, followed_by)| followed_by.is_empty())
@@ -360,10 +382,10 @@ where
             .map(|(id, _)| Arc::clone(cursor_map.get(id).unwrap()))
             .collect();
 
-        assert!(!cursors.is_empty());
-        match cursors.len() {
-            1 => Barrier::one(cursors.pop().unwrap()),
-            _ => Barrier::many(cursors.into_boxed_slice()),
+        debug_assert!(!tail_cursors.is_empty());
+        match tail_cursors.len() {
+            1 => Barrier::one(tail_cursors.pop().unwrap()),
+            _ => Barrier::many(tail_cursors.into_boxed_slice()),
         }
     }
 
@@ -451,21 +473,25 @@ pub enum BuildError {
     OverlappingIDs(Vec<u64>),
     /// Indicates that no handles have been added to the disruptor.
     EmptyGraph,
-    /// Indicates that some handles are not ordered with respect to this producer id. Unordered
-    /// producers may overlap buffer accesses with other handles, causing Undefined behaviour due
-    /// to mutable aliasing.
+    /// Indicates that these handle ids are not ordered with respect to this producer id. Unordered
+    /// producers are prohibited, as they may overlap mutable buffer accesses with other handles
+    /// running in other processes, potentially causing Undefined behaviour due to mutable aliasing.
     ///
     /// ## Example Causes
     /// ```
     /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
+    /// // lead ◄─ 1 ◄─ 2P
+    /// //    ▲
+    /// //    │
+    /// //    0
     /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::LeadProducer)
-    ///     .add_handle(2, Handle::Producer, Follows::Handles(vec![0]))
+    ///     .add_handle(2, Handle::Producer, Follows::Handles(vec![1]))
     ///     .build();
     ///
-    /// assert_eq!(result.unwrap_err(), BuildError::UnorderedProducer(vec![1], 2));
+    /// assert_eq!(result.unwrap_err(), BuildError::UnorderedProducer(vec![0], 2));
     /// ```
     /// Since producer `2` does not explicitly follow consumer `1`, it cannot be guaranteed that
     /// their buffer access do not overlap. We can fix this by adding id `1` to the `Follows` vec
@@ -474,6 +500,10 @@ pub enum BuildError {
     /// ```
     /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
+    /// // lead ◄─ 0 ◄─ 2 ◄─ 3 ◄─ 4 ◄─ 5P
+    /// //         ▲
+    /// //         │
+    /// //         1
     /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
     ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
@@ -494,11 +524,10 @@ pub enum BuildError {
     /// ```
     /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
-    /// // defines the following graph:
-    /// // lead ─► 0 ─► 1P ─► 2 ─► 3 ─► 7
-    /// //         |                    ▲
-    /// //         ▼                    |
-    /// //         4 ─► 5 ─► 6 ─-------─┘
+    /// // lead ◄─ 0 ◄─ 1P ◄─ 2 ◄─ 3 ◄─ 7
+    /// //         ▲                    │
+    /// //         │                    │
+    /// //         4 ◄─ 5 ◄─ 6 ◄────────┘
     /// let result = Builder::new(64, || 0)
     ///     .extend_handles([
     ///         (0, Handle::Consumer, Follows::LeadProducer),
@@ -541,14 +570,16 @@ pub enum BuildError {
     /// ```
     /// use ansa::{BuildError, Builder, Follows, Handle};
     ///
+    /// // lead ◄─ 0 ◄─ 1 ◄─ 2
+    /// //              │    ▲
+    /// //              └────┘
     /// let result = Builder::new(64, || 0)
     ///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-    ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
-    ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![1, 3])) // <- here
-    ///     .add_handle(3, Handle::Consumer, Follows::Handles(vec![2]))
+    ///     .add_handle(1, Handle::Consumer, Follows::Handles(vec![0, 2])) // <- here
+    ///     .add_handle(2, Handle::Consumer, Follows::Handles(vec![1]))
     ///     .build();
     ///
-    /// assert_eq!(result.unwrap_err(), BuildError::GraphCycle(2));
+    /// assert_eq!(result.unwrap_err(), BuildError::GraphCycle(1));
     /// ```
     GraphCycle(u64),
     /// An ID which is disconnected from the rest of the graph. Disconnected in this context means
@@ -601,8 +632,8 @@ fn validate_graph(graph: &U64Map<Vec<u64>>, roots: &U64Set) -> Result<Vec<Vec<u6
     let mut visited = U64Set::default();
     let mut chains = Vec::new();
     for node in roots {
-        let result = visit(*node, &mut visiting, &mut visited, Vec::new(), graph)?;
-        chains.extend(result);
+        let visited_chains = visit(*node, &mut visiting, &mut visited, Vec::new(), graph)?;
+        chains.extend(visited_chains);
     }
     for node in graph.keys() {
         if !visited.contains(node) {
@@ -725,6 +756,8 @@ pub struct Disruptor<E, W> {
     lead: Option<Producer<E, W, true>>,
     producers: U64Map<Producer<E, W, false>>,
     consumers: U64Map<Consumer<E, W>>,
+    #[cfg(debug_assertions)]
+    build_position: String,
 }
 
 impl<E, W> Disruptor<E, W> {
@@ -878,7 +911,8 @@ impl<E, W> Disruptor<E, W> {
 impl<E, W> Drop for Disruptor<E, W> {
     fn drop(&mut self) {
         if !self.is_empty() {
-            println!("WARNING: Disruptor not empty when dropped");
+            eprintln!("warning: Disruptor not empty when dropped, build location:");
+            eprintln!("   --> {}", self.build_position);
         }
     }
 }
@@ -1006,10 +1040,10 @@ mod tests {
         assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
 
-    // 0 ─► 1 ─► 2 ─► 3 ─► 7
-    // |              ▲
-    // ▼              |
-    // 4 ─► 5 ─► 6 ─-─┘
+    // 0 ◄─ 1 ◄─ 2 ◄─ 3 ◄─ 7
+    // ▲              │
+    // │              │
+    // 4 ◄─ 5 ◄─ 6 ◄──┘
     #[test]
     fn test_find_chains_fan_out_in_uneven() {
         let graph = U64Map::from_iter([
@@ -1027,10 +1061,10 @@ mod tests {
         assert_eq!(validate_graph(&graph, &roots), Ok(chains));
     }
 
-    // 0  ─► 1 ─► 2 ─► 3 ─► 7
-    // |               ▲
-    // ▼               |
-    // 4P ─► 5 ─► 6 ─-─┘
+    // 0  ◄─ 1 ◄─ 2 ◄─ 3 ◄─ 7
+    // ▲               │
+    // │               │
+    // 4P ◄─ 5 ◄─ 6 ◄──┘
     #[test]
     fn test_producer_partial_order() {
         let handles_map = U64Map::from_iter([
@@ -1051,10 +1085,10 @@ mod tests {
         )
     }
 
-    // 0 ─► 1 ─► 2 ─► 3P ─► 7
-    // |              ▲
-    // ▼              |
-    // 4 ─► 5 ─► 6 ─-─┘
+    // 0 ◄─ 1 ◄─ 2 ◄─ 3P ◄─ 7
+    // ▲              │
+    // │              │
+    // 4 ◄─ 5 ◄─ 6 ◄──┘
     #[test]
     fn test_producer_total_order() {
         let handles_map = U64Map::from_iter([
@@ -1072,10 +1106,10 @@ mod tests {
         assert_eq!(result, Ok(()))
     }
 
-    // 0P ─► 1 ─► 2 ─► 3 ─► 7
-    // |               ▲
-    // ▼               |
-    // 4  ─► 5 ─► 6 ─-─┘
+    // 0P ◄─ 1 ◄─ 2 ◄─ 3 ◄─ 7
+    // ▲               │
+    // │               │
+    // 4  ◄─ 5 ◄─ 6 ◄──┘
     #[test]
     fn test_producer_total_order2() {
         let handles_map = U64Map::from_iter([
@@ -1093,13 +1127,13 @@ mod tests {
         assert_eq!(result, Ok(()))
     }
 
-    // 0 ─► 1
-    // |    |
-    // ▼    ▼
-    // 2 ─► 3P ─► 4
-    //      |     |
-    //      ▼     ▼
-    //      5  ─► 6P
+    // 0 ◄─ 1
+    // ▲    ▲
+    // │    │
+    // 2 ◄─ 3P ◄─ 4
+    //      ▲     ▲
+    //      │     │
+    //      5  ◄─ 6P
     #[test]
     fn test_producer_total_order3() {
         let handles_map = U64Map::from_iter([
@@ -1121,9 +1155,9 @@ mod tests {
         assert_eq!(result, Ok(()))
     }
 
-    // 0 ─► 1 ─► 2 ─► 3 ─► 4P
-    // |
-    // ▼
+    // 0 ◄─ 1 ◄─ 2 ◄─ 3 ◄─ 4P
+    // ▲
+    // │
     // 5
     #[test]
     fn test_producer_partial_order2() {
@@ -1140,9 +1174,9 @@ mod tests {
         assert_eq!(result, Err(BuildError::UnorderedProducer(vec![0, 5], 4)))
     }
 
-    // 0 ─► 1 ─► 2 ─► 3 ─► 4
-    // |
-    // ▼
+    // 0 ◄─ 1 ◄─ 2 ◄─ 3 ◄─ 4
+    // ▲
+    // │
     // 5
     #[test]
     fn test_producer_total_order4() {
@@ -1157,6 +1191,21 @@ mod tests {
         let chains = vec![vec![0, 1, 2, 3, 4], vec![0, 5]];
         let result = validate_order(&handles_map, chains);
         assert_eq!(result, Ok(()))
+    }
+
+    // Lead ◄─ 1P
+    //    ▲
+    //    │
+    //    0
+    #[test]
+    fn test_producer_total_order5() {
+        let build_err = Builder::new(64, || 0i64)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Producer, Follows::LeadProducer)
+            .validate()
+            .unwrap_err();
+
+        assert_eq!(build_err, BuildError::UnorderedProducer(vec![0], 1))
     }
 
     #[test]
@@ -1207,6 +1256,19 @@ mod tests {
             .add_handle(0, Handle::Consumer, Follows::Handles(vec![8]))
             .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
             .build();
-        assert_eq!(result.err().unwrap(), BuildError::UnregisteredID(8))
+        assert_eq!(result.err().unwrap(), BuildError::UnregisteredID(8));
+    }
+
+    #[test]
+    fn test_build_ok() {
+        let result = Builder::new(32, || 0)
+            .add_handle(0, Handle::Consumer, Follows::LeadProducer)
+            .add_handle(1, Handle::Consumer, Follows::Handles(vec![0]))
+            .build();
+        assert!(result.is_ok());
+        let mut d = result.unwrap();
+        let _ = d.take_lead();
+        let _ = d.drain_consumers();
+        // no warning for non-empty disruptor should be printed
     }
 }
