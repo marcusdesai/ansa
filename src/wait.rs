@@ -29,10 +29,8 @@
 //! | [`WaitBusyHint`]                  | 0    |
 //! | [`WaitYield`]                     | 0    |
 //! | [`WaitSleep`]                     | 8    |
-//! | [`ConstWaitSleep`]                | 0    |
 //! | [`WaitPhased<W>`](WaitPhased)     | 16   |
 //! | [`Timeout<W>`](Timeout)           | 8    |
-//! | [`ConstTimeout<W>`](ConstTimeout) | 0    |
 //!
 //! # Duration Limits
 //!
@@ -449,43 +447,6 @@ impl Waiting for WaitSleep {
     }
 }
 
-/// Sleep the current thread on each iteration of the wait loop.
-///
-/// This type is zero-seized, making use of a constant value for sleep nanoseconds.
-///
-/// If sleep duration is a constant, then consider using this strategy.
-///
-/// The duration of sleep is limited to `u64::MAX` nanoseconds.
-///
-/// # Performance
-///
-/// Trades latency for CPU resource use, depending on the length of the sleep.
-///
-/// # Examples
-///
-/// ```
-/// use ansa::wait::ConstWaitSleep;
-///
-/// let wait = ConstWaitSleep::<100>; // sleep for 100 nanoseconds
-/// ```
-pub struct ConstWaitSleep<const NANOS: u64>;
-
-impl<const NANOS: u64> ConstWaitSleep<NANOS> {
-    const DURATION: Duration = Duration::from_nanos(NANOS);
-
-    /// Returns the number of nanoseconds this strategy will sleep for when waiting.
-    pub const fn sleep_nanos(&self) -> u64 {
-        NANOS
-    }
-}
-
-impl<const NANOS: u64> Waiting for ConstWaitSleep<NANOS> {
-    #[inline]
-    fn waiting(&self) {
-        std::thread::sleep(Self::DURATION)
-    }
-}
-
 /// Performs a phased back-off of strategies during the wait loop.
 ///
 /// This strategy busy spins, then yields, and finally calls the fallback strategy.
@@ -752,115 +713,6 @@ where
     }
 }
 
-/// Wrapper which provides timeout capabilities to strategies implementing `Waiting`.
-///
-/// This size of this type depends only on the inner wait strategy.
-///
-/// If a type, `T`, implements [`Waiting`], then `ConstTimeout<T>` implements [`TryWaitStrategy`].
-///
-/// This struct is not required for implementing `TryWaitStrategy`, it is only a convenience
-/// for automating implementations of timeouts.
-///
-/// The length of the timeout is limited to `u64::MAX` nanoseconds.
-///
-/// # Examples
-/// ```
-/// use ansa::*;
-/// use ansa::wait::*;
-/// use std::time::Duration;
-///
-/// // with a sleep duration of 100 nanoseconds
-/// let strategy = ConstTimeout::<_, 100>::new(WaitBusy);
-///
-/// let mut disruptor = Builder::new(64, || 0)
-///     .wait_strategy(strategy)
-///     .add_handle(0, Handle::Consumer, Follows::LeadProducer)
-///     .build()?;
-///
-/// let mut consumer = disruptor.take_consumer(0).unwrap();
-/// // consumer will time out waiting, as no events are available
-/// assert!(matches!(consumer.try_wait(5), Err(TimedOut)));
-///
-/// let mut producer = disruptor.take_lead().unwrap();
-/// // make some events available
-/// producer.try_wait(10).unwrap().consume();
-///
-/// assert!(consumer.try_wait(5).is_ok());
-/// # Ok::<(), BuildError>(())
-/// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[repr(transparent)]
-pub struct ConstTimeout<W, const NANOS: u64> {
-    strategy: W,
-}
-
-impl<W: Copy, const NANOS: u64> Copy for ConstTimeout<W, NANOS> {}
-
-impl<W, const NANOS: u64> ConstTimeout<W, NANOS> {
-    const DURATION: Duration = Duration::from_nanos(NANOS);
-
-    pub fn new(strategy: W) -> Self {
-        ConstTimeout { strategy }
-    }
-
-    /// Returns the duration till timeout, in nanoseconds.
-    ///
-    /// # Examples
-    /// ```
-    /// use ansa::wait::{ConstTimeout, WaitBusy};
-    ///
-    /// let timeout = ConstTimeout::<_, 200>::new(WaitBusy);
-    /// assert_eq!(timeout.nanos_till(), 200);
-    /// ```
-    pub const fn nanos_till(&self) -> u64 {
-        NANOS
-    }
-
-    pub fn get_ref(&self) -> &W {
-        &self.strategy
-    }
-
-    pub fn get_mut(&mut self) -> &mut W {
-        &mut self.strategy
-    }
-
-    /// Returns the wrapped wait strategy.
-    ///
-    /// # Examples
-    /// ```
-    /// use ansa::wait::{ConstTimeout, WaitBusy};
-    ///
-    /// let timeout = ConstTimeout::<_, 200>::new(WaitBusy);
-    ///
-    /// let _inner: WaitBusy = timeout.into_inner();
-    /// ```
-    pub fn into_inner(self) -> W {
-        self.strategy
-    }
-}
-
-unsafe impl<W, const NANOS: u64> TryWaitStrategy for ConstTimeout<W, NANOS>
-where
-    W: Waiting,
-{
-    type Error = TimedOut;
-
-    #[inline]
-    fn try_wait(&self, desired_seq: i64, barrier: &Barrier) -> Result<i64, Self::Error> {
-        let timer = Instant::now();
-        loop {
-            let barrier_seq = barrier.sequence();
-            if barrier_seq >= desired_seq {
-                break Ok(barrier_seq);
-            }
-            if timer.elapsed() > Self::DURATION {
-                break Err(TimedOut);
-            }
-            self.strategy.waiting()
-        }
-    }
-}
-
 #[allow(clippy::cast_possible_truncation)]
 #[inline]
 const fn truncate_u128(n: u128) -> u64 {
@@ -882,10 +734,8 @@ mod tests {
         assert_eq!(size_of::<WaitBusyHint>(), 0);
         assert_eq!(size_of::<WaitYield>(), 0);
         assert_eq!(size_of::<WaitSleep>(), 8);
-        assert_eq!(size_of::<ConstWaitSleep<100>>(), 0);
         assert_eq!(size_of::<WaitPhased<WaitBusy>>(), 16);
         assert_eq!(size_of::<Timeout<WaitBusy>>(), 8);
-        assert_eq!(size_of::<ConstTimeout<WaitBusy, 100>>(), 0);
     }
 
     #[test]
