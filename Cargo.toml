@@ -28,6 +28,11 @@ harness = false
 required-features = ["cache-padded"]
 
 [[bench]]
+name = "mpsc"
+harness = false
+required-features = ["cache-padded"]
+
+[[bench]]
 name = "count_500M"
 harness = false
 required-features = ["cache-padded"]

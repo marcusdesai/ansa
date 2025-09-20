@@ -31,7 +31,7 @@ fn new_sink() -> Arc<AtomicI64> {
 
 pub fn spsc_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc");
-    group.measurement_time(Duration::from_secs(15)).sample_size(500);
+    group.measurement_time(Duration::from_secs(5)).sample_size(500);
 
     for batch_size in BATCH_SIZES.into_iter() {
         group.throughput(Throughput::Elements(batch_size as u64));
