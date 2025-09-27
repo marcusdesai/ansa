@@ -2,7 +2,7 @@
 name = "ansa"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.80.1"
+rust-version = "1.90.0"
 license = "MIT OR Apache-2.0"
 description = "Disruptor pattern in rust"
 
@@ -10,7 +10,7 @@ description = "Disruptor pattern in rust"
 crossbeam-utils = { version = "0.8", optional = true }
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.7.0"
 crossbeam-channel = "0.5.14"
 disruptor = "3.3.0"
 rand = { version = "0.9.0", features = ["small_rng"] }

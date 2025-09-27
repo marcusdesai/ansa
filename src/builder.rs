@@ -416,6 +416,8 @@ where
                 Follows::Handles(ids) if ids.len() == 1 => {
                     Barrier::one(get_cursor(ids[0], &mut cursor_map))
                 }
+                // todo: randomise order of cursors in barrier::many, to help ease contention
+                //  between multiple consumers following the same set of cursors.
                 Follows::Handles(ids) => {
                     let follows_cursors = ids
                         .iter()

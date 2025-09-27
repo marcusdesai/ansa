@@ -2,7 +2,7 @@
 // https://github.com/nicholassm/disruptor-rs/blob/bd15292e34d2c4bb53cba5709e0cf23e9753ebb8/benches/spsc.rs
 // authored by: Nicholas Schultz-Møller
 
-use ansa::wait::{WaitBusy, Waiting};
+use ansa::wait::WaitBusy;
 use criterion::measurement::WallTime;
 use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
@@ -11,13 +11,13 @@ use crossbeam_channel::{bounded, TryRecvError};
 use disruptor::{BusySpin, Producer};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const QUEUE_SIZE: usize = 1024;
-const BATCH_SIZES: [usize; 4] = [1, 10, 100, 256];
+const QUEUE_SIZE: usize = 4096;
+const BATCH_SIZES: &[usize] = &[1, 10, 100, 256];
 const RNG_SEED: u64 = 10;
 
 #[derive(Copy, Clone, Default)]
@@ -34,11 +34,11 @@ pub fn spsc_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(5)).sample_size(500);
 
     for batch_size in BATCH_SIZES.into_iter() {
-        group.throughput(Throughput::Elements(batch_size as u64));
+        group.throughput(Throughput::Elements(*batch_size as u64));
         let param = format!("batch size: {}", batch_size);
-        crossbeam(&mut group, batch_size, &param);
-        disruptor(&mut group, batch_size, &param);
-        ansa(&mut group, batch_size, &param);
+        crossbeam(&mut group, *batch_size, &param);
+        disruptor(&mut group, *batch_size, &param);
+        ansa(&mut group, *batch_size, &param);
     }
     group.finish();
 }
@@ -85,7 +85,7 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
 
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+        move |event: &Event, _: i64, _: bool| {
             sink.store(event.data, Ordering::Release);
         }
     };
@@ -113,37 +113,62 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     });
 }
 
+#[derive(Copy, Clone)]
+enum Control {
+    Start,
+    End,
+}
+
 fn ansa(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
-    let sink = new_sink();
 
     let (producer, consumer) = ansa::spsc(QUEUE_SIZE, Event::default);
     let mut producer = producer.set_wait_strategy(WaitBusy);
-    let mut consumer = consumer.set_wait_strategy(WaitBusy.with_timeout(Duration::from_millis(5)));
+    let mut consumer = consumer.set_wait_strategy(WaitBusy);
 
+    let sink = new_sink();
+    let done = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel::<Control>();
+
+    let done_clone = Arc::clone(&done);
     let sink_clone = Arc::clone(&sink);
-    let consumer_thread = thread::spawn(move || {
-        while let Ok(events) = consumer.try_wait_range(1..) {
-            events.for_each(|event, _, _| sink_clone.store(event.data, Ordering::Release))
+    let consumer_thread = thread::spawn(move || loop {
+        match rx.recv() {
+            Ok(Control::Start) => {
+                while !done_clone.load(Ordering::Acquire) {
+                    consumer.wait_range(..).for_each(|event, _, _| {
+                        sink_clone.store(event.data, Ordering::Release);
+                    });
+                }
+                done_clone.store(false, Ordering::Release);
+            }
+            Ok(Control::End) | Err(_) => break,
         }
     });
 
     let benchmark_id = BenchmarkId::new("ansa", &param);
+    let tx_clone = tx.clone();
     group.bench_with_input(benchmark_id, &batch, move |b, &batch_size| {
         b.iter_custom(|iters| {
+            tx_clone.send(Control::Start).unwrap();
             let start = Instant::now();
+
             for _ in 0..iters {
                 let mut val = 0;
                 producer.wait(batch_size).for_each(|event, _, _| {
                     val = rng.random();
-                    event.data = val
+                    event.data = val;
                 });
                 while sink.load(Ordering::Acquire) != val {}
             }
-            start.elapsed()
+            let end = start.elapsed();
+            done.store(true, Ordering::Release);
+            while done.load(Ordering::Acquire) {}
+            end
         });
     });
 
+    tx.send(Control::End).unwrap();
     consumer_thread.join().expect("Should not have panicked.");
 }
 

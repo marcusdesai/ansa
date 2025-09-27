@@ -26,7 +26,7 @@ fn format_param() -> String {
 
 fn bench_count(c: &mut Criterion) {
     let mut group = c.benchmark_group("Count 500M");
-    group.measurement_time(Duration::from_secs(30));
+    group.measurement_time(Duration::from_secs(7));
 
     ansa(&mut group);
     disruptor(&mut group);

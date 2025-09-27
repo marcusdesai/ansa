@@ -375,7 +375,7 @@ impl<E, W, const LEAD: bool> Producer<E, W, LEAD> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.inner.cursor.sequence.load(Ordering::Relaxed)
+        self.inner.sequence_relaxed()
     }
 
     /// Returns the size of the ring buffer.
@@ -558,7 +558,7 @@ impl<E, W> Consumer<E, W> {
     /// ```
     #[inline]
     pub fn sequence(&self) -> i64 {
-        self.inner.cursor.sequence.load(Ordering::Relaxed)
+        self.inner.sequence_relaxed()
     }
 
     /// Returns the size of the ring buffer.
@@ -770,7 +770,7 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
 
     #[inline]
     fn wait_bounds(&self, size: i64) -> (i64, i64) {
-        let from_sequence = self.cursor.sequence.load(Ordering::Relaxed);
+        let from_sequence = self.sequence_relaxed();
         let batch_end = from_sequence + size;
         let till_sequence = if LEAD {
             batch_end - to_i64_saturated(self.buffer.size())
@@ -804,6 +804,11 @@ impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD> {
             Bound::Unbounded => available_batch,
         }
     }
+
+    #[inline]
+    fn sequence_relaxed(&self) -> i64 {
+        self.cursor.sequence.load(Ordering::Relaxed)
+    }
 }
 
 impl<E, W, const LEAD: bool> HandleInner<E, W, LEAD>
@@ -823,7 +828,6 @@ where
 
     // todo: wait for specific sequence to create a batch with
 
-    // todo: check that range: 0.. always returns immediately if no sequence available
     #[inline]
     fn wait_range<R>(&mut self, range: R) -> Batch<'_, E>
     where
@@ -836,12 +840,12 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min);
         let (from_seq, till_seq) = self.wait_bounds(to_i64_saturated(batch_min));
-        if self.available < till_seq.max(1) {
+        if self.available <= till_seq.max(1) {
             self.available = self.wait_strategy.wait(till_seq, &self.barrier);
         }
         debug_assert!(self.available >= till_seq);
-        let batch_max = self.range_batch_size(from_seq, range.end_bound());
-        self.as_batch(from_seq, batch_max)
+        let batch_size = self.range_batch_size(from_seq, range.end_bound());
+        self.as_batch(from_seq, batch_size)
     }
 }
 
@@ -872,12 +876,12 @@ where
         };
         debug_assert!(self.buffer.size() >= batch_min);
         let (from_seq, till_seq) = self.wait_bounds(to_i64_saturated(batch_min));
-        if self.available < till_seq.max(1) {
+        if self.available <= till_seq.max(1) {
             self.available = self.wait_strategy.try_wait(till_seq, &self.barrier)?;
         }
         debug_assert!(self.available >= till_seq);
-        let batch_max = self.range_batch_size(from_seq, range.end_bound());
-        Ok(self.as_batch(from_seq, batch_max))
+        let batch_size = self.range_batch_size(from_seq, range.end_bound());
+        Ok(self.as_batch(from_seq, batch_size))
     }
 }
 
@@ -1444,6 +1448,84 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_range_no_wait() {
+        let buffer = Arc::new(RingBuffer::from_factory(64, || 0));
+        let lead_cursor = Arc::new(Cursor::start());
+        let follows_cursor = Arc::new(Cursor::start());
+
+        let mut lead_handle = HandleInner::<_, _, true>::new(
+            Arc::clone(&lead_cursor),
+            Barrier::one(Arc::clone(&follows_cursor)),
+            Arc::clone(&buffer),
+            WaitBusy,
+        );
+
+        let mut follows_handle = HandleInner::<_, _, false>::new(
+            Arc::clone(&follows_cursor),
+            Barrier::one(Arc::clone(&lead_cursor)),
+            Arc::clone(&buffer),
+            WaitBusy,
+        );
+
+        assert_eq!(lead_handle.sequence_relaxed(), CURSOR_START);
+        assert_eq!(follows_handle.sequence_relaxed(), CURSOR_START);
+
+        assert_eq!(lead_handle.wait_range(..).size, 64);
+        assert_eq!(follows_handle.wait_range(..).size, 0);
+
+        lead_handle.wait_range(..).consume();
+        assert_eq!(lead_handle.wait_range(..).size, 0);
+
+        follows_handle.wait_range(..).consume();
+        assert_eq!(follows_handle.wait_range(..).size, 0);
+    }
+
+    #[test]
+    fn test_wait_range_one_off() {
+        let buffer = Arc::new(RingBuffer::from_factory(64, || 0));
+        let lead_cursor = Arc::new(Cursor::start());
+        let follows_cursor = Arc::new(Cursor::start());
+
+        let mut lead_handle = HandleInner::<_, _, true>::new(
+            Arc::clone(&lead_cursor),
+            Barrier::one(Arc::clone(&follows_cursor)),
+            Arc::clone(&buffer),
+            WaitBusy,
+        );
+
+        let mut follows_handle = HandleInner::<_, _, false>::new(
+            Arc::clone(&follows_cursor),
+            Barrier::one(Arc::clone(&lead_cursor)),
+            Arc::clone(&buffer),
+            WaitBusy,
+        );
+
+        lead_handle.wait(1).consume();
+        follows_handle.wait(1).consume();
+
+        assert_eq!(lead_handle.sequence_relaxed(), 0);
+        assert_eq!(follows_handle.sequence_relaxed(), 0);
+
+        lead_handle.wait(1).consume();
+        assert_eq!(lead_handle.sequence_relaxed(), 1);
+
+        follows_handle.wait_range(..);
+        assert_eq!(follows_handle.barrier.sequence(), 1);
+        assert_eq!(follows_handle.available, 1);
+
+        follows_handle.wait(1).consume();
+        assert_eq!(follows_handle.sequence_relaxed(), 1);
+
+        lead_handle.wait(1).consume();
+        assert_eq!(lead_handle.sequence_relaxed(), 2);
+
+        let batch_size = follows_handle.wait_range(..).size;
+        assert_eq!(follows_handle.barrier.sequence(), 2);
+        assert_eq!(follows_handle.available, 2);
+        assert_eq!(batch_size, 1);
+    }
+
+    #[test]
     fn test_size_zero_apply() {
         let buffer = Arc::new(RingBuffer::from_factory(16, || 0));
         let mut lead_handle = HandleInner::<_, _, true>::new(
@@ -1453,14 +1535,14 @@ mod tests {
             WaitBusy,
         );
 
-        let sequence_before_apply = lead_handle.cursor.sequence.load(Ordering::Relaxed);
+        let sequence_before_apply = lead_handle.sequence_relaxed();
 
         let batch = lead_handle.wait(0);
         assert_eq!(batch.size, 0);
 
         batch.apply(|_, _, _| assert!(false));
         // sequence should not have moved and the apply function should not have been called
-        let sequence_after_apply = lead_handle.cursor.sequence.load(Ordering::Relaxed);
+        let sequence_after_apply = lead_handle.sequence_relaxed();
         assert_eq!(sequence_before_apply, sequence_after_apply);
     }
 }
