@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const QUEUE_SIZE: usize = 4096;
-const BATCH_SIZES: &[usize] = &[1, 10, 100, 256];
+const BATCH_SIZES: &[usize] = &[256, 100, 10, 1];
 const RNG_SEED: u64 = 10;
 
 #[derive(Copy, Clone, Default)]
@@ -113,46 +113,30 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     });
 }
 
-#[derive(Copy, Clone)]
-enum Control {
-    Start,
-    End,
-}
-
 fn ansa(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
+    let sink = new_sink();
 
     let (producer, consumer) = ansa::spsc(QUEUE_SIZE, Event::default);
     let mut producer = producer.set_wait_strategy(WaitBusy);
     let mut consumer = consumer.set_wait_strategy(WaitBusy);
 
-    let sink = new_sink();
     let done = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = std::sync::mpsc::channel::<Control>();
 
     let done_clone = Arc::clone(&done);
     let sink_clone = Arc::clone(&sink);
-    let consumer_thread = thread::spawn(move || loop {
-        match rx.recv() {
-            Ok(Control::Start) => {
-                while !done_clone.load(Ordering::Acquire) {
-                    consumer.wait_range(..).for_each(|event, _, _| {
-                        sink_clone.store(event.data, Ordering::Release);
-                    });
-                }
-                done_clone.store(false, Ordering::Release);
-            }
-            Ok(Control::End) | Err(_) => break,
+    let consumer_thread = thread::spawn(move || {
+        while !done_clone.load(Ordering::Relaxed) {
+            consumer.wait_range(..).for_each(|event, _, _| {
+                sink_clone.store(event.data, Ordering::Release);
+            });
         }
     });
 
     let benchmark_id = BenchmarkId::new("ansa", &param);
-    let tx_clone = tx.clone();
     group.bench_with_input(benchmark_id, &batch, move |b, &batch_size| {
         b.iter_custom(|iters| {
-            tx_clone.send(Control::Start).unwrap();
             let start = Instant::now();
-
             for _ in 0..iters {
                 let mut val = 0;
                 producer.wait(batch_size).for_each(|event, _, _| {
@@ -161,14 +145,11 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
                 });
                 while sink.load(Ordering::Acquire) != val {}
             }
-            let end = start.elapsed();
-            done.store(true, Ordering::Release);
-            while done.load(Ordering::Acquire) {}
-            end
+            start.elapsed()
         });
     });
 
-    tx.send(Control::End).unwrap();
+    done.store(true, Ordering::Relaxed);
     consumer_thread.join().expect("Should not have panicked.");
 }
 

@@ -606,7 +606,7 @@ where
     /// If a lower bound is provided, it must be less than the buffer size.
     ///
     /// Any range which starts from 0 or is unbounded enables non-blocking waits for
-    /// [`well-behaved`] [`WaitStrategy`] implementations. For example, `..` will never wait. // todo: test
+    /// [`well-behaved`] [`WaitStrategy`] implementations. For example, `..` will never wait.
     ///
     /// # Examples
     ///
@@ -898,7 +898,13 @@ impl<E> Batch<'_, E> {
         // SAFETY: Acquire-Release barrier ensures following handles cannot access this sequence
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
-        unsafe { self.buffer.apply(self.current + 1, self.size, f) };
+        unsafe {
+            if self.size <= 10 {
+                self.buffer.apply_small(self.current + 1, self.size, f)
+            } else {
+                self.buffer.apply(self.current + 1, self.size, f)
+            }
+        };
         let seq_end = self.current + to_i64_saturated(self.size);
         self.cursor.sequence.store(seq_end, Ordering::Release);
     }

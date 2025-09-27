@@ -208,9 +208,9 @@ checksum = "43da5946c66ffcc7745f48db692ffbb10a83bfe0afd96235c5c2a4fb23994929"
 
 [[package]]
 name = "disruptor"
-version = "3.3.0"
+version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a71c931f275f8b984c6eea8b4e65da3f674d2b0e2f5dd8b0804b09075dd7e119"
+checksum = "1eb865e5530dc4c314f08a2503a978b18b6df7c9f40b8a2048b31f76d2e8c9fe"
 dependencies = [
  "core_affinity",
  "crossbeam-utils",

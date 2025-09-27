@@ -8,7 +8,7 @@ struct Event {
 }
 
 fn main() {
-    let batch = 2048_u32;
+    let batch = 2048;
     let queue = 2_usize.pow(17);
     let num = black_box(1_000_000_000);
 

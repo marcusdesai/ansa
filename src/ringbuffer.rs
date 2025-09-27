@@ -12,7 +12,7 @@ use core::cell::UnsafeCell;
 #[derive(Debug)]
 pub(crate) struct RingBuffer<E> {
     buf: Box<[UnsafeCell<E>]>,
-    mask: usize,
+    mask: i64,
 }
 
 // SAFETY: `RingBuffer` provides an API that does not, by itself, guarantee safe references to a
@@ -30,7 +30,7 @@ impl<E> RingBuffer<E> {
     pub(crate) fn from_factory(size: usize, mut factory: impl FnMut() -> E) -> Self {
         debug_assert!(size > 0 && size.is_power_of_two());
         let buf = (0..size).map(|_| UnsafeCell::new(factory())).collect();
-        let mask = size - 1;
+        let mask = (size - 1) as i64;
         RingBuffer { buf, mask }
     }
 
@@ -42,7 +42,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(size > 0 && size.is_power_of_two());
         // SAFETY: UnsafeCell<E> has the same size and layout as E
         let buf: Box<[UnsafeCell<E>]> = unsafe { core::mem::transmute(buf) };
-        let mask = size - 1;
+        let mask = (size - 1) as i64;
         RingBuffer { buf, mask }
     }
 
@@ -91,7 +91,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         // if seq is cast to usize before masking, it may be incorrectly truncated.
-        let index = (seq & self.mask as i64) as usize;
+        let index = (seq & self.mask) as usize;
         // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
         // guaranteed inbounds by the caller ensuring `size < self.size()`.
         unsafe {
@@ -114,6 +114,23 @@ impl<E> RingBuffer<E> {
         }
     }
 
+    #[cold]
+    #[inline]
+    pub(crate) unsafe fn apply_small<F>(&self, seq: i64, size: usize, mut func: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        debug_assert!(seq >= 0);
+        debug_assert!(size < self.size());
+        let end = seq + size as i64 - 1;
+        (seq..=end).for_each(|s| {
+            let index = (s & self.mask) as usize;
+            // SAFETY: index will always be inbounds after masking
+            let ptr = unsafe { self.buf.get_unchecked(index).get() };
+            func(ptr, s, s == end)
+        })
+    }
+
     /// Tries to apply a closure to `size` number of buffer elements, starting from the element at
     /// `seq`.
     ///
@@ -127,7 +144,7 @@ impl<E> RingBuffer<E> {
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
         // if seq is cast to usize before masking, it may be incorrectly truncated.
-        let index = (seq & self.mask as i64) as usize;
+        let index = (seq & self.mask) as usize;
         // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
         // guaranteed inbounds by caller ensuring `size < self.size()`.
         unsafe {

@@ -59,7 +59,7 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>) {
 }
 
 fn disruptor(group: &mut BenchmarkGroup<WallTime>) {
-    const BATCH: i64 = 256;
+    const BATCH: i64 = 1024;
     const QUEUE: usize = 2_usize.pow(12);
 
     let id = BenchmarkId::new("disruptor", format_param());

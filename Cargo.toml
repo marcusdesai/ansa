@@ -12,7 +12,7 @@ crossbeam-utils = { version = "0.8", optional = true }
 [dev-dependencies]
 criterion = "0.7.0"
 crossbeam-channel = "0.5.14"
-disruptor = "3.3.0"
+disruptor = "3.6.1"
 rand = { version = "0.9.0", features = ["small_rng"] }
 
 [features]
@@ -20,6 +20,7 @@ cache-padded = ["crossbeam-utils"]
 
 [profile.profiling]
 inherits = "release"
+panic = "abort"
 debug = true
 
 [[bench]]
