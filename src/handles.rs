@@ -223,23 +223,19 @@ impl<E, W, const LEAD: bool> MultiProducer<E, W, LEAD> {
 
     #[inline]
     fn wait_bounds(&self, size: i64) -> (i64, i64) {
-        let mut current_claim = self.claim.sequence.load(Ordering::Relaxed);
-        let mut claim_end = current_claim + size;
-        while let Err(new_current) = self.claim.sequence.compare_exchange(
-            current_claim,
-            claim_end,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            current_claim = new_current;
-            claim_end = new_current + size;
+        loop {
+            let current_claim = self.claim.sequence.load(Ordering::Acquire);
+            let claim_end = current_claim + size;
+            let prev = self.claim.sequence.fetch_max(claim_end, Ordering::AcqRel);
+            if prev <= current_claim {
+                let desired_seq = if LEAD {
+                    claim_end - to_i64_saturated(self.inner.buffer.size())
+                } else {
+                    claim_end
+                };
+                break (current_claim, desired_seq);
+            }
         }
-        let desired_seq = if LEAD {
-            claim_end - to_i64_saturated(self.inner.buffer.size())
-        } else {
-            claim_end
-        };
-        (current_claim, desired_seq)
     }
 
     #[inline]
