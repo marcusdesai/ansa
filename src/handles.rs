@@ -899,7 +899,9 @@ impl<E> Batch<'_, E> {
         // before this handle has finished interacting with it. Construction of the disruptor
         // guarantees producers don't overlap with other handles, thus no mutable aliasing.
         unsafe {
-            if self.size <= 10 {
+            if self.size == 1 {
+                self.buffer.apply_one(self.current + 1, f)
+            } else if self.size <= 10 {
                 self.buffer.apply_small(self.current + 1, self.size, f)
             } else {
                 self.buffer.apply(self.current + 1, self.size, f)

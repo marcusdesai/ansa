@@ -84,34 +84,46 @@ impl<E> RingBuffer<E> {
     /// It is permitted for multiple mutable pointers to exist simultaneously, as the aliasing
     /// rules do not apply to pointers.
     #[inline]
-    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, mut func: F)
+    pub(crate) unsafe fn apply<F>(&self, seq: i64, size: usize, func: F)
     where
         F: FnMut(*mut E, i64, bool),
     {
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        // if seq is cast to usize before masking, it may be incorrectly truncated.
         let index = (seq & self.mask) as usize;
         // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
         // guaranteed inbounds by the caller ensuring `size < self.size()`.
         unsafe {
             let end = seq + size as i64 - 1;
             if index + size > self.size() {
-                // the requested batch wraps the buffer
-                let diff = self.size() - index;
-                self.iter(index, self.size())
-                    .zip(seq..)
-                    .for_each(|(elem, s)| func(elem.get(), s, false));
-
-                self.iter(0, size - diff)
-                    .zip(seq + diff as i64..)
-                    .for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.apply_wrapping(seq, size, index, end, func)
             } else {
-                self.iter(index, index + size)
-                    .zip(seq..)
-                    .for_each(|(elem, s)| func(elem.get(), s, s == end))
+                self.apply_direct(seq, size, index, end, func)
             }
         }
+    }
+
+    #[inline]
+    unsafe fn apply_direct<F>(&self, seq: i64, size: usize, index: usize, end: i64, mut func: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        self.iter(index, index + size)
+            .zip(seq..)
+            .for_each(|(elem, s)| func(elem.get(), s, s == end))
+    }
+
+    #[cold]
+    #[inline]
+    unsafe fn apply_wrapping<F>(&self, seq: i64, size: usize, index: usize, end: i64, mut func: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        let diff = self.size() - index;
+        self.iter(index, self.size())
+            .zip(seq..)
+            .chain(self.iter(0, size - diff).zip(seq + diff as i64..))
+            .for_each(|(elem, s)| func(elem.get(), s, s == end))
     }
 
     #[cold]
@@ -131,6 +143,19 @@ impl<E> RingBuffer<E> {
         })
     }
 
+    #[cold]
+    #[inline]
+    pub(crate) unsafe fn apply_one<F>(&self, seq: i64, mut func: F)
+    where
+        F: FnMut(*mut E, i64, bool),
+    {
+        debug_assert!(seq >= 0);
+        let index = (seq & self.mask) as usize;
+        // SAFETY: index will always be inbounds after masking
+        let ptr = unsafe { self.buf.get_unchecked(index).get() };
+        func(ptr, seq, true)
+    }
+
     /// Tries to apply a closure to `size` number of buffer elements, starting from the element at
     /// `seq`.
     ///
@@ -143,7 +168,6 @@ impl<E> RingBuffer<E> {
         let mut func = func;
         debug_assert!(seq >= 0);
         debug_assert!(size < self.size());
-        // if seq is cast to usize before masking, it may be incorrectly truncated.
         let index = (seq & self.mask) as usize;
         // SAFETY: the first arg to self.iter will always be inbounds, while the second arg is
         // guaranteed inbounds by caller ensuring `size < self.size()`.

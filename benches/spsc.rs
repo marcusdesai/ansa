@@ -44,17 +44,23 @@ pub fn spsc_benchmark(c: &mut Criterion) {
 }
 
 fn crossbeam(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
+    #[derive(Copy, Clone, Default)]
+    struct EndEvent {
+        event: Event,
+        end: bool,
+    }
+
     let mut rng = SmallRng::seed_from_u64(RNG_SEED);
     let sink = new_sink();
 
-    let (s, r) = bounded::<Event>(QUEUE_SIZE);
+    let (s, r) = bounded::<EndEvent>(QUEUE_SIZE);
     let receiver = {
         let sink = Arc::clone(&sink);
         thread::spawn(move || loop {
             match r.try_recv() {
-                Ok(event) => sink.store(event.data, Ordering::Release),
-                Err(TryRecvError::Empty) => continue,
+                Ok(event) if event.end => sink.store(event.event.data, Ordering::Release),
                 Err(TryRecvError::Disconnected) => break,
+                _ => continue,
             }
         })
     };
@@ -65,9 +71,12 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
             let start = Instant::now();
             for _ in 0..iters {
                 let mut val = 0;
-                for _ in 0..batch_size {
+                for i in 0..batch_size {
                     val = rng.random();
-                    let event = Event { data: val };
+                    let event = EndEvent {
+                        event: Event { data: val },
+                        end: i == batch_size - 1,
+                    };
                     while s.try_send(event).is_err() {}
                 }
                 while sink.load(Ordering::Acquire) != val {}
@@ -85,8 +94,10 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
 
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _: i64, _: bool| {
-            sink.store(event.data, Ordering::Release);
+        move |event: &Event, _: i64, end: bool| {
+            if end {
+                sink.store(event.data, Ordering::Release);
+            }
         }
     };
 
@@ -127,8 +138,10 @@ fn ansa(group: &mut BenchmarkGroup<WallTime>, batch: usize, param: &str) {
     let sink_clone = Arc::clone(&sink);
     let consumer_thread = thread::spawn(move || {
         while !done_clone.load(Ordering::Relaxed) {
-            consumer.wait_range(..).for_each(|event, _, _| {
-                sink_clone.store(event.data, Ordering::Release);
+            consumer.wait_range(..).for_each(|event, _, end| {
+                if end {
+                    sink_clone.store(event.data, Ordering::Release);
+                }
             });
         }
     });
